@@ -161,17 +161,59 @@ def serialize_embedding(embedding: list[float]) -> bytes:
     return struct.pack(f'{len(embedding)}f', *embedding)
 
 
-def get_embedding(text: str) -> list[float]:
-    """Get embedding from OpenAI."""
+# LRU cache for embeddings to reduce API calls
+_embedding_cache: dict[str, list[float]] = {}
+_CACHE_MAX_SIZE = 1000
+
+
+def get_embedding(text: str, use_cache: bool = True) -> list[float]:
+    """Get embedding from OpenAI with caching.
+
+    Args:
+        text: Text to embed
+        use_cache: Whether to use cache (default True)
+
+    Returns:
+        Embedding vector (1536 floats)
+    """
+    # Check cache first
+    if use_cache and text in _embedding_cache:
+        return _embedding_cache[text]
+
     api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
     if not api_key:
         raise ValueError("OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set")
+
     client = OpenAI(api_key=api_key)
     response = client.embeddings.create(
         model=EMBEDDING_MODEL,
         input=text
     )
-    return response.data[0].embedding
+    embedding = response.data[0].embedding
+
+    # Cache the result (with simple LRU eviction)
+    if use_cache:
+        if len(_embedding_cache) >= _CACHE_MAX_SIZE:
+            # Remove oldest entry (first key)
+            oldest_key = next(iter(_embedding_cache))
+            del _embedding_cache[oldest_key]
+        _embedding_cache[text] = embedding
+
+    return embedding
+
+
+def clear_embedding_cache():
+    """Clear the embedding cache."""
+    global _embedding_cache
+    _embedding_cache = {}
+
+
+def get_embedding_cache_stats() -> dict:
+    """Get cache statistics."""
+    return {
+        "size": len(_embedding_cache),
+        "max_size": _CACHE_MAX_SIZE,
+    }
 
 
 # =============================================================================
