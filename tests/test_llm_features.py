@@ -554,3 +554,117 @@ class TestRelationAutoDetection:
 
         assert "question" in intents
         assert "solution" in intents
+
+
+class TestSubtopicHierarchy:
+    """Test sub-topic detection and hierarchy."""
+
+    def test_detect_subtopic_patterns(self):
+        """Detect patterns that indicate drilling into a sub-topic."""
+        from indexer import detect_subtopic
+
+        assert detect_subtopic("Specifically, let's look at the auth module")
+        assert detect_subtopic("Diving into the database schema")
+        assert detect_subtopic("Let's dig into the caching layer")
+        assert detect_subtopic("More specifically, the token refresh logic")
+        assert detect_subtopic("Focusing on the error handling")
+
+        # Should not match normal content
+        assert not detect_subtopic("We decided to use PostgreSQL")
+        assert not detect_subtopic("The API returns JSON")
+
+    def test_detect_return_to_parent(self):
+        """Detect patterns that indicate returning to parent topic."""
+        from indexer import detect_return_to_parent
+
+        assert detect_return_to_parent("Back to the bigger picture")
+        assert detect_return_to_parent("Stepping back, let's consider the overall architecture")
+        assert detect_return_to_parent("More broadly, the system needs to scale")
+        assert detect_return_to_parent("Overall, the design is solid")
+
+        # Should not match normal content
+        assert not detect_return_to_parent("We need to implement this feature")
+        assert not detect_return_to_parent("The database is configured")
+
+    def test_subtopic_creates_child_span(self, tmp_path, monkeypatch):
+        """Sub-topic detection creates child spans."""
+        import memory_db
+        from indexer import index_transcript
+
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        memory_db.init_db()
+
+        # Mock embeddings
+        fake_embedding = [0.1] * 1536
+        monkeypatch.setattr("memory_db.get_embedding", lambda text, use_cache=True: fake_embedding)
+        monkeypatch.setattr("indexer.get_embedding", lambda text, use_cache=True: fake_embedding)
+
+        # Create transcript with sub-topic (correct format)
+        transcript = tmp_path / "test-session.jsonl"
+        messages = [
+            {"type": "user", "message": {"content": "Let's discuss database design"}},
+            {"type": "assistant", "message": {"content": "Good idea, we should consider the schema"}},
+            {"type": "user", "message": {"content": "Specifically, let's look at the user table"}},
+            {"type": "assistant", "message": {"content": "The user table needs email and password"}},
+        ]
+        with open(transcript, "w") as f:
+            for i, msg in enumerate(messages):
+                f.write(json.dumps(msg) + "\n")
+
+        result = index_transcript(str(transcript))
+
+        # Should have created spans
+        assert result["spans_created"] >= 1
+
+        # Check for parent-child relationship in spans
+        db = memory_db.get_db()
+        cursor = db.execute("""
+            SELECT id, parent_id, depth, name FROM spans ORDER BY start_line
+        """)
+        spans = [dict(row) for row in cursor]
+        db.close()
+
+        # Should have at least one span with depth > 0 (the sub-topic)
+        depths = [s["depth"] for s in spans]
+        assert any(d > 0 for d in depths), f"Expected at least one nested span, got depths: {depths}"
+
+    def test_return_to_parent_pops_stack(self, tmp_path, monkeypatch):
+        """Return to parent closes sub-topic span."""
+        import memory_db
+        from indexer import index_transcript
+
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        memory_db.init_db()
+
+        # Mock embeddings
+        fake_embedding = [0.1] * 1536
+        monkeypatch.setattr("memory_db.get_embedding", lambda text, use_cache=True: fake_embedding)
+        monkeypatch.setattr("indexer.get_embedding", lambda text, use_cache=True: fake_embedding)
+
+        # Create transcript with sub-topic and return (correct format)
+        transcript = tmp_path / "test-session.jsonl"
+        messages = [
+            {"type": "user", "message": {"content": "Let's discuss database design"}},
+            {"type": "assistant", "message": {"content": "Specifically, let's dig into indexing"}},
+            {"type": "user", "message": {"content": "We need indexes on user_id"}},
+            {"type": "assistant", "message": {"content": "Stepping back, the overall schema looks good"}},
+        ]
+        with open(transcript, "w") as f:
+            for i, msg in enumerate(messages):
+                f.write(json.dumps(msg) + "\n")
+
+        result = index_transcript(str(transcript))
+
+        # Check that sub-topic span was closed
+        db = memory_db.get_db()
+        cursor = db.execute("""
+            SELECT id, parent_id, depth, end_line FROM spans WHERE depth > 0
+        """)
+        sub_spans = [dict(row) for row in cursor]
+        db.close()
+
+        # Sub-topic spans should have end_line set (closed)
+        for span in sub_spans:
+            assert span["end_line"] is not None, f"Sub-span {span['id']} not closed"

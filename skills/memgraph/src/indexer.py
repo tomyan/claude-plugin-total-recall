@@ -26,6 +26,139 @@ except ImportError:
 # Valid intent types
 VALID_INTENTS = {"decision", "conclusion", "question", "problem", "solution", "todo", "context"}
 
+# Bad topic name patterns - names matching these should be improved
+_BAD_TOPIC_PATTERNS = [
+    r"^session\s*(start|begin|init)",  # Generic session start
+    r"^(okay|alright|now|so|well),?\s*(let'?s|we)",  # Action phrases
+    r"^let'?s\s+(build|start|do|work|move|switch)",  # Let's do X
+    r"^(hi|hello|hey)\b",  # Greetings
+    r"^(introduction|overview|summary)$",  # Too generic
+    r"^\*\*.*\*\*$",  # Just markdown bold
+    r"^(the|a|an)\s+\w+$",  # Just "the X" or "a X"
+]
+_BAD_TOPIC_RE = re.compile("|".join(_BAD_TOPIC_PATTERNS), re.IGNORECASE)
+
+
+def clean_topic_name(name: str) -> str:
+    """Clean up a topic name, removing markdown and action phrases.
+
+    Args:
+        name: Raw topic name
+
+    Returns:
+        Cleaned topic name
+    """
+    # Strip whitespace
+    name = name.strip()
+
+    # Remove markdown formatting
+    name = re.sub(r'\*\*([^*]+)\*\*', r'\1', name)  # Bold
+    name = re.sub(r'\*([^*]+)\*', r'\1', name)  # Italic
+    name = re.sub(r'`([^`]+)`', r'\1', name)  # Code
+    name = re.sub(r'^#+\s*', '', name)  # Headers
+
+    # Remove action prefixes
+    action_prefixes = [
+        r"^(okay|alright|now|so|well|right),?\s*",
+        r"^let'?s\s+(now\s+)?",
+        r"^(we should|we need to|i'?ll|we'?ll)\s+",
+        r"^(first|next|then|finally),?\s*",
+    ]
+    for pattern in action_prefixes:
+        name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+
+    # Capitalize first letter
+    if name and name[0].islower():
+        name = name[0].upper() + name[1:]
+
+    # Truncate to reasonable length
+    if len(name) > 80:
+        # Try to cut at word boundary
+        cut_point = name.rfind(' ', 0, 80)
+        if cut_point > 40:
+            name = name[:cut_point]
+        else:
+            name = name[:80]
+
+    return name.strip()
+
+
+def is_bad_topic_name(name: str) -> bool:
+    """Check if a topic name is too generic or poorly formatted.
+
+    Args:
+        name: Topic name to check
+
+    Returns:
+        True if the name is bad and should be improved
+    """
+    if not name or len(name) < 5:
+        return True
+
+    if _BAD_TOPIC_RE.search(name):
+        return True
+
+    return False
+
+
+def generate_topic_name_from_content(messages: list[dict], fallback: str = "Discussion") -> str:
+    """Generate a topic name from message content using LLM.
+
+    Args:
+        messages: List of message dicts with content
+        fallback: Fallback name if LLM fails
+
+    Returns:
+        Generated topic name
+    """
+    if not messages:
+        return fallback
+
+    # Get API key
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key or OpenAI is None:
+        # No LLM available - extract key terms from first message
+        first_content = messages[0].get("content", "")[:200]
+        # Try to find a meaningful phrase
+        cleaned = clean_topic_name(first_content)
+        if not is_bad_topic_name(cleaned):
+            return cleaned
+        return fallback
+
+    # Build prompt with first few messages
+    contents = [m.get("content", "")[:300] for m in messages[:5] if m.get("content")]
+    if not contents:
+        return fallback
+
+    combined = "\n---\n".join(contents)
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Generate a concise topic name (3-8 words) for this conversation excerpt.
+The name should describe WHAT is being discussed, not actions being taken.
+Good: "ESP32 I2C Sensor Integration", "Rate Limiting Design", "User Authentication Flow"
+Bad: "Let's build the project", "Session start", "Working on code"
+Return just the topic name, nothing else."""
+                },
+                {"role": "user", "content": combined}
+            ],
+            max_tokens=30,
+            temperature=0.3,
+        )
+        name = response.choices[0].message.content.strip()
+        # Clean up any quotes
+        name = name.strip('"\'')
+        logger.info(f"Generated topic name: {name}")
+        return name
+    except Exception as e:
+        logger.warning(f"Topic name generation failed: {e}")
+        return fallback
+
 
 # Topic shift patterns
 _TRANSITION_PATTERNS = [
@@ -44,6 +177,67 @@ _TRANSITION_PATTERNS = [
 ]
 
 _TRANSITION_RE = re.compile("|".join(_TRANSITION_PATTERNS), re.IGNORECASE)
+
+
+# Sub-topic patterns (drilling down into a topic)
+_SUBTOPIC_PATTERNS = [
+    r"specifically,",
+    r"diving into",
+    r"let'?s dig into",
+    r"let'?s look at.+in detail",
+    r"more specifically",
+    r"in particular,",
+    r"focusing on",
+    r"to be more specific",
+    r"regarding the.+part",
+    r"as for the",
+    r"on the topic of",
+    r"breaking down",
+    r"within that,",
+]
+
+_SUBTOPIC_RE = re.compile("|".join(_SUBTOPIC_PATTERNS), re.IGNORECASE)
+
+
+# Return-to-parent patterns (going back up the hierarchy)
+_RETURN_PATTERNS = [
+    r"back to the bigger picture",
+    r"stepping back,",
+    r"zooming out,",
+    r"returning to",
+    r"more broadly,",
+    r"on a higher level",
+    r"overall,",
+    r"in summary,",
+    r"to summarize,",
+    r"wrapping up",
+]
+
+_RETURN_RE = re.compile("|".join(_RETURN_PATTERNS), re.IGNORECASE)
+
+
+def detect_subtopic(content: str) -> bool:
+    """Detect if content is diving into a sub-topic.
+
+    Args:
+        content: Message content
+
+    Returns:
+        True if sub-topic dive detected
+    """
+    return bool(_SUBTOPIC_RE.search(content.lower()))
+
+
+def detect_return_to_parent(content: str) -> bool:
+    """Detect if content is returning to parent topic.
+
+    Args:
+        content: Message content
+
+    Returns:
+        True if return to parent detected
+    """
+    return bool(_RETURN_RE.search(content.lower()))
 
 
 def detect_topic_shift(content: str, context: dict) -> bool:
@@ -817,13 +1011,24 @@ def index_transcript(
             "spans_created": 0,
         }
 
+    # Progress tracking
+    import sys
+    total_messages = len(messages)
+    print(f"Indexing {total_messages} messages from {Path(file_path).name}...", file=sys.stderr)
+
     # Extract session name
     session = memory_db.extract_session_from_path(file_path)
 
     # Get or create current span
     current_span = memory_db.get_open_span(session)
     current_span_id = current_span["id"] if current_span else None
+    current_depth = current_span["depth"] if current_span else 0
     span_messages = []
+
+    # Stack of spans for hierarchy (each entry: {"id": int, "depth": int, "messages": list})
+    span_stack: list[dict] = []
+    if current_span_id:
+        span_stack.append({"id": current_span_id, "depth": current_depth, "messages": []})
 
     ideas_created = 0
     spans_created = 0
@@ -834,26 +1039,67 @@ def index_transcript(
     recent_ideas: list[dict] = []
     MAX_RECENT = 10  # Only check last N ideas for relations
 
-    for msg in messages:
+    def close_span_with_summary(span_id: int, end_line: int, messages: list):
+        """Helper to close a span with LLM summary."""
+        summary = summarize_span_with_llm(messages) if messages else ""
+        try:
+            memory_db.close_span(span_id, end_line, summary)
+        except MemgraphError as e:
+            logger.warning(f"Failed to close span {span_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error closing span: {e}")
+
+    for msg_idx, msg in enumerate(messages):
         content = msg["content"]
         line_num = msg["line_num"]
 
-        # Check for topic shift
-        if detect_topic_shift(content, {}):
-            # Close current span if exists
-            if current_span_id and span_messages:
-                # Use LLM summarization if available
-                summary = summarize_span_with_llm(span_messages)
-                try:
-                    memory_db.close_span(current_span_id, line_num - 1, summary)
-                except MemgraphError as e:
-                    # Log but continue - span closing is non-critical
-                    logger.warning(f"Failed to close span {current_span_id}: {e}")
-                except Exception as e:
-                    logger.warning(f"Unexpected error closing span: {e}")
+        # Progress update every 10 messages
+        if msg_idx > 0 and msg_idx % 10 == 0:
+            pct = int(100 * msg_idx / total_messages)
+            print(f"  [{pct:3d}%] {msg_idx}/{total_messages} - {ideas_created} ideas, {spans_created} topics", file=sys.stderr)
 
-            # Create new span
-            span_name = content[:100]  # Use transition message as name
+        # Check for return to parent topic
+        if detect_return_to_parent(content) and len(span_stack) > 1:
+            # Pop current span and return to parent
+            current = span_stack.pop()
+            close_span_with_summary(current["id"], line_num - 1, current["messages"])
+            current_span_id = span_stack[-1]["id"] if span_stack else None
+            current_depth = span_stack[-1]["depth"] if span_stack else 0
+            span_messages = span_stack[-1]["messages"] if span_stack else []
+
+        # Check for sub-topic dive
+        elif detect_subtopic(content) and span_stack:
+            # Create a new child span
+            parent_id = span_stack[-1]["id"]
+            new_depth = span_stack[-1]["depth"] + 1
+            # Clean and validate the topic name
+            span_name = clean_topic_name(content[:100])
+            if is_bad_topic_name(span_name):
+                span_name = generate_topic_name_from_content([msg], fallback=span_name)
+            new_span_id = memory_db.create_span(
+                session=session,
+                name=span_name,
+                start_line=line_num,
+                parent_id=parent_id,
+                depth=new_depth
+            )
+            spans_created += 1
+            span_stack.append({"id": new_span_id, "depth": new_depth, "messages": []})
+            current_span_id = new_span_id
+            current_depth = new_depth
+            span_messages = span_stack[-1]["messages"]
+
+        # Check for topic shift (new top-level topic)
+        elif detect_topic_shift(content, {}):
+            # Close all open spans
+            while span_stack:
+                current = span_stack.pop()
+                close_span_with_summary(current["id"], line_num - 1, current["messages"])
+
+            # Create new top-level span with cleaned name
+            span_name = clean_topic_name(content[:100])
+            if is_bad_topic_name(span_name):
+                span_name = generate_topic_name_from_content([msg], fallback=span_name)
             current_span_id = memory_db.create_span(
                 session=session,
                 name=span_name,
@@ -861,19 +1107,28 @@ def index_transcript(
                 depth=0
             )
             spans_created += 1
-            span_messages = []
+            current_depth = 0
+            span_stack = [{"id": current_span_id, "depth": 0, "messages": []}]
+            span_messages = span_stack[-1]["messages"]
             # Clear recent ideas on topic shift
             recent_ideas = []
 
         # If no span exists, create initial one
+        # Use first message content to generate a name instead of generic "Session start"
         if current_span_id is None:
+            span_name = clean_topic_name(content[:100])
+            if is_bad_topic_name(span_name):
+                span_name = generate_topic_name_from_content([msg], fallback="Initial Discussion")
             current_span_id = memory_db.create_span(
                 session=session,
-                name=f"Session start",
+                name=span_name,
                 start_line=line_num,
                 depth=0
             )
             spans_created += 1
+            current_depth = 0
+            span_stack = [{"id": current_span_id, "depth": 0, "messages": []}]
+            span_messages = span_stack[-1]["messages"]
 
         # Classify intent
         intent = classify_intent(content)
@@ -940,6 +1195,11 @@ def index_transcript(
     # Update index state
     if total_lines > 0:
         memory_db.update_index_state(file_path, total_lines)
+
+    # Save embedding cache to disk for future runs
+    memory_db.save_embedding_cache()
+
+    print(f"  [100%] Done! {ideas_created} ideas, {spans_created} topics, {relations_created} relations", file=sys.stderr)
 
     return {
         "file_path": file_path,

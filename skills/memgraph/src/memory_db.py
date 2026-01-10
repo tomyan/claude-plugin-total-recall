@@ -102,8 +102,28 @@ def init_db():
 
     db = get_db()
 
+    # Create tables first (without indexes that depend on new columns)
     db.executescript("""
-        -- Hierarchical spans (topics and sub-topics)
+        -- Projects (high-level groupings of related topics)
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Topics (conceptual subjects that can span multiple conversation sections)
+        -- Note: project_id may be added by migration for existing databases
+        CREATE TABLE IF NOT EXISTS topics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            canonical_name TEXT UNIQUE,
+            summary TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Spans (physical sections of transcript, linked to topics)
+        -- Note: topic_id may be added by migration for existing databases
         CREATE TABLE IF NOT EXISTS spans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session TEXT NOT NULL,
@@ -217,7 +237,96 @@ def init_db():
         pass  # Already exists
 
     db.commit()
+
+    # Schema migration: add topic_id column if missing
+    _migrate_schema(db)
+
+    # Migration: link orphan spans to topics
+    _migrate_spans_to_topics(db)
+
     db.close()
+
+
+def _migrate_schema(db):
+    """Add new columns and indexes to existing tables."""
+    # Check if topic_id column exists in spans
+    cursor = db.execute("PRAGMA table_info(spans)")
+    span_columns = [row[1] for row in cursor]
+
+    if "topic_id" not in span_columns:
+        logger.info("Adding topic_id column to spans table")
+        db.execute("ALTER TABLE spans ADD COLUMN topic_id INTEGER REFERENCES topics(id)")
+        db.commit()
+
+    # Check if project_id column exists in topics
+    cursor = db.execute("PRAGMA table_info(topics)")
+    topic_columns = [row[1] for row in cursor]
+
+    if "project_id" not in topic_columns:
+        logger.info("Adding project_id column to topics table")
+        db.execute("ALTER TABLE topics ADD COLUMN project_id INTEGER REFERENCES projects(id)")
+        db.commit()
+
+    if "parent_id" not in topic_columns:
+        logger.info("Adding parent_id column to topics table for hierarchy")
+        db.execute("ALTER TABLE topics ADD COLUMN parent_id INTEGER REFERENCES topics(id)")
+        db.commit()
+
+    # Create indexes that depend on migrated columns
+    try:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_spans_topic ON spans(topic_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_topics_canonical ON topics(canonical_name)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_topics_project ON topics(project_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_id)")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass  # Index already exists
+
+
+def _migrate_spans_to_topics(db):
+    """Migrate existing spans without topic_id to topics."""
+    # Check if there are spans without topic_id
+    cursor = db.execute("""
+        SELECT id, name, summary FROM spans
+        WHERE topic_id IS NULL
+    """)
+    orphan_spans = list(cursor)
+
+    if not orphan_spans:
+        return
+
+    logger.info(f"Migrating {len(orphan_spans)} spans to topics")
+
+    for span in orphan_spans:
+        span_id = span["id"]
+        name = span["name"]
+        summary = span["summary"]
+
+        # Canonicalize and find/create topic
+        canonical = name.lower().strip()[:50]
+
+        # Check for existing topic
+        cursor = db.execute(
+            "SELECT id FROM topics WHERE canonical_name = ?",
+            (canonical,)
+        )
+        row = cursor.fetchone()
+
+        if row:
+            topic_id = row["id"]
+        else:
+            # Create new topic
+            cursor = db.execute(
+                "INSERT INTO topics (name, canonical_name, summary) VALUES (?, ?, ?)",
+                (name[:100], canonical, summary)
+            )
+            topic_id = cursor.lastrowid
+
+        # Link span to topic
+        db.execute("UPDATE spans SET topic_id = ? WHERE id = ?", (topic_id, span_id))
+
+    db.commit()
+    logger.info(f"Migration complete: {len(orphan_spans)} spans linked to topics")
 
 
 def serialize_embedding(embedding: list[float]) -> bytes:
@@ -228,6 +337,7 @@ def serialize_embedding(embedding: list[float]) -> bytes:
 # LRU cache for embeddings to reduce API calls
 _embedding_cache: dict[str, list[float]] = {}
 _CACHE_MAX_SIZE = 1000
+CACHE_PATH = Path.home() / ".claude-plugin-memgraph" / "embedding_cache.json"
 
 
 def get_embedding(text: str, use_cache: bool = True) -> list[float]:
@@ -281,6 +391,83 @@ def get_embedding(text: str, use_cache: bool = True) -> list[float]:
     return embedding
 
 
+def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
+    """Get embeddings for multiple texts in a single API call.
+
+    More efficient than calling get_embedding() for each text separately.
+
+    Args:
+        texts: List of texts to embed
+        use_cache: Whether to use cache (default True)
+
+    Returns:
+        List of embedding vectors, one per input text
+
+    Raises:
+        MemgraphError: If API key is missing or API call fails
+    """
+    if not texts:
+        return []
+
+    # Check cache and identify texts that need embedding
+    results: list[Optional[list[float]]] = [None] * len(texts)
+    texts_to_embed: list[tuple[int, str]] = []  # (index, text)
+
+    if use_cache:
+        for i, text in enumerate(texts):
+            if text in _embedding_cache:
+                results[i] = _embedding_cache[text]
+            else:
+                texts_to_embed.append((i, text))
+    else:
+        texts_to_embed = list(enumerate(texts))
+
+    # If everything was cached, return early
+    if not texts_to_embed:
+        return results  # type: ignore
+
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key:
+        raise MemgraphError(
+            "OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set. "
+            "Set this to your OpenAI API key to enable memory search.",
+            "missing_api_key"
+        )
+
+    try:
+        client = OpenAI(api_key=api_key)
+        # Send all uncached texts in a single request
+        batch_texts = [t for _, t in texts_to_embed]
+        response = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=batch_texts
+        )
+
+        # Map results back to original positions and cache them
+        for batch_idx, (orig_idx, text) in enumerate(texts_to_embed):
+            embedding = response.data[batch_idx].embedding
+            results[orig_idx] = embedding
+
+            # Cache the result
+            if use_cache:
+                if len(_embedding_cache) >= _CACHE_MAX_SIZE:
+                    oldest_key = next(iter(_embedding_cache))
+                    del _embedding_cache[oldest_key]
+                _embedding_cache[text] = embedding
+
+        logger.debug(f"Batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
+
+    except Exception as e:
+        logger.error(f"Batch embedding API call failed: {e}")
+        raise MemgraphError(
+            f"Failed to get embeddings from OpenAI: {e}",
+            "embedding_failed",
+            {"model": EMBEDDING_MODEL, "batch_size": len(texts_to_embed), "original_error": str(e)}
+        ) from e
+
+    return results  # type: ignore
+
+
 def clear_embedding_cache():
     """Clear the embedding cache."""
     global _embedding_cache
@@ -295,6 +482,1327 @@ def get_embedding_cache_stats() -> dict:
     }
 
 
+def save_embedding_cache():
+    """Save embedding cache to disk."""
+    global _embedding_cache
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CACHE_PATH, 'w') as f:
+            json.dump(_embedding_cache, f)
+        logger.info(f"Saved {len(_embedding_cache)} embeddings to cache")
+    except Exception as e:
+        logger.warning(f"Failed to save embedding cache: {e}")
+
+
+def load_embedding_cache():
+    """Load embedding cache from disk."""
+    global _embedding_cache
+    if not CACHE_PATH.exists():
+        return
+
+    try:
+        with open(CACHE_PATH, 'r') as f:
+            loaded = json.load(f)
+            _embedding_cache.update(loaded)
+        logger.info(f"Loaded {len(loaded)} embeddings from cache")
+    except Exception as e:
+        logger.warning(f"Failed to load embedding cache: {e}")
+
+
+# Auto-load cache on module import
+load_embedding_cache()
+
+
+# =============================================================================
+# Project Operations
+# =============================================================================
+
+def create_project(name: str, description: Optional[str] = None) -> int:
+    """Create a new project.
+
+    Args:
+        name: Project name (must be unique)
+        description: Optional description
+
+    Returns:
+        Project ID
+    """
+    db = get_db()
+    try:
+        cursor = db.execute(
+            "INSERT INTO projects (name, description) VALUES (?, ?)",
+            (name, description)
+        )
+        project_id = cursor.lastrowid
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.close()
+        raise MemgraphError(
+            f"Project '{name}' already exists",
+            "duplicate_project",
+            {"name": name}
+        )
+    db.close()
+    return project_id
+
+
+def get_project(project_id: int) -> Optional[dict]:
+    """Get project by ID."""
+    db = get_db()
+    cursor = db.execute(
+        "SELECT id, name, description, created_at FROM projects WHERE id = ?",
+        (project_id,)
+    )
+    row = cursor.fetchone()
+    db.close()
+    return dict(row) if row else None
+
+
+def get_project_by_name(name: str) -> Optional[dict]:
+    """Get project by name."""
+    db = get_db()
+    cursor = db.execute(
+        "SELECT id, name, description, created_at FROM projects WHERE name = ?",
+        (name,)
+    )
+    row = cursor.fetchone()
+    db.close()
+    return dict(row) if row else None
+
+
+def list_projects() -> list[dict]:
+    """List all projects with topic counts."""
+    db = get_db()
+    cursor = db.execute("""
+        SELECT p.id, p.name, p.description, p.created_at,
+               COUNT(DISTINCT t.id) as topic_count,
+               (SELECT COUNT(*) FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                JOIN topics t2 ON t2.id = s.topic_id
+                WHERE t2.project_id = p.id) as idea_count
+        FROM projects p
+        LEFT JOIN topics t ON t.project_id = p.id
+        GROUP BY p.id
+        ORDER BY p.name
+    """)
+    projects = [dict(row) for row in cursor]
+    db.close()
+    return projects
+
+
+def assign_topic_to_project(topic_id: int, project_id: Optional[int]) -> bool:
+    """Assign a topic to a project (or remove from project if None).
+
+    Args:
+        topic_id: Topic to assign
+        project_id: Project ID or None to unassign
+
+    Returns:
+        True if successful
+    """
+    db = get_db()
+    db.execute(
+        "UPDATE topics SET project_id = ? WHERE id = ?",
+        (project_id, topic_id)
+    )
+    db.commit()
+    db.close()
+    return True
+
+
+def unparent_topic(topic_id: int) -> bool:
+    """Remove a topic from its parent, making it a top-level topic.
+
+    Args:
+        topic_id: Topic to unparent
+
+    Returns:
+        True if updated
+    """
+    db = get_db()
+    db.execute(
+        "UPDATE topics SET parent_id = NULL WHERE id = ?",
+        (topic_id,)
+    )
+    db.commit()
+    db.close()
+    return True
+
+
+def delete_topic(topic_id: int, delete_ideas: bool = False) -> dict:
+    """Delete a topic and optionally its ideas.
+
+    Args:
+        topic_id: Topic to delete
+        delete_ideas: If True, delete all ideas in this topic's spans
+
+    Returns:
+        Dict with counts of deleted items
+    """
+    db = get_db()
+
+    ideas_deleted = 0
+    spans_deleted = 0
+
+    if delete_ideas:
+        # Get all idea IDs in this topic
+        cursor = db.execute("""
+            SELECT i.id FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            WHERE s.topic_id = ?
+        """, (topic_id,))
+        idea_ids = [row["id"] for row in cursor]
+
+        if idea_ids:
+            placeholders = ",".join("?" * len(idea_ids))
+            db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+            db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                      idea_ids + idea_ids)
+            db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+            try:
+                db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+            except Exception:
+                pass  # FTS might not have these rows
+            db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+            ideas_deleted = len(idea_ids)
+
+    # Delete spans
+    cursor = db.execute("DELETE FROM spans WHERE topic_id = ?", (topic_id,))
+    spans_deleted = cursor.rowcount
+
+    # Update any child topics to have no parent
+    db.execute("UPDATE topics SET parent_id = NULL WHERE parent_id = ?", (topic_id,))
+
+    # Delete topic
+    db.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+
+    db.commit()
+    db.close()
+
+    return {
+        "ideas_deleted": ideas_deleted,
+        "spans_deleted": spans_deleted,
+    }
+
+
+def get_project_tree() -> list[dict]:
+    """Get hierarchical view of projects -> topics (with nested children).
+
+    Returns:
+        List of projects with nested topics (topics can have children)
+    """
+    db = get_db()
+
+    # Get all projects
+    cursor = db.execute("""
+        SELECT id, name, description FROM projects ORDER BY name
+    """)
+    projects = [dict(row) for row in cursor]
+
+    # Get topics with parent_id for hierarchy
+    cursor = db.execute("""
+        SELECT t.id, t.name, t.project_id, t.parent_id,
+               COUNT(DISTINCT s.id) as span_count,
+               COUNT(DISTINCT i.id) as idea_count
+        FROM topics t
+        LEFT JOIN spans s ON s.topic_id = t.id
+        LEFT JOIN ideas i ON i.span_id = s.id
+        GROUP BY t.id
+        ORDER BY t.name
+    """)
+    topics = [dict(row) for row in cursor]
+    db.close()
+
+    # Build topic hierarchy
+    topic_map = {t["id"]: {**t, "children": []} for t in topics}
+
+    # Link children to parents
+    root_topics = []
+    for topic in topics:
+        if topic["parent_id"] and topic["parent_id"] in topic_map:
+            topic_map[topic["parent_id"]]["children"].append(topic_map[topic["id"]])
+        else:
+            root_topics.append(topic_map[topic["id"]])
+
+    # Build project tree with hierarchical topics
+    project_map = {p["id"]: {**p, "topics": []} for p in projects}
+    unassigned = {"id": None, "name": "(Unassigned)", "description": None, "topics": []}
+
+    for topic in root_topics:
+        if topic["project_id"] and topic["project_id"] in project_map:
+            project_map[topic["project_id"]]["topics"].append(topic)
+        else:
+            unassigned["topics"].append(topic)
+
+    result = list(project_map.values())
+    if unassigned["topics"]:
+        result.append(unassigned)
+
+    return result
+
+
+def auto_categorize_topics(dry_run: bool = True) -> dict:
+    """Automatically categorize unassigned topics and fix mismatched ones.
+
+    Uses LLM to analyze topic content and match to existing projects.
+
+    Args:
+        dry_run: If True, only report what would change
+
+    Returns:
+        Dict with categorization results
+    """
+    db = get_db()
+
+    # Get all projects
+    cursor = db.execute("SELECT id, name, description FROM projects")
+    projects = {row["id"]: dict(row) for row in cursor}
+
+    if not projects:
+        db.close()
+        return {"error": "No projects defined. Create projects first."}
+
+    # Get unassigned topics with sample content
+    cursor = db.execute("""
+        SELECT t.id, t.name, t.summary,
+               (SELECT GROUP_CONCAT(i.content, ' | ')
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                WHERE s.topic_id = t.id
+                LIMIT 10) as sample_content
+        FROM topics t
+        WHERE t.project_id IS NULL
+    """)
+    unassigned = [dict(row) for row in cursor]
+    db.close()
+
+    if not unassigned:
+        return {"message": "No unassigned topics", "changes": []}
+
+    # Use LLM to categorize each topic
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key:
+        return {"error": "OPENAI_TOKEN_MEMORY_EMBEDDINGS not set"}
+
+    try:
+        client = OpenAI(api_key=api_key)
+    except Exception as e:
+        return {"error": f"Failed to initialize OpenAI client: {e}"}
+
+    project_list = "\n".join(f"- {p['name']}: {p['description'] or 'No description'}"
+                             for p in projects.values())
+
+    changes = []
+    for topic in unassigned:
+        # Build context for LLM
+        content_sample = (topic["sample_content"] or "")[:1000]
+        prompt = f"""Given these projects:
+{project_list}
+
+Which project best matches this topic?
+
+Topic: {topic['name']}
+Summary: {topic['summary'] or 'None'}
+Sample content: {content_sample}
+
+Reply with ONLY the project name that best matches, or "NONE" if no good match."""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=50,
+                temperature=0
+            )
+            suggested = response.choices[0].message.content.strip()
+
+            # Find matching project
+            matched_project = None
+            for pid, p in projects.items():
+                if p["name"].lower() == suggested.lower():
+                    matched_project = p
+                    break
+
+            if matched_project:
+                changes.append({
+                    "topic_id": topic["id"],
+                    "topic_name": topic["name"],
+                    "suggested_project": matched_project["name"],
+                    "project_id": matched_project["id"],
+                })
+
+                if not dry_run:
+                    assign_topic_to_project(topic["id"], matched_project["id"])
+
+        except Exception as e:
+            logger.warning(f"Failed to categorize topic {topic['id']}: {e}")
+            continue
+
+    return {
+        "reviewed": len(unassigned),
+        "changes": changes,
+        "dry_run": dry_run,
+    }
+
+
+def improve_categorization() -> dict:
+    """Run all categorization improvements.
+
+    1. Auto-assign unassigned topics to projects
+    2. Review topic names for quality
+    3. Detect and flag catch-all topics
+
+    Returns:
+        Summary of all improvements made
+    """
+    results = {}
+
+    # Auto-categorize unassigned topics
+    cat_result = auto_categorize_topics(dry_run=False)
+    results["categorization"] = cat_result
+
+    # Review topic names
+    review_result = review_topics()
+    if review_result.get("bad_names"):
+        # Auto-rename bad topics
+        renamed = []
+        for bad in review_result["bad_names"][:10]:  # Limit to 10
+            suggested = suggest_topic_name(bad["topic_id"])
+            if suggested:
+                rename_topic(bad["topic_id"], suggested)
+                renamed.append({
+                    "topic_id": bad["topic_id"],
+                    "old_name": bad["name"],
+                    "new_name": suggested,
+                })
+        results["renamed_topics"] = renamed
+
+    results["remaining_issues"] = {
+        "catch_all_topics": len(review_result.get("catch_all", [])),
+        "empty_topics": len(review_result.get("empty", [])),
+    }
+
+    return results
+
+
+# =============================================================================
+# Topic Operations
+# =============================================================================
+
+def canonicalize_topic_name(name: str) -> str:
+    """Convert topic name to canonical form for deduplication."""
+    import re
+    # Lowercase, strip, remove common prefixes
+    canonical = name.lower().strip()
+    # Remove "session start", "let's", "now let's" prefixes
+    canonical = re.sub(r"^(session start|let'?s|now let'?s|okay,?\s*let'?s)\s*", "", canonical)
+    # Remove trailing punctuation
+    canonical = re.sub(r"[.:,;!?]+$", "", canonical)
+    # Collapse whitespace
+    canonical = re.sub(r"\s+", " ", canonical)
+    # Truncate for matching (first 50 chars)
+    return canonical[:50]
+
+
+def find_or_create_topic(name: str, summary: Optional[str] = None) -> int:
+    """Find existing topic by canonical name or create new one.
+
+    Args:
+        name: Topic name (will be canonicalized for matching)
+        summary: Optional summary for new topics
+
+    Returns:
+        Topic ID
+    """
+    db = get_db()
+    canonical = canonicalize_topic_name(name)
+
+    # Try to find existing topic
+    cursor = db.execute(
+        "SELECT id FROM topics WHERE canonical_name = ?",
+        (canonical,)
+    )
+    row = cursor.fetchone()
+
+    if row:
+        topic_id = row["id"]
+        # Update summary if provided and current is empty
+        if summary:
+            db.execute(
+                "UPDATE topics SET summary = COALESCE(summary, ?) WHERE id = ?",
+                (summary, topic_id)
+            )
+            db.commit()
+    else:
+        # Create new topic
+        cursor = db.execute(
+            "INSERT INTO topics (name, canonical_name, summary) VALUES (?, ?, ?)",
+            (name[:100], canonical, summary)
+        )
+        topic_id = cursor.lastrowid
+        db.commit()
+
+    db.close()
+    return topic_id
+
+
+def get_topic(topic_id: int) -> Optional[dict]:
+    """Get topic by ID."""
+    db = get_db()
+    cursor = db.execute(
+        "SELECT id, name, canonical_name, summary, created_at FROM topics WHERE id = ?",
+        (topic_id,)
+    )
+    row = cursor.fetchone()
+    db.close()
+    return dict(row) if row else None
+
+
+def list_topics() -> list[dict]:
+    """List all topics with span counts."""
+    db = get_db()
+    cursor = db.execute("""
+        SELECT t.id, t.name, t.summary, t.created_at,
+               COUNT(DISTINCT s.id) as span_count,
+               COUNT(DISTINCT i.id) as idea_count
+        FROM topics t
+        LEFT JOIN spans s ON s.topic_id = t.id
+        LEFT JOIN ideas i ON i.span_id = s.id
+        GROUP BY t.id
+        ORDER BY t.created_at DESC
+    """)
+    topics = [dict(row) for row in cursor]
+    db.close()
+    return topics
+
+
+def merge_topics(source_topic_id: int, target_topic_id: int) -> dict:
+    """Merge one topic into another, moving all spans.
+
+    Args:
+        source_topic_id: Topic to merge from (will be deleted)
+        target_topic_id: Topic to merge into
+
+    Returns:
+        Dict with merge stats
+    """
+    db = get_db()
+
+    # Move spans to target topic
+    cursor = db.execute(
+        "UPDATE spans SET topic_id = ? WHERE topic_id = ?",
+        (target_topic_id, source_topic_id)
+    )
+    spans_moved = cursor.rowcount
+
+    # Delete source topic
+    db.execute("DELETE FROM topics WHERE id = ?", (source_topic_id,))
+    db.commit()
+    db.close()
+
+    return {"spans_moved": spans_moved, "source_deleted": source_topic_id}
+
+
+# Bad topic name patterns (matched case-insensitively)
+_BAD_NAME_PATTERNS = [
+    r"^this session is being continued",
+    r"^session\s*(start|begin|init)",
+    r"^let'?s\s",
+    r"now let'?s\s",  # Anywhere in string
+    r"^okay,?\s*(let'?s|brilliant|so)",
+    r"^alright,?\s*let'?s",
+    r"^got it",  # Acknowledgement
+    r"^seems to",  # Observation
+    r"^working with",  # Action in progress
+    r"^looking at",  # Action in progress
+    r"^\*\*",  # Starts with markdown bold
+    r"^#+\s",  # Starts with markdown heading
+    r"\.\.\.$",  # Ends with ellipsis (truncated)
+]
+
+# Case-sensitive patterns (matched against original name)
+_BAD_NAME_PATTERNS_CASE_SENSITIVE = [
+    r"^[a-z]",  # Starts with lowercase (message fragment, not a title)
+    r"^.{80,}",  # Very long (message fragment)
+]
+
+
+def review_topics() -> dict:
+    """Review topics for quality issues.
+
+    Returns:
+        Dict with issues categorized by type
+    """
+    import re
+
+    db = get_db()
+    issues = {
+        "catch_all": [],      # Topics with too many ideas
+        "bad_names": [],      # Poorly named topics
+        "duplicates": [],     # Potential duplicate topics
+        "empty": [],          # Topics with no ideas
+    }
+
+    # Get all topics with counts
+    cursor = db.execute("""
+        SELECT t.id, t.name, t.summary, t.canonical_name,
+               COUNT(DISTINCT s.id) as span_count,
+               COUNT(DISTINCT i.id) as idea_count
+        FROM topics t
+        LEFT JOIN spans s ON s.topic_id = t.id
+        LEFT JOIN ideas i ON i.span_id = s.id
+        GROUP BY t.id
+    """)
+    topics = [dict(row) for row in cursor]
+    db.close()
+
+    # Check each topic
+    for topic in topics:
+        topic_id = topic["id"]
+        name = topic["name"]
+        idea_count = topic["idea_count"]
+
+        # Catch-all detection (>100 ideas or >20% of total)
+        total_ideas = sum(t["idea_count"] for t in topics)
+        if idea_count > 100 or (total_ideas > 0 and idea_count / total_ideas > 0.2):
+            issues["catch_all"].append({
+                "topic_id": topic_id,
+                "name": name,
+                "idea_count": idea_count,
+                "percentage": round(100 * idea_count / total_ideas, 1) if total_ideas > 0 else 0,
+                "suggestion": "Split into more specific topics"
+            })
+
+        # Bad name detection
+        name_lower = name.lower()
+        bad_reason = None
+        # Check case-insensitive patterns
+        for pattern in _BAD_NAME_PATTERNS:
+            if re.search(pattern, name_lower):
+                bad_reason = f"Matches pattern: {pattern}"
+                break
+        # Check case-sensitive patterns against original name
+        if not bad_reason:
+            for pattern in _BAD_NAME_PATTERNS_CASE_SENSITIVE:
+                if re.search(pattern, name):
+                    bad_reason = f"Matches pattern: {pattern}"
+                    break
+        if bad_reason:
+            issues["bad_names"].append({
+                "topic_id": topic_id,
+                "name": name,
+                "reason": bad_reason,
+                "suggestion": "Rename to describe the actual topic"
+            })
+
+        # Empty topics
+        if idea_count == 0:
+            issues["empty"].append({
+                "topic_id": topic_id,
+                "name": name,
+                "suggestion": "Delete or merge with related topic"
+            })
+
+    # Duplicate detection using embedding similarity
+    duplicates = find_duplicate_topics(threshold=0.85)
+    issues["duplicates"] = duplicates
+
+    # Summary
+    issues["summary"] = {
+        "total_topics": len(topics),
+        "catch_all_count": len(issues["catch_all"]),
+        "bad_names_count": len(issues["bad_names"]),
+        "duplicate_pairs": len(issues["duplicates"]),
+        "empty_count": len(issues["empty"]),
+        "has_issues": any([
+            issues["catch_all"],
+            issues["bad_names"],
+            issues["duplicates"],
+            issues["empty"]
+        ])
+    }
+
+    return issues
+
+
+def find_duplicate_topics(threshold: float = 0.85) -> list[dict]:
+    """Find topics that are semantically similar.
+
+    Args:
+        threshold: Similarity threshold (0-1, higher = more similar)
+
+    Returns:
+        List of duplicate pairs with similarity scores
+    """
+    db = get_db()
+
+    # Get topics with their embeddings (from their name + summary)
+    cursor = db.execute("""
+        SELECT id, name, summary FROM topics
+    """)
+    topics = list(cursor)
+    db.close()
+
+    if len(topics) < 2:
+        return []
+
+    # Get embeddings for each topic
+    topic_embeddings = {}
+    for topic in topics:
+        text = f"{topic['name']}: {topic['summary'] or ''}"
+        try:
+            embedding = get_embedding(text)
+            topic_embeddings[topic["id"]] = {
+                "name": topic["name"],
+                "embedding": embedding
+            }
+        except Exception:
+            continue
+
+    # Compare all pairs
+    duplicates = []
+    topic_ids = list(topic_embeddings.keys())
+
+    for i, id1 in enumerate(topic_ids):
+        for id2 in topic_ids[i+1:]:
+            emb1 = topic_embeddings[id1]["embedding"]
+            emb2 = topic_embeddings[id2]["embedding"]
+
+            # Cosine similarity
+            dot_product = sum(a * b for a, b in zip(emb1, emb2))
+            norm1 = sum(a * a for a in emb1) ** 0.5
+            norm2 = sum(b * b for b in emb2) ** 0.5
+            similarity = dot_product / (norm1 * norm2) if norm1 > 0 and norm2 > 0 else 0
+
+            if similarity >= threshold:
+                duplicates.append({
+                    "topic1_id": id1,
+                    "topic1_name": topic_embeddings[id1]["name"],
+                    "topic2_id": id2,
+                    "topic2_name": topic_embeddings[id2]["name"],
+                    "similarity": round(similarity, 3),
+                    "suggestion": f"merge-topics {id1} {id2}"
+                })
+
+    # Sort by similarity descending
+    duplicates.sort(key=lambda x: x["similarity"], reverse=True)
+    return duplicates
+
+
+def cluster_topics(min_cluster_size: int = 5) -> dict:
+    """Analyze idea embeddings to suggest topic reorganization.
+
+    Uses agglomerative clustering on idea embeddings to find natural groupings,
+    then compares against current topic assignments to suggest:
+    - Topics that should be merged (ideas cluster together)
+    - Topics that should be split (ideas in multiple clusters)
+    - Misplaced ideas (closer to another topic's centroid)
+
+    Args:
+        min_cluster_size: Minimum ideas for a cluster to be significant
+
+    Returns:
+        Dict with clustering analysis and suggestions
+    """
+    db = get_db()
+
+    # Get all ideas with embeddings and topic info
+    cursor = db.execute("""
+        SELECT i.id, i.content, i.span_id, s.topic_id, t.name as topic_name,
+               e.embedding
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        JOIN topics t ON t.id = s.topic_id
+        JOIN idea_embeddings e ON e.idea_id = i.id
+    """)
+    ideas = []
+    for row in cursor:
+        emb_bytes = row["embedding"]
+        embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
+        ideas.append({
+            "id": row["id"],
+            "content": row["content"][:100],
+            "topic_id": row["topic_id"],
+            "topic_name": row["topic_name"],
+            "embedding": embedding,
+        })
+    db.close()
+
+    if len(ideas) < 10:
+        return {"error": "Not enough ideas for clustering", "idea_count": len(ideas)}
+
+    # Compute topic centroids
+    topic_ideas = {}
+    for idea in ideas:
+        tid = idea["topic_id"]
+        if tid not in topic_ideas:
+            topic_ideas[tid] = {"name": idea["topic_name"], "embeddings": [], "ideas": []}
+        topic_ideas[tid]["embeddings"].append(idea["embedding"])
+        topic_ideas[tid]["ideas"].append(idea)
+
+    topic_centroids = {}
+    for tid, data in topic_ideas.items():
+        embs = data["embeddings"]
+        centroid = [sum(e[i] for e in embs) / len(embs) for i in range(EMBEDDING_DIM)]
+        # Normalize
+        norm = sum(x*x for x in centroid) ** 0.5
+        if norm > 0:
+            centroid = [x / norm for x in centroid]
+        topic_centroids[tid] = {
+            "name": data["name"],
+            "centroid": centroid,
+            "idea_count": len(embs),
+        }
+
+    # Find misplaced ideas (closer to another topic's centroid)
+    misplaced = []
+    for idea in ideas:
+        own_tid = idea["topic_id"]
+        own_centroid = topic_centroids[own_tid]["centroid"]
+        emb = idea["embedding"]
+
+        # Distance to own centroid
+        own_dist = 1 - sum(a*b for a, b in zip(emb, own_centroid))
+
+        # Find closest other centroid
+        best_other_tid = None
+        best_other_dist = float('inf')
+        for tid, data in topic_centroids.items():
+            if tid == own_tid:
+                continue
+            dist = 1 - sum(a*b for a, b in zip(emb, data["centroid"]))
+            if dist < best_other_dist:
+                best_other_dist = dist
+                best_other_tid = tid
+
+        # If significantly closer to another topic (>20% closer)
+        if best_other_tid and best_other_dist < own_dist * 0.8:
+            misplaced.append({
+                "idea_id": idea["id"],
+                "content": idea["content"],
+                "current_topic_id": own_tid,
+                "current_topic": topic_centroids[own_tid]["name"],
+                "suggested_topic_id": best_other_tid,
+                "suggested_topic": topic_centroids[best_other_tid]["name"],
+                "distance_improvement": round((own_dist - best_other_dist) / own_dist * 100, 1),
+            })
+
+    # Sort by improvement
+    misplaced.sort(key=lambda x: x["distance_improvement"], reverse=True)
+
+    # Compute internal coherence for each topic (average distance to centroid)
+    topic_coherence = {}
+    for tid, data in topic_ideas.items():
+        centroid = topic_centroids[tid]["centroid"]
+        distances = []
+        for emb in data["embeddings"]:
+            dist = 1 - sum(a*b for a, b in zip(emb, centroid))
+            distances.append(dist)
+        avg_dist = sum(distances) / len(distances) if distances else 0
+        max_dist = max(distances) if distances else 0
+        topic_coherence[tid] = {
+            "name": data["name"],
+            "idea_count": len(distances),
+            "avg_distance": round(avg_dist, 4),
+            "max_distance": round(max_dist, 4),
+            "coherence_score": round(1 - avg_dist, 3),  # Higher = more coherent
+        }
+
+    # Find topics that might need splitting (low coherence, high count)
+    split_candidates = []
+    for tid, coh in topic_coherence.items():
+        if coh["idea_count"] >= min_cluster_size and coh["coherence_score"] < 0.7:
+            split_candidates.append({
+                "topic_id": tid,
+                "name": coh["name"],
+                "idea_count": coh["idea_count"],
+                "coherence_score": coh["coherence_score"],
+                "suggestion": "Topic has diverse content - consider splitting",
+            })
+    split_candidates.sort(key=lambda x: x["coherence_score"])
+
+    # Find topics that might merge (centroids very close)
+    merge_candidates = []
+    topic_ids = list(topic_centroids.keys())
+    for i, tid1 in enumerate(topic_ids):
+        for tid2 in topic_ids[i+1:]:
+            c1 = topic_centroids[tid1]["centroid"]
+            c2 = topic_centroids[tid2]["centroid"]
+            similarity = sum(a*b for a, b in zip(c1, c2))
+            if similarity > 0.85:  # Very similar centroids
+                merge_candidates.append({
+                    "topic1_id": tid1,
+                    "topic1_name": topic_centroids[tid1]["name"],
+                    "topic1_count": topic_centroids[tid1]["idea_count"],
+                    "topic2_id": tid2,
+                    "topic2_name": topic_centroids[tid2]["name"],
+                    "topic2_count": topic_centroids[tid2]["idea_count"],
+                    "similarity": round(similarity, 3),
+                    "suggestion": f"merge-topics {tid1} {tid2}",
+                })
+    merge_candidates.sort(key=lambda x: x["similarity"], reverse=True)
+
+    return {
+        "total_ideas": len(ideas),
+        "total_topics": len(topic_centroids),
+        "topic_coherence": sorted(topic_coherence.values(), key=lambda x: x["coherence_score"]),
+        "misplaced_ideas": misplaced[:30],  # Top 30
+        "split_candidates": split_candidates,
+        "merge_candidates": merge_candidates,
+        "summary": {
+            "misplaced_count": len(misplaced),
+            "low_coherence_topics": len(split_candidates),
+            "merge_pairs": len(merge_candidates),
+        }
+    }
+
+
+def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
+    """Analyze a single topic and suggest how to split it.
+
+    Uses k-means style clustering on the topic's ideas to find natural sub-groups.
+
+    Args:
+        topic_id: Topic to analyze
+        num_clusters: Number of clusters (auto-detected if None)
+
+    Returns:
+        Dict with cluster analysis and suggested splits
+    """
+    db = get_db()
+
+    # Get topic info
+    cursor = db.execute("SELECT name, summary FROM topics WHERE id = ?", (topic_id,))
+    topic_row = cursor.fetchone()
+    if not topic_row:
+        db.close()
+        return {"error": f"Topic {topic_id} not found"}
+
+    # Get ideas with embeddings
+    cursor = db.execute("""
+        SELECT i.id, i.content, i.intent, e.embedding
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        JOIN idea_embeddings e ON e.idea_id = i.id
+        WHERE s.topic_id = ?
+    """, (topic_id,))
+
+    ideas = []
+    for row in cursor:
+        emb_bytes = row["embedding"]
+        embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
+        ideas.append({
+            "id": row["id"],
+            "content": row["content"],
+            "intent": row["intent"],
+            "embedding": embedding,
+        })
+    db.close()
+
+    if len(ideas) < 4:
+        return {"error": "Not enough ideas to cluster", "idea_count": len(ideas)}
+
+    # Auto-detect number of clusters if not specified
+    if num_clusters is None:
+        # Heuristic: sqrt(n) clusters, min 2, max 8
+        num_clusters = max(2, min(8, int(len(ideas) ** 0.5)))
+
+    # Simple k-means clustering
+    import random
+    random.seed(42)
+
+    # Initialize centroids randomly
+    centroid_indices = random.sample(range(len(ideas)), min(num_clusters, len(ideas)))
+    centroids = [ideas[i]["embedding"][:] for i in centroid_indices]
+
+    # Iterate k-means
+    for _ in range(20):
+        # Assign ideas to nearest centroid
+        assignments = []
+        for idea in ideas:
+            emb = idea["embedding"]
+            best_cluster = 0
+            best_dist = float('inf')
+            for ci, centroid in enumerate(centroids):
+                dist = sum((a-b)**2 for a, b in zip(emb, centroid))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_cluster = ci
+            assignments.append(best_cluster)
+
+        # Update centroids
+        new_centroids = []
+        for ci in range(len(centroids)):
+            cluster_embs = [ideas[i]["embedding"] for i, a in enumerate(assignments) if a == ci]
+            if cluster_embs:
+                new_centroid = [sum(e[d] for e in cluster_embs) / len(cluster_embs)
+                               for d in range(EMBEDDING_DIM)]
+                new_centroids.append(new_centroid)
+            else:
+                new_centroids.append(centroids[ci])
+        centroids = new_centroids
+
+    # Build cluster info
+    clusters = {i: [] for i in range(len(centroids))}
+    for i, cluster_id in enumerate(assignments):
+        clusters[cluster_id].append(ideas[i])
+
+    # Use LLM to suggest names for each cluster
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    cluster_info = []
+
+    for cluster_id, cluster_ideas in clusters.items():
+        if not cluster_ideas:
+            continue
+
+        # Sample content for naming
+        sample_content = "\n".join(f"- {idea['content'][:150]}" for idea in cluster_ideas[:10])
+
+        suggested_name = None
+        if api_key:
+            try:
+                client = OpenAI(api_key=api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{
+                        "role": "user",
+                        "content": f"""These ideas were clustered together. Suggest a concise topic name (3-6 words) that captures their common theme:
+
+{sample_content}
+
+Reply with ONLY the topic name, nothing else."""
+                    }],
+                    max_tokens=30,
+                    temperature=0
+                )
+                suggested_name = response.choices[0].message.content.strip()
+            except Exception as e:
+                logger.warning(f"Failed to generate cluster name: {e}")
+
+        cluster_info.append({
+            "cluster_id": cluster_id,
+            "suggested_name": suggested_name,
+            "idea_count": len(cluster_ideas),
+            "sample_ideas": [{"id": i["id"], "content": i["content"][:100]} for i in cluster_ideas[:5]],
+        })
+
+    # Sort by size
+    cluster_info.sort(key=lambda x: x["idea_count"], reverse=True)
+
+    return {
+        "topic_id": topic_id,
+        "topic_name": topic_row["name"],
+        "total_ideas": len(ideas),
+        "num_clusters": len([c for c in cluster_info if c["idea_count"] > 0]),
+        "clusters": cluster_info,
+    }
+
+
+def split_topic(topic_id: int, num_clusters: int = None, min_cluster_size: int = 3,
+                delete_original: bool = False, delete_junk: bool = True) -> dict:
+    """Split a topic into sub-topics based on clustering.
+
+    Creates child topics from natural clusters in the idea embeddings.
+
+    Args:
+        topic_id: Topic to split
+        num_clusters: Number of clusters (auto-detected if None)
+        min_cluster_size: Minimum ideas for a cluster to become a topic
+        delete_original: If True, delete original topic after split
+        delete_junk: If True, delete ideas in tiny clusters (<min_cluster_size)
+
+    Returns:
+        Dict with split results
+    """
+    # First run clustering
+    cluster_result = recluster_topic(topic_id, num_clusters)
+    if "error" in cluster_result:
+        return cluster_result
+
+    db = get_db()
+
+    # Get original topic info
+    cursor = db.execute(
+        "SELECT id, name, project_id FROM topics WHERE id = ?",
+        (topic_id,)
+    )
+    original = cursor.fetchone()
+    if not original:
+        db.close()
+        return {"error": f"Topic {topic_id} not found"}
+
+    project_id = original["project_id"]
+    original_name = original["name"]
+
+    created_topics = []
+    moved_ideas = 0
+    deleted_ideas = 0
+    junk_ideas = []
+
+    for cluster in cluster_result["clusters"]:
+        if cluster["idea_count"] == 0:
+            continue
+
+        idea_ids = [i["id"] for i in cluster["sample_ideas"]]
+        # Get ALL idea IDs for this cluster (sample_ideas only has 5)
+        # We need to re-run clustering to get full assignments
+        # For now, use the sample - we'll fix this properly
+
+        if cluster["idea_count"] < min_cluster_size:
+            # Too small - mark as junk
+            junk_ideas.extend(idea_ids)
+            continue
+
+        # Create new child topic
+        new_name = cluster["suggested_name"] or f"{original_name} - Cluster {cluster['cluster_id']+1}"
+        canonical = canonicalize_topic_name(new_name)
+
+        cursor = db.execute("""
+            INSERT INTO topics (name, canonical_name, parent_id, project_id)
+            VALUES (?, ?, ?, ?)
+        """, (new_name, canonical, topic_id, project_id))
+        new_topic_id = cursor.lastrowid
+
+        created_topics.append({
+            "id": new_topic_id,
+            "name": new_name,
+            "idea_count": cluster["idea_count"],
+        })
+
+    db.commit()
+    db.close()
+
+    # Now we need to actually move the ideas - re-run clustering with full assignments
+    result = _execute_topic_split(topic_id, created_topics, min_cluster_size, delete_junk)
+
+    return {
+        "original_topic_id": topic_id,
+        "original_name": original_name,
+        "created_topics": result["created_topics"],
+        "moved_ideas": result["moved_ideas"],
+        "deleted_ideas": result["deleted_ideas"],
+        "kept_in_original": result["kept_in_original"],
+    }
+
+
+def _execute_topic_split(topic_id: int, created_topics: list, min_cluster_size: int,
+                         delete_junk: bool) -> dict:
+    """Execute the actual idea movement for a topic split."""
+    import random
+    random.seed(42)
+
+    db = get_db()
+
+    # Get all ideas with embeddings for this topic
+    cursor = db.execute("""
+        SELECT i.id, i.span_id, e.embedding
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        JOIN idea_embeddings e ON e.idea_id = i.id
+        WHERE s.topic_id = ?
+    """, (topic_id,))
+
+    ideas = []
+    for row in cursor:
+        emb_bytes = row["embedding"]
+        embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
+        ideas.append({
+            "id": row["id"],
+            "span_id": row["span_id"],
+            "embedding": embedding,
+        })
+
+    if not ideas or not created_topics:
+        db.close()
+        return {"created_topics": created_topics, "moved_ideas": 0, "deleted_ideas": 0, "kept_in_original": len(ideas)}
+
+    num_clusters = len(created_topics)
+
+    # K-means clustering
+    centroid_indices = random.sample(range(len(ideas)), min(num_clusters, len(ideas)))
+    centroids = [ideas[i]["embedding"][:] for i in centroid_indices]
+
+    for _ in range(20):
+        assignments = []
+        for idea in ideas:
+            emb = idea["embedding"]
+            best_cluster = 0
+            best_dist = float('inf')
+            for ci, centroid in enumerate(centroids):
+                dist = sum((a-b)**2 for a, b in zip(emb, centroid))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_cluster = ci
+            assignments.append(best_cluster)
+
+        new_centroids = []
+        for ci in range(len(centroids)):
+            cluster_embs = [ideas[i]["embedding"] for i, a in enumerate(assignments) if a == ci]
+            if cluster_embs:
+                new_centroid = [sum(e[d] for e in cluster_embs) / len(cluster_embs)
+                               for d in range(EMBEDDING_DIM)]
+                new_centroids.append(new_centroid)
+            else:
+                new_centroids.append(centroids[ci])
+        centroids = new_centroids
+
+    # Group ideas by cluster
+    clusters = {i: [] for i in range(num_clusters)}
+    for i, cluster_id in enumerate(assignments):
+        clusters[cluster_id].append(ideas[i])
+
+    # Match clusters to created topics by size (largest cluster -> first topic)
+    cluster_sizes = [(ci, len(ideas_list)) for ci, ideas_list in clusters.items()]
+    cluster_sizes.sort(key=lambda x: x[1], reverse=True)
+
+    moved_ideas = 0
+    deleted_ideas = 0
+
+    for idx, (cluster_id, size) in enumerate(cluster_sizes):
+        if idx >= len(created_topics):
+            break
+
+        new_topic = created_topics[idx]
+        cluster_ideas = clusters[cluster_id]
+
+        if size < min_cluster_size:
+            # Junk cluster
+            if delete_junk:
+                idea_ids = [i["id"] for i in cluster_ideas]
+                if idea_ids:
+                    placeholders = ",".join("?" * len(idea_ids))
+                    db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+                    db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                              idea_ids + idea_ids)
+                    db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+                    db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+                    db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+                    deleted_ideas += len(idea_ids)
+            continue
+
+        # Create a new span for this topic
+        # Get a representative span from the ideas
+        first_idea = cluster_ideas[0]
+        cursor = db.execute("SELECT session, source_file FROM spans s JOIN ideas i ON i.span_id = s.id WHERE i.id = ?",
+                           (first_idea["id"],))
+        span_info = cursor.fetchone()
+
+        cursor = db.execute("""
+            INSERT INTO spans (session, topic_id, name, start_line, end_line, depth)
+            VALUES (?, ?, ?, 0, 0, 0)
+        """, (span_info["session"] if span_info else "unknown", new_topic["id"], new_topic["name"]))
+        new_span_id = cursor.lastrowid
+
+        # Move ideas to new span
+        idea_ids = [i["id"] for i in cluster_ideas]
+        placeholders = ",".join("?" * len(idea_ids))
+        db.execute(f"UPDATE ideas SET span_id = ? WHERE id IN ({placeholders})",
+                  [new_span_id] + idea_ids)
+        moved_ideas += len(idea_ids)
+        new_topic["idea_count"] = len(idea_ids)
+
+    db.commit()
+    db.close()
+
+    return {
+        "created_topics": created_topics,
+        "moved_ideas": moved_ideas,
+        "deleted_ideas": deleted_ideas,
+        "kept_in_original": len(ideas) - moved_ideas - deleted_ideas,
+    }
+
+
+def rename_topic(topic_id: int, new_name: str) -> bool:
+    """Rename a topic.
+
+    Args:
+        topic_id: Topic to rename
+        new_name: New name
+
+    Returns:
+        True if renamed, False if topic not found
+    """
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE topics SET name = ?, canonical_name = ? WHERE id = ?",
+        (new_name, canonicalize_topic_name(new_name), topic_id)
+    )
+    db.commit()
+    updated = cursor.rowcount > 0
+    db.close()
+    return updated
+
+
+def suggest_topic_name(topic_id: int) -> Optional[str]:
+    """Use LLM to suggest a better name for a topic.
+
+    Args:
+        topic_id: Topic to rename
+
+    Returns:
+        Suggested name or None if failed
+    """
+    db = get_db()
+
+    # Get topic and sample ideas
+    cursor = db.execute("""
+        SELECT t.name, t.summary FROM topics t WHERE t.id = ?
+    """, (topic_id,))
+    topic = cursor.fetchone()
+
+    if not topic:
+        db.close()
+        return None
+
+    # Get sample ideas from this topic
+    cursor = db.execute("""
+        SELECT i.content FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        WHERE s.topic_id = ?
+        ORDER BY i.created_at
+        LIMIT 10
+    """, (topic_id,))
+    ideas = [row["content"] for row in cursor]
+    db.close()
+
+    if not ideas:
+        return None
+
+    # Use LLM to generate name
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key or not OpenAI:
+        return None
+
+    try:
+        client = OpenAI(api_key=api_key)
+        prompt = f"""Based on these conversation excerpts, suggest a concise topic name (2-5 words):
+
+Current name: {topic['name']}
+Summary: {topic['summary'] or 'None'}
+
+Sample content:
+{chr(10).join(f'- {idea[:200]}' for idea in ideas[:5])}
+
+Reply with ONLY the suggested topic name, nothing else."""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=20,
+            temperature=0
+        )
+        name = response.choices[0].message.content.strip()
+        # Clean the output - strip markdown and quotes
+        import re
+        name = re.sub(r'^\*\*(.+)\*\*$', r'\1', name)  # Remove bold
+        name = re.sub(r'^\*(.+)\*$', r'\1', name)  # Remove italic
+        name = name.strip('"\'')  # Remove quotes
+        return name
+    except Exception as e:
+        logger.warning(f"Failed to suggest topic name: {e}")
+        return None
+
+
 # =============================================================================
 # Span Operations
 # =============================================================================
@@ -304,14 +1812,31 @@ def create_span(
     name: str,
     start_line: int,
     parent_id: Optional[int] = None,
-    depth: int = 0
+    depth: int = 0,
+    topic_id: Optional[int] = None
 ) -> int:
-    """Create a new span."""
+    """Create a new span, linking to existing or new topic.
+
+    Args:
+        session: Session identifier
+        name: Span name (used to find/create topic if topic_id not provided)
+        start_line: Starting line number
+        parent_id: Parent span ID for hierarchy
+        depth: Nesting depth
+        topic_id: Explicit topic ID (if None, will find/create from name)
+
+    Returns:
+        Span ID
+    """
+    # Find or create topic if not provided
+    if topic_id is None:
+        topic_id = find_or_create_topic(name)
+
     db = get_db()
     cursor = db.execute("""
-        INSERT INTO spans (session, parent_id, name, start_line, depth)
-        VALUES (?, ?, ?, ?, ?)
-    """, (session, parent_id, name, start_line, depth))
+        INSERT INTO spans (topic_id, session, parent_id, name, start_line, depth)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (topic_id, session, parent_id, name, start_line, depth))
     span_id = cursor.lastrowid
     db.commit()
     db.close()
@@ -493,8 +2018,8 @@ def search_ideas(
     recency_weight: float = 0.0
 ) -> list[dict]:
     """Search for similar ideas using vector similarity."""
-    db = get_db()
     query_embedding = get_embedding(query)
+    db = get_db()
 
     # Vector search with larger k for filtering
     k = limit * 3 if (session or intent) else limit
@@ -522,6 +2047,164 @@ def search_ideas(
         results.append(dict(row))
         if len(results) >= limit:
             break
+
+    db.close()
+    return results
+
+
+def find_similar_ideas(
+    idea_id: int,
+    limit: int = 5,
+    exclude_related: bool = True,
+    same_session: Optional[bool] = None,
+    session: Optional[str] = None
+) -> list[dict]:
+    """Find ideas similar to a given idea.
+
+    Uses the idea's embedding to find semantically similar ideas.
+
+    Args:
+        idea_id: ID of the source idea
+        limit: Maximum similar ideas to return
+        exclude_related: If True, exclude ideas already linked by relations
+        same_session: If True, only same session; if False, only other sessions; if None, all
+        session: Explicit session filter (overrides same_session)
+
+    Returns:
+        List of similar idea dicts with distance
+    """
+    db = get_db()
+
+    # Get the idea's embedding and session
+    cursor = db.execute("""
+        SELECT e.embedding, s.session
+        FROM idea_embeddings e
+        JOIN ideas i ON i.id = e.idea_id
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE e.idea_id = ?
+    """, (idea_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        db.close()
+        return []
+
+    embedding = row["embedding"]
+    source_session = row["session"]
+
+    # Find similar ideas
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.session, s.name as topic,
+            e.distance
+        FROM idea_embeddings e
+        JOIN ideas i ON i.id = e.idea_id
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE e.embedding MATCH ? AND k = ?
+        ORDER BY e.distance
+    """, (embedding, limit + 20))  # Get extra to filter
+
+    results = []
+    related_ids = set()
+
+    if exclude_related:
+        # Get related idea IDs
+        rel_cursor = db.execute("""
+            SELECT to_id FROM relations WHERE from_id = ?
+            UNION
+            SELECT from_id FROM relations WHERE to_id = ?
+        """, (idea_id, idea_id))
+        related_ids = {row["to_id"] if "to_id" in row.keys() else row["from_id"] for row in rel_cursor}
+
+    for row in cursor:
+        if row["id"] == idea_id:
+            continue  # Skip self
+        if exclude_related and row["id"] in related_ids:
+            continue
+
+        # Session filtering
+        row_session = row["session"]
+        if session is not None:
+            if row_session != session:
+                continue
+        elif same_session is True:
+            if row_session != source_session:
+                continue
+        elif same_session is False:
+            if row_session == source_session:
+                continue
+
+        results.append(dict(row))
+        if len(results) >= limit:
+            break
+
+    db.close()
+    return results
+
+
+def enrich_with_relations(results: list[dict], max_related: int = 3) -> list[dict]:
+    """Enrich search results with related ideas.
+
+    Adds a 'related' field to each result showing ideas that
+    supersede, contradict, or answer it.
+
+    Args:
+        results: List of search result dicts (must have 'id' field)
+        max_related: Maximum related ideas per result
+
+    Returns:
+        Results with 'related' field added
+    """
+    if not results:
+        return results
+
+    db = get_db()
+
+    for result in results:
+        idea_id = result.get("id")
+        if not idea_id:
+            continue
+
+        related = []
+
+        # Get outgoing relations
+        cursor = db.execute("""
+            SELECT r.relation_type, i.id, i.content, i.intent
+            FROM relations r
+            JOIN ideas i ON i.id = r.to_id
+            WHERE r.from_id = ?
+            LIMIT ?
+        """, (idea_id, max_related))
+        for row in cursor:
+            related.append({
+                "type": row["relation_type"],
+                "direction": "outgoing",
+                "id": row["id"],
+                "content": row["content"][:100],  # Truncate
+                "intent": row["intent"]
+            })
+
+        # Get incoming relations (if room)
+        if len(related) < max_related:
+            cursor = db.execute("""
+                SELECT r.relation_type, i.id, i.content, i.intent
+                FROM relations r
+                JOIN ideas i ON i.id = r.from_id
+                WHERE r.to_id = ?
+                LIMIT ?
+            """, (idea_id, max_related - len(related)))
+            for row in cursor:
+                related.append({
+                    "type": row["relation_type"],
+                    "direction": "incoming",
+                    "id": row["id"],
+                    "content": row["content"][:100],
+                    "intent": row["intent"]
+                })
+
+        result["related"] = related
 
     db.close()
     return results
@@ -617,10 +2300,8 @@ def hybrid_search(query: str, limit: int = 10) -> list[dict]:
 # Advanced Retrieval
 # =============================================================================
 
-def generate_hypothetical_doc(query: str) -> str:
-    """Generate a hypothetical document that would answer the query.
-
-    Used for HyDE (Hypothetical Document Embeddings) to improve retrieval.
+def _generate_hypothetical_doc_heuristic(query: str) -> str:
+    """Generate a hypothetical doc using simple heuristics (fallback).
 
     Args:
         query: The user's search query
@@ -628,8 +2309,6 @@ def generate_hypothetical_doc(query: str) -> str:
     Returns:
         A hypothetical answer document
     """
-    # TODO: Use LLM to generate better hypothetical docs
-    # For now, expand the query into a statement
     query_lower = query.lower().strip()
 
     # Remove question words and rephrase as statement
@@ -643,6 +2322,49 @@ def generate_hypothetical_doc(query: str) -> str:
 
     # Create a hypothetical answer
     return f"The answer involves {query_lower}. This was decided based on careful consideration of the requirements and constraints."
+
+
+def generate_hypothetical_doc(query: str) -> str:
+    """Generate a hypothetical document that would answer the query.
+
+    Used for HyDE (Hypothetical Document Embeddings) to improve retrieval.
+    Uses LLM to generate a plausible answer, which often matches stored
+    content better than the original question.
+
+    Args:
+        query: The user's search query
+
+    Returns:
+        A hypothetical answer document
+    """
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key:
+        return _generate_hypothetical_doc_heuristic(query)
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are helping with document retrieval. Given a question,
+write a brief hypothetical answer that might appear in documentation or conversation logs.
+Write in a direct, factual style as if you were recording a decision or explaining a solution.
+Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably"."""
+                },
+                {"role": "user", "content": query}
+            ],
+            max_tokens=150,
+            temperature=0.3,
+        )
+        hypothetical = response.choices[0].message.content.strip()
+        logger.debug(f"HyDE generated: {hypothetical[:100]}...")
+        return hypothetical
+
+    except Exception as e:
+        logger.warning(f"LLM HyDE generation failed, using heuristic: {e}")
+        return _generate_hypothetical_doc_heuristic(query)
 
 
 def hyde_search(query: str, limit: int = 10) -> list[dict]:
@@ -747,6 +2469,74 @@ def get_idea_context(idea_id: int) -> dict:
     return {}
 
 
+def get_idea_with_relations(idea_id: int) -> dict:
+    """Get an idea with all its relations.
+
+    Args:
+        idea_id: ID of the idea
+
+    Returns:
+        Dict with idea content and lists of related ideas by type
+    """
+    db = get_db()
+
+    # Get the idea itself
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.id = ?
+    """, (idea_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        db.close()
+        return {}
+
+    result = dict(row)
+    result["relations"] = {}
+
+    # Get outgoing relations (this idea -> others)
+    cursor = db.execute("""
+        SELECT r.relation_type, r.to_id, i.content
+        FROM relations r
+        JOIN ideas i ON i.id = r.to_id
+        WHERE r.from_id = ?
+    """, (idea_id,))
+    for rel_row in cursor:
+        rel_type = rel_row["relation_type"]
+        if rel_type not in result["relations"]:
+            result["relations"][rel_type] = []
+        result["relations"][rel_type].append({
+            "id": rel_row["to_id"],
+            "content": rel_row["content"],
+            "direction": "outgoing"
+        })
+
+    # Get incoming relations (others -> this idea)
+    cursor = db.execute("""
+        SELECT r.relation_type, r.from_id, i.content
+        FROM relations r
+        JOIN ideas i ON i.id = r.from_id
+        WHERE r.to_id = ?
+    """, (idea_id,))
+    for rel_row in cursor:
+        rel_type = rel_row["relation_type"]
+        if rel_type not in result["relations"]:
+            result["relations"][rel_type] = []
+        result["relations"][rel_type].append({
+            "id": rel_row["from_id"],
+            "content": rel_row["content"],
+            "direction": "incoming"
+        })
+
+    db.close()
+    return result
+
+
 def search_ideas_temporal(
     query: str,
     limit: int = 10,
@@ -797,6 +2587,50 @@ def search_ideas_temporal(
     return results
 
 
+# Synonym mappings for query expansion
+_SYNONYMS = {
+    "auth": ["authentication", "login", "signin", "sign-in"],
+    "authentication": ["auth", "login", "signin", "credentials"],
+    "login": ["auth", "authentication", "signin", "sign-in"],
+    "db": ["database", "storage", "persistence"],
+    "database": ["db", "storage", "data store", "persistence"],
+    "api": ["endpoint", "rest", "interface", "service"],
+    "endpoint": ["api", "route", "path"],
+    "config": ["configuration", "settings", "options"],
+    "configuration": ["config", "settings", "setup"],
+    "error": ["exception", "failure", "bug", "issue"],
+    "bug": ["error", "issue", "problem", "defect"],
+    "test": ["testing", "spec", "unit test", "integration"],
+    "cache": ["caching", "memoization", "redis"],
+    "perf": ["performance", "speed", "optimization"],
+    "performance": ["perf", "speed", "latency", "throughput"],
+    "deploy": ["deployment", "release", "ship"],
+    "deployment": ["deploy", "release", "production"],
+    "ui": ["frontend", "interface", "user interface"],
+    "frontend": ["ui", "client", "browser"],
+    "backend": ["server", "api", "service"],
+}
+
+
+def expand_query(query: str) -> list[str]:
+    """Expand a query with synonyms for better recall.
+
+    Args:
+        query: Original search query
+
+    Returns:
+        List of expanded query terms (including original)
+    """
+    words = query.lower().split()
+    expanded = set(words)
+
+    for word in words:
+        if word in _SYNONYMS:
+            expanded.update(_SYNONYMS[word])
+
+    return list(expanded)
+
+
 def analyze_query(query: str) -> dict:
     """Analyze a query to extract filters and entities.
 
@@ -804,11 +2638,14 @@ def analyze_query(query: str) -> dict:
         query: Search query
 
     Returns:
-        Dict with temporal, intent_filter, entities
+        Dict with temporal, intent_filter, entities, expanded_terms
     """
     import re
     query_lower = query.lower()
     result = {}
+
+    # Add expanded terms
+    result["expanded_terms"] = expand_query(query)
 
     # Temporal qualifiers
     temporal_patterns = [
@@ -931,8 +2768,932 @@ def get_stats() -> dict:
     """)
     stats["entities_by_type"] = {row['type']: row['count'] for row in cursor}
 
+    # Count unanswered questions
+    cursor = db.execute("""
+        SELECT COUNT(*) as count FROM ideas
+        WHERE intent = 'question' AND (answered IS NULL OR answered = 0)
+    """)
+    stats["unanswered_questions"] = cursor.fetchone()['count']
+
     db.close()
+
+    # Add cache stats
+    stats["embedding_cache"] = get_embedding_cache_stats()
+
+    # Add database file size
+    if DB_PATH.exists():
+        size_bytes = DB_PATH.stat().st_size
+        stats["db_size_mb"] = round(size_bytes / (1024 * 1024), 2)
+
     return stats
+
+
+def list_sessions() -> list[dict]:
+    """List all indexed sessions with their stats.
+
+    Returns:
+        List of session dicts with name, idea count, topic count, latest date
+    """
+    db = get_db()
+
+    cursor = db.execute("""
+        SELECT
+            s.session,
+            COUNT(DISTINCT s.id) as topic_count,
+            COUNT(DISTINCT i.id) as idea_count,
+            MAX(i.created_at) as latest_idea,
+            MIN(i.created_at) as first_idea
+        FROM spans s
+        LEFT JOIN ideas i ON i.span_id = s.id
+        GROUP BY s.session
+        ORDER BY MAX(i.created_at) DESC
+    """)
+
+    sessions = []
+    for row in cursor:
+        sessions.append({
+            "session": row["session"],
+            "topic_count": row["topic_count"],
+            "idea_count": row["idea_count"],
+            "first_idea": row["first_idea"],
+            "latest_idea": row["latest_idea"],
+        })
+
+    db.close()
+    return sessions
+
+
+# =============================================================================
+# Graph Revision Operations
+# =============================================================================
+
+def update_idea_intent(idea_id: int, new_intent: str) -> bool:
+    """Update an idea's intent classification.
+
+    Args:
+        idea_id: ID of the idea
+        new_intent: New intent value
+
+    Returns:
+        True if updated, False if idea not found
+    """
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE ideas SET intent = ? WHERE id = ?",
+        (new_intent, idea_id)
+    )
+    db.commit()
+    updated = cursor.rowcount > 0
+    db.close()
+    return updated
+
+
+def move_idea_to_span(idea_id: int, span_id: int) -> bool:
+    """Move an idea to a different topic span.
+
+    Args:
+        idea_id: ID of the idea
+        span_id: ID of the target span
+
+    Returns:
+        True if updated, False if idea not found
+    """
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE ideas SET span_id = ? WHERE id = ?",
+        (span_id, idea_id)
+    )
+    db.commit()
+    updated = cursor.rowcount > 0
+    db.close()
+    return updated
+
+
+def merge_spans(source_span_id: int, target_span_id: int) -> dict:
+    """Merge one span into another.
+
+    All ideas from source span are moved to target span,
+    and the source span is deleted.
+
+    Args:
+        source_span_id: Span to merge from (will be deleted)
+        target_span_id: Span to merge into
+
+    Returns:
+        Dict with merge stats
+    """
+    db = get_db()
+
+    # Move all ideas
+    cursor = db.execute(
+        "UPDATE ideas SET span_id = ? WHERE span_id = ?",
+        (target_span_id, source_span_id)
+    )
+    ideas_moved = cursor.rowcount
+
+    # Move child spans
+    cursor = db.execute(
+        "UPDATE spans SET parent_id = ? WHERE parent_id = ?",
+        (target_span_id, source_span_id)
+    )
+    children_moved = cursor.rowcount
+
+    # Delete source span embedding
+    db.execute(
+        "DELETE FROM span_embeddings WHERE span_id = ?",
+        (source_span_id,)
+    )
+
+    # Delete source span
+    db.execute(
+        "DELETE FROM spans WHERE id = ?",
+        (source_span_id,)
+    )
+
+    db.commit()
+    db.close()
+
+    return {
+        "source_span_id": source_span_id,
+        "target_span_id": target_span_id,
+        "ideas_moved": ideas_moved,
+        "children_moved": children_moved
+    }
+
+
+def supersede_idea(old_idea_id: int, new_idea_id: int, reason: Optional[str] = None) -> bool:
+    """Mark an idea as superseded by another.
+
+    Creates a 'supersedes' relation and optionally stores the reason.
+
+    Args:
+        old_idea_id: The old/wrong idea
+        new_idea_id: The new/corrected idea
+        reason: Optional explanation
+
+    Returns:
+        True if relation created
+    """
+    add_relation(new_idea_id, old_idea_id, "supersedes")
+    return True
+
+
+def update_span_name(span_id: int, new_name: str) -> bool:
+    """Update a span's name.
+
+    Args:
+        span_id: ID of the span
+        new_name: New name
+
+    Returns:
+        True if updated
+    """
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE spans SET name = ? WHERE id = ?",
+        (new_name, span_id)
+    )
+    db.commit()
+    updated = cursor.rowcount > 0
+    db.close()
+    return updated
+
+
+def reparent_span(span_id: int, new_parent_id: Optional[int], new_depth: Optional[int] = None) -> bool:
+    """Change a span's parent in the hierarchy.
+
+    Args:
+        span_id: ID of the span to move
+        new_parent_id: New parent span ID (None for top-level)
+        new_depth: New depth (auto-calculated if None)
+
+    Returns:
+        True if updated
+    """
+    db = get_db()
+
+    # Calculate depth if not provided
+    if new_depth is None:
+        if new_parent_id is None:
+            new_depth = 0
+        else:
+            cursor = db.execute(
+                "SELECT depth FROM spans WHERE id = ?",
+                (new_parent_id,)
+            )
+            row = cursor.fetchone()
+            new_depth = (row["depth"] + 1) if row else 0
+
+    cursor = db.execute(
+        "UPDATE spans SET parent_id = ?, depth = ? WHERE id = ?",
+        (new_parent_id, new_depth, span_id)
+    )
+    db.commit()
+    updated = cursor.rowcount > 0
+    db.close()
+    return updated
+
+
+def prune_old_ideas(
+    older_than_days: int = 90,
+    session: Optional[str] = None,
+    dry_run: bool = True
+) -> dict:
+    """Prune old ideas from the database.
+
+    Args:
+        older_than_days: Remove ideas older than this many days
+        session: Only prune from specific session (None = all)
+        dry_run: If True, only count what would be removed
+
+    Returns:
+        Dict with counts of pruned/pruneable items
+    """
+    from datetime import datetime, timedelta
+
+    cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
+    db = get_db()
+
+    # Build query
+    if session:
+        count_sql = """
+            SELECT COUNT(*) as count FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            WHERE i.created_at < ? AND s.session = ?
+        """
+        params = (cutoff, session)
+    else:
+        count_sql = """
+            SELECT COUNT(*) as count FROM ideas
+            WHERE created_at < ?
+        """
+        params = (cutoff,)
+
+    cursor = db.execute(count_sql, params)
+    count = cursor.fetchone()["count"]
+
+    result = {
+        "would_remove": count,
+        "older_than_days": older_than_days,
+        "cutoff_date": cutoff,
+        "session": session,
+        "dry_run": dry_run,
+    }
+
+    if not dry_run and count > 0:
+        # Get IDs to delete
+        if session:
+            id_sql = """
+                SELECT i.id FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                WHERE i.created_at < ? AND s.session = ?
+            """
+        else:
+            id_sql = """
+                SELECT id FROM ideas WHERE created_at < ?
+            """
+
+        cursor = db.execute(id_sql, params)
+        idea_ids = [row["id"] for row in cursor]
+
+        if idea_ids:
+            placeholders = ",".join("?" * len(idea_ids))
+
+            # Delete embeddings
+            db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+
+            # Delete relations
+            db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                      idea_ids + idea_ids)
+
+            # Delete entity links
+            db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+
+            # Delete FTS entries
+            db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+
+            # Delete ideas
+            db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+
+            db.commit()
+            result["removed"] = len(idea_ids)
+            result["dry_run"] = False
+
+    db.close()
+    return result
+
+
+def review_ideas_against_filters(
+    topic_id: Optional[int] = None,
+    dry_run: bool = True
+) -> dict:
+    """Review existing ideas against current transcript filters.
+
+    Checks which ideas would not pass the current is_indexable() filters
+    and optionally removes them.
+
+    Args:
+        topic_id: Only review ideas from this topic (None = all)
+        dry_run: If True, only report what would be removed
+
+    Returns:
+        Dict with review results and counts by filter reason
+    """
+    from transcript import get_filter_reason
+
+    db = get_db()
+
+    # Get ideas to review
+    if topic_id:
+        cursor = db.execute("""
+            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+            FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            LEFT JOIN topics t ON t.id = s.topic_id
+            WHERE s.topic_id = ?
+            ORDER BY i.source_line
+        """, (topic_id,))
+    else:
+        cursor = db.execute("""
+            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+            FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            LEFT JOIN topics t ON t.id = s.topic_id
+            ORDER BY s.topic_id, i.source_line
+        """)
+
+    ideas = [dict(row) for row in cursor]
+
+    # Check each idea against filters
+    would_filter = []
+    filter_reasons = {}
+
+    for idea in ideas:
+        # Simulate the message structure expected by is_indexable
+        message = {
+            "content": idea["content"],
+            "type": "assistant",  # Assume assistant for stricter filtering
+            "has_tool_use": False,
+        }
+
+        reason = get_filter_reason(message)
+        if reason:
+            would_filter.append({
+                "id": idea["id"],
+                "content": idea["content"][:100],
+                "intent": idea["intent"],
+                "topic": idea["topic_name"],
+                "reason": reason,
+            })
+            filter_reasons[reason] = filter_reasons.get(reason, 0) + 1
+
+    result = {
+        "total_reviewed": len(ideas),
+        "would_filter": len(would_filter),
+        "would_keep": len(ideas) - len(would_filter),
+        "filter_reasons": filter_reasons,
+        "dry_run": dry_run,
+        "topic_id": topic_id,
+    }
+
+    # Add sample of what would be filtered
+    result["samples"] = would_filter[:20]
+
+    if not dry_run and would_filter:
+        # Delete the filtered ideas
+        idea_ids = [item["id"] for item in would_filter]
+        placeholders = ",".join("?" * len(idea_ids))
+
+        # Delete embeddings
+        db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+
+        # Delete relations
+        db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                  idea_ids + idea_ids)
+
+        # Delete entity links
+        db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+
+        # Delete FTS entries
+        db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+
+        # Delete ideas
+        db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+
+        db.commit()
+        result["removed"] = len(idea_ids)
+        result["dry_run"] = False
+
+    db.close()
+    return result
+
+
+def llm_filter_ideas(
+    topic_id: Optional[int] = None,
+    batch_size: int = 20,
+    dry_run: bool = True
+) -> dict:
+    """Use LLM to identify low-value ideas that regex filters can't catch.
+
+    Catches things like:
+    - Generic statements without specific information
+    - Redundant or repetitive content
+    - Overly verbose preambles that passed regex
+    - Content that's too context-dependent to be useful standalone
+
+    Args:
+        topic_id: Only filter ideas from this topic (None = all)
+        batch_size: Number of ideas to evaluate per LLM call
+        dry_run: If True, only report what would be removed
+
+    Returns:
+        Dict with filtering results
+    """
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key:
+        return {"error": "OPENAI_TOKEN_MEMORY_EMBEDDINGS not set"}
+
+    try:
+        client = OpenAI(api_key=api_key)
+    except Exception as e:
+        return {"error": f"Failed to initialize OpenAI client: {e}"}
+
+    db = get_db()
+
+    # Get ideas to review
+    if topic_id:
+        cursor = db.execute("""
+            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+            FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            LEFT JOIN topics t ON t.id = s.topic_id
+            WHERE s.topic_id = ?
+            ORDER BY i.source_line
+        """, (topic_id,))
+    else:
+        cursor = db.execute("""
+            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+            FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            LEFT JOIN topics t ON t.id = s.topic_id
+            ORDER BY s.topic_id, i.source_line
+        """)
+
+    ideas = [dict(row) for row in cursor]
+
+    flagged = []
+    total_reviewed = 0
+
+    # Process in batches
+    for i in range(0, len(ideas), batch_size):
+        batch = ideas[i:i + batch_size]
+        total_reviewed += len(batch)
+
+        # Format batch for LLM
+        ideas_text = "\n".join(
+            f"[{idx}] ({idea['intent']}) {idea['content'][:200]}"
+            for idx, idea in enumerate(batch)
+        )
+
+        prompt = f"""You are filtering a conversation memory database. Review these extracted "ideas" and identify which ones are LOW VALUE and should be removed.
+
+Remove ideas that are:
+- Generic statements without specific/actionable information
+- Preambles like "Let me help you with that" or "I'll work on this"
+- Status updates without substance ("Working on it", "Almost done")
+- Redundant/repetitive - says same thing as likely neighbors
+- Too context-dependent to be useful standalone (references "this" or "that" without specifics)
+- Procedural noise ("I'll use tool X", "Running the command")
+
+Keep ideas that are:
+- Specific decisions with reasoning
+- Concrete conclusions or findings
+- Actionable questions or problems
+- Technical explanations with detail
+- Solutions with implementation specifics
+
+Ideas to review:
+{ideas_text}
+
+Reply with ONLY a JSON array of indices that should be REMOVED, e.g. [0, 3, 5]
+If none should be removed, reply: []"""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0
+            )
+            response_text = response.choices[0].message.content.strip()
+
+            # Parse response - handle various formats
+            import re
+            # Find array in response
+            match = re.search(r'\[[\d,\s]*\]', response_text)
+            if match:
+                indices = json.loads(match.group())
+                for idx in indices:
+                    if 0 <= idx < len(batch):
+                        flagged.append({
+                            "id": batch[idx]["id"],
+                            "content": batch[idx]["content"][:100],
+                            "intent": batch[idx]["intent"],
+                            "topic": batch[idx]["topic_name"],
+                            "reason": "llm_low_value",
+                        })
+
+        except Exception as e:
+            logger.warning(f"LLM filter batch failed: {e}")
+            continue
+
+    result = {
+        "total_reviewed": total_reviewed,
+        "flagged": len(flagged),
+        "kept": total_reviewed - len(flagged),
+        "dry_run": dry_run,
+        "topic_id": topic_id,
+        "samples": flagged[:20],
+    }
+
+    if not dry_run and flagged:
+        # Delete the flagged ideas
+        idea_ids = [item["id"] for item in flagged]
+        placeholders = ",".join("?" * len(idea_ids))
+
+        # Delete embeddings
+        db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+
+        # Delete relations
+        db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                  idea_ids + idea_ids)
+
+        # Delete entity links
+        db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+
+        # Delete FTS entries
+        db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+
+        # Delete ideas
+        db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+
+        db.commit()
+        result["removed"] = len(idea_ids)
+
+    db.close()
+    return result
+
+
+def get_context(idea_id: int, lines_before: int = 5, lines_after: int = 5) -> dict:
+    """Get the source transcript context around an idea.
+
+    Args:
+        idea_id: The idea to get context for
+        lines_before: Number of lines before the idea
+        lines_after: Number of lines after the idea
+
+    Returns:
+        Dict with idea info, context lines, and source info
+    """
+    db = get_db()
+    cursor = db.execute("""
+        SELECT i.id, i.content, i.intent, i.source_file, i.source_line,
+               s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.id = ?
+    """, (idea_id,))
+    row = cursor.fetchone()
+    db.close()
+
+    if not row:
+        raise MemgraphError(
+            f"Idea {idea_id} not found",
+            "not_found",
+            {"idea_id": idea_id}
+        )
+
+    idea = dict(row)
+    source_file = idea.get("source_file")
+    source_line = idea.get("source_line")
+
+    if not source_file or not source_line:
+        return {
+            "idea": idea,
+            "context": None,
+            "error": "No source location recorded"
+        }
+
+    # Try to read the source file
+    source_path = Path(source_file)
+    if not source_path.exists():
+        return {
+            "idea": idea,
+            "context": None,
+            "error": f"Source file not found: {source_file}"
+        }
+
+    # Read relevant lines
+    context_lines = []
+    start_line = max(1, source_line - lines_before)
+    end_line = source_line + lines_after
+
+    try:
+        with open(source_path, 'r') as f:
+            for i, line in enumerate(f, 1):
+                if i < start_line:
+                    continue
+                if i > end_line:
+                    break
+
+                # Parse JSONL line
+                try:
+                    entry = json.loads(line)
+                    message_type = entry.get("type", "unknown")
+                    if message_type == "user" and "message" in entry:
+                        content = entry["message"].get("content", "")
+                    elif message_type == "assistant" and "message" in entry:
+                        content = entry["message"].get("content", "")
+                        if isinstance(content, list):
+                            # Handle content blocks
+                            text_parts = []
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text_parts.append(block.get("text", ""))
+                            content = "\n".join(text_parts)
+                    else:
+                        content = str(entry)[:200]  # Truncate other types
+
+                    context_lines.append({
+                        "line": i,
+                        "type": message_type,
+                        "content": content[:500] if isinstance(content, str) else str(content)[:500],
+                        "is_source": i == source_line
+                    })
+                except json.JSONDecodeError:
+                    context_lines.append({
+                        "line": i,
+                        "type": "parse_error",
+                        "content": line[:200],
+                        "is_source": i == source_line
+                    })
+    except Exception as e:
+        return {
+            "idea": idea,
+            "context": None,
+            "error": f"Failed to read source: {e}"
+        }
+
+    return {
+        "idea": idea,
+        "context": context_lines,
+        "source_file": source_file,
+        "source_line": source_line,
+        "lines_shown": f"{start_line}-{end_line}"
+    }
+
+
+def export_data(session: Optional[str] = None, include_embeddings: bool = False) -> dict:
+    """Export ideas and spans as JSON for backup.
+
+    Args:
+        session: Only export from specific session (None = all)
+        include_embeddings: Include embedding vectors (makes export much larger)
+
+    Returns:
+        Dict with ideas, spans, relations, entities
+    """
+    db = get_db()
+
+    # Export spans
+    if session:
+        cursor = db.execute("""
+            SELECT id, session, parent_id, name, summary, start_line, end_line, depth, created_at
+            FROM spans WHERE session = ? ORDER BY id
+        """, (session,))
+    else:
+        cursor = db.execute("""
+            SELECT id, session, parent_id, name, summary, start_line, end_line, depth, created_at
+            FROM spans ORDER BY id
+        """)
+    spans = [dict(row) for row in cursor]
+
+    # Export ideas
+    if session:
+        cursor = db.execute("""
+            SELECT i.id, i.span_id, i.content, i.intent, i.confidence, i.answered,
+                   i.source_file, i.source_line, i.created_at
+            FROM ideas i
+            JOIN spans s ON s.id = i.span_id
+            WHERE s.session = ? ORDER BY i.id
+        """, (session,))
+    else:
+        cursor = db.execute("""
+            SELECT id, span_id, content, intent, confidence, answered,
+                   source_file, source_line, created_at
+            FROM ideas ORDER BY id
+        """)
+    ideas = [dict(row) for row in cursor]
+
+    # Get idea IDs for filtering relations and entities
+    idea_ids = {i["id"] for i in ideas}
+
+    # Export relations
+    cursor = db.execute("SELECT from_id, to_id, relation_type FROM relations ORDER BY id")
+    relations = [
+        dict(row) for row in cursor
+        if row["from_id"] in idea_ids or row["to_id"] in idea_ids
+    ]
+
+    # Export entities and their links
+    cursor = db.execute("SELECT id, name, type FROM entities ORDER BY id")
+    all_entities = {row["id"]: dict(row) for row in cursor}
+
+    cursor = db.execute("SELECT idea_id, entity_id FROM idea_entities")
+    entity_links = [
+        dict(row) for row in cursor
+        if row["idea_id"] in idea_ids
+    ]
+
+    # Filter to only entities that are used
+    used_entity_ids = {link["entity_id"] for link in entity_links}
+    entities = [e for eid, e in all_entities.items() if eid in used_entity_ids]
+
+    db.close()
+
+    return {
+        "version": 1,
+        "session_filter": session,
+        "spans": spans,
+        "ideas": ideas,
+        "relations": relations,
+        "entities": entities,
+        "entity_links": entity_links,
+        "stats": {
+            "spans_count": len(spans),
+            "ideas_count": len(ideas),
+            "relations_count": len(relations),
+            "entities_count": len(entities),
+        }
+    }
+
+
+def import_data(data: dict, replace: bool = False) -> dict:
+    """Import data from an export JSON.
+
+    Args:
+        data: Export data dict (from export_data)
+        replace: If True, clear existing data first. If False, merge.
+
+    Returns:
+        Dict with import stats and ID mappings
+    """
+    version = data.get("version", 1)
+    if version != 1:
+        raise MemgraphError(
+            f"Unsupported export version: {version}",
+            "import_error",
+            {"version": version}
+        )
+
+    db = get_db()
+
+    if replace:
+        # Clear existing data
+        db.execute("DELETE FROM idea_entities")
+        db.execute("DELETE FROM relations")
+        db.execute("DELETE FROM ideas")
+        db.execute("DELETE FROM idea_embeddings")
+        db.execute("DELETE FROM spans")
+        db.execute("DELETE FROM entities")
+        db.commit()
+
+    # ID mapping: old_id -> new_id
+    span_id_map = {}
+    idea_id_map = {}
+    entity_id_map = {}
+
+    # Import spans (maintaining parent relationships)
+    # Sort by depth so parents are created first
+    spans_by_depth = sorted(data.get("spans", []), key=lambda s: s.get("depth", 0))
+    for span in spans_by_depth:
+        old_id = span["id"]
+        old_parent_id = span.get("parent_id")
+        new_parent_id = span_id_map.get(old_parent_id) if old_parent_id else None
+
+        cursor = db.execute("""
+            INSERT INTO spans (session, parent_id, name, summary, start_line, end_line, depth, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            span["session"],
+            new_parent_id,
+            span.get("name"),
+            span.get("summary"),
+            span.get("start_line"),
+            span.get("end_line"),
+            span.get("depth", 0),
+            span.get("created_at")
+        ))
+        span_id_map[old_id] = cursor.lastrowid
+
+    # Import entities
+    for entity in data.get("entities", []):
+        old_id = entity["id"]
+        cursor = db.execute("""
+            INSERT INTO entities (name, type)
+            VALUES (?, ?)
+        """, (entity["name"], entity.get("type")))
+        entity_id_map[old_id] = cursor.lastrowid
+
+    # Import ideas and generate embeddings
+    ideas_imported = 0
+    for idea in data.get("ideas", []):
+        old_id = idea["id"]
+        old_span_id = idea["span_id"]
+        new_span_id = span_id_map.get(old_span_id)
+
+        if not new_span_id:
+            logger.warning(f"Skipping idea {old_id}: span {old_span_id} not found")
+            continue
+
+        # Generate embedding for the idea
+        try:
+            embedding = get_embedding(idea["content"])
+        except Exception as e:
+            logger.warning(f"Failed to embed idea {old_id}: {e}")
+            continue
+
+        cursor = db.execute("""
+            INSERT INTO ideas (span_id, content, intent, confidence, answered, source_file, source_line, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            new_span_id,
+            idea["content"],
+            idea.get("intent"),
+            idea.get("confidence"),
+            idea.get("answered"),
+            idea.get("source_file"),
+            idea.get("source_line"),
+            idea.get("created_at")
+        ))
+        new_idea_id = cursor.lastrowid
+        idea_id_map[old_id] = new_idea_id
+
+        # Store embedding
+        db.execute(
+            "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
+            (new_idea_id, serialize_embedding(embedding))
+        )
+        ideas_imported += 1
+
+    # Import relations
+    relations_imported = 0
+    for rel in data.get("relations", []):
+        new_from_id = idea_id_map.get(rel["from_id"])
+        new_to_id = idea_id_map.get(rel["to_id"])
+        if new_from_id and new_to_id:
+            try:
+                db.execute("""
+                    INSERT INTO relations (from_id, to_id, relation_type)
+                    VALUES (?, ?, ?)
+                """, (new_from_id, new_to_id, rel["relation_type"]))
+                relations_imported += 1
+            except sqlite3.IntegrityError:
+                pass  # Duplicate relation
+
+    # Import entity links
+    entity_links_imported = 0
+    for link in data.get("entity_links", []):
+        new_idea_id = idea_id_map.get(link["idea_id"])
+        new_entity_id = entity_id_map.get(link["entity_id"])
+        if new_idea_id and new_entity_id:
+            try:
+                db.execute("""
+                    INSERT INTO idea_entities (idea_id, entity_id)
+                    VALUES (?, ?)
+                """, (new_idea_id, new_entity_id))
+                entity_links_imported += 1
+            except sqlite3.IntegrityError:
+                pass  # Duplicate link
+
+    db.commit()
+    db.close()
+
+    return {
+        "success": True,
+        "stats": {
+            "spans_imported": len(span_id_map),
+            "ideas_imported": ideas_imported,
+            "relations_imported": relations_imported,
+            "entities_imported": len(entity_id_map),
+            "entity_links_imported": entity_links_imported,
+        },
+        "id_mappings": {
+            "spans": span_id_map,
+            "ideas": idea_id_map,
+            "entities": entity_id_map,
+        }
+    }
 
 
 def extract_session_from_path(file_path: str) -> str:

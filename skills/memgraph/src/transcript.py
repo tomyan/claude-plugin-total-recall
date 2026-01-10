@@ -1,6 +1,7 @@
 """Transcript parsing for Claude conversation logs."""
 
 import json
+import re
 from typing import Iterator, Optional
 
 
@@ -124,9 +125,79 @@ _ACKNOWLEDGMENT_PATTERNS = frozenset([
     "perfect", "great", "awesome", "nice", "cool",
 ])
 
-_TOOL_PREAMBLE_PATTERNS = frozenset([
-    "let me", "i'll", "i will", "let's",
-])
+# Preamble patterns - messages that just introduce tool use
+# These are regex patterns matched against the full content
+_PREAMBLE_PATTERNS = [
+    # "Let me X" / "I'll X" / "Now let me X" patterns
+    r"^(now\s+)?let\s+me\s+(try|check|fetch|read|run|search|look|see|find|get|create|update|fix|test|verify|examine|review|inspect|analyze)",
+    r"^i'?ll\s+(try|check|fetch|read|run|search|look|see|find|get|create|update|fix|test|verify|help|start|begin)",
+    r"^(now\s+)?i'?ll\s+",
+    r"^let'?s\s+(try|check|see|look|start|begin|run|test)",
+
+    # Status/transition messages
+    r"^(good|great|perfect|excellent)[,.]?\s*(now|let)",
+    r"^(now|next|first|then)[,:]?\s*(let me|i'?ll|let'?s)",
+    r"^(okay|ok|alright)[,.]?\s*(now|let|i'?ll)",
+
+    # Result announcements (short)
+    r"^(here'?s?|this is)\s+(the|what)",
+    r"^the (output|result|error|file|code) (is|shows|says)",
+
+    # Continuation markers
+    r"^(and\s+)?(now|next)\s+",
+    r"^moving on",
+    r"^continuing with",
+]
+
+_PREAMBLE_RE = re.compile("|".join(_PREAMBLE_PATTERNS), re.IGNORECASE)
+
+# Patterns that indicate substantive content (override preamble detection)
+_SUBSTANTIVE_PATTERNS = [
+    r"\bbecause\b",
+    r"\bthe (reason|issue|problem|solution|key|important|main)\b",
+    r"\bdecided\b",
+    r"\bshould\b.*\bbecause\b",
+    r"\binstead of\b",
+    r"\brather than\b",
+    r"\bthe approach\b",
+    r"\bwe need to\b.*\bto\b",  # "we need to X to Y" is substantive
+]
+
+_SUBSTANTIVE_RE = re.compile("|".join(_SUBSTANTIVE_PATTERNS), re.IGNORECASE)
+
+# Patterns for messages that are just tool output narration
+_TOOL_NARRATION_PATTERNS = [
+    r"^(the command|it|this) (completed|succeeded|failed|ran|finished|returned|shows|outputs)",
+    r"^(running|executing|checking|reading|fetching|creating)",
+    r"^(done|complete|success|finished)[.!]?$",
+    r"^(no errors?|all (tests? )?pass(ed|ing)?)[.!]?$",
+]
+
+_TOOL_NARRATION_RE = re.compile("|".join(_TOOL_NARRATION_PATTERNS), re.IGNORECASE)
+
+# System/meta messages to filter
+_SYSTEM_PATTERNS = [
+    r"^\[request interrupted",
+    r"^\[user cancelled",
+    r"^\[tool (error|timeout|failed)",
+    r"^<system",
+]
+
+_SYSTEM_RE = re.compile("|".join(_SYSTEM_PATTERNS), re.IGNORECASE)
+
+# Short user instructions that aren't valuable on their own
+# Must be careful not to match questions ("do we need...?")
+_SHORT_INSTRUCTION_PATTERNS = [
+    r"^(please\s+)?(run|try|check|fix|update|create|delete|show|list|find|search)\s+it\b",
+    r"^(please\s+)?(run|try|check|fix|update|create|delete|show|list|find|search)\s+this\b",
+    r"^(please\s+)?(run|try|check|fix|update|create|delete|show|list|find|search)\s+that\b",
+    r"^go\s*(ahead)?[.!]?$",
+    r"^(do it|proceed|continue)[.!]?$",
+    r"^yes[,.]?\s*please[.!]?$",
+    r"^okay[,.]?\s*do it[.!]?$",
+]
+
+_SHORT_INSTRUCTION_RE = re.compile("|".join(_SHORT_INSTRUCTION_PATTERNS), re.IGNORECASE)
 
 # Assistant greeting patterns (prefix match)
 _ASSISTANT_GREETING_PREFIXES = [
@@ -135,7 +206,9 @@ _ASSISTANT_GREETING_PREFIXES = [
     "hello.", "hi.", "hey.",
 ]
 
+# Minimum length thresholds
 MIN_INDEXABLE_LENGTH = 20
+MIN_SUBSTANTIVE_LENGTH = 80  # Messages under this get extra scrutiny
 
 
 def is_indexable(message: dict) -> bool:
@@ -145,7 +218,9 @@ def is_indexable(message: dict) -> bool:
     - Greetings ("hello", "hi there")
     - Simple acknowledgments ("ok", "yes", "thanks")
     - Very short content (< 20 chars)
-    - Tool use preambles without substance
+    - Tool use preambles ("Let me try...", "I'll check...")
+    - Tool narration ("Running the command...", "Done!")
+    - Status updates without substance
 
     Args:
         message: Parsed message dict with 'type', 'content', 'has_tool_use'
@@ -165,11 +240,11 @@ def is_indexable(message: dict) -> bool:
     if len(content) < MIN_INDEXABLE_LENGTH:
         return False
 
-    # Check for greeting patterns
+    # Check for greeting patterns (exact match)
     if content_lower in _GREETING_PATTERNS:
         return False
 
-    # Check for acknowledgment patterns
+    # Check for acknowledgment patterns (exact match)
     if content_lower in _ACKNOWLEDGMENT_PATTERNS:
         return False
 
@@ -179,15 +254,92 @@ def is_indexable(message: dict) -> bool:
             if content_lower.startswith(prefix):
                 return False
 
-    # For assistant messages with tool use, check if it's just preamble
+    # Check for tool narration (these are almost never valuable)
+    if _TOOL_NARRATION_RE.match(content_lower):
+        return False
+
+    # Check for system/meta messages
+    if _SYSTEM_RE.match(content_lower):
+        return False
+
+    # Check for short user instructions (< 50 chars and matches pattern)
+    if len(content) < 50 and _SHORT_INSTRUCTION_RE.match(content_lower):
+        return False
+
+    # For shorter messages, check for preamble patterns
+    if len(content) < MIN_SUBSTANTIVE_LENGTH:
+        # Check if it's a preamble
+        if _PREAMBLE_RE.match(content_lower):
+            # But allow if it contains substantive content
+            if not _SUBSTANTIVE_RE.search(content_lower):
+                return False
+
+    # For assistant messages with tool use, be stricter
     if message.get("has_tool_use"):
-        # If short and starts with tool preamble, skip
-        if len(content) < 50:
-            for pattern in _TOOL_PREAMBLE_PATTERNS:
-                if content_lower.startswith(pattern):
-                    return False
+        # Short messages with tool use are almost always preambles
+        if len(content) < 100:
+            # Check for any preamble pattern
+            if _PREAMBLE_RE.match(content_lower):
+                return False
+            # Also filter very short tool introductions
+            if len(content) < 60:
+                return False
 
     return True
+
+
+def get_filter_reason(message: dict) -> Optional[str]:
+    """Get the reason a message would be filtered (for debugging/review).
+
+    Args:
+        message: Parsed message dict
+
+    Returns:
+        Reason string if filtered, None if indexable
+    """
+    content = message.get("content", "").strip()
+
+    if not content:
+        return "empty"
+
+    content_lower = content.lower()
+
+    if len(content) < MIN_INDEXABLE_LENGTH:
+        return f"too_short ({len(content)} < {MIN_INDEXABLE_LENGTH})"
+
+    if content_lower in _GREETING_PATTERNS:
+        return "greeting"
+
+    if content_lower in _ACKNOWLEDGMENT_PATTERNS:
+        return "acknowledgment"
+
+    if len(content) < 50:
+        for prefix in _ASSISTANT_GREETING_PREFIXES:
+            if content_lower.startswith(prefix):
+                return "greeting_response"
+
+    if _TOOL_NARRATION_RE.match(content_lower):
+        return "tool_narration"
+
+    if _SYSTEM_RE.match(content_lower):
+        return "system_message"
+
+    if len(content) < 50 and _SHORT_INSTRUCTION_RE.match(content_lower):
+        return "short_instruction"
+
+    if len(content) < MIN_SUBSTANTIVE_LENGTH:
+        if _PREAMBLE_RE.match(content_lower):
+            if not _SUBSTANTIVE_RE.search(content_lower):
+                return "preamble"
+
+    if message.get("has_tool_use"):
+        if len(content) < 100:
+            if _PREAMBLE_RE.match(content_lower):
+                return "tool_preamble"
+            if len(content) < 60:
+                return "short_tool_intro"
+
+    return None  # Indexable
 
 
 def get_indexable_messages(
