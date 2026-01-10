@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
 
-from transcript import parse_transcript_line, extract_message_content
+from transcript import parse_transcript_line, extract_message_content, read_transcript
 
 
 class TestParseTranscriptLine:
@@ -94,6 +94,56 @@ class TestParseTranscriptLine:
         result = parse_transcript_line(line)
         # Should return None - no text content to index
         assert result is None
+
+
+class TestReadTranscript:
+    """Test reading and iterating transcript files."""
+
+    def test_read_transcript_yields_parsed_lines_with_numbers(self, tmp_path):
+        """Read transcript yields (line_number, parsed_dict) tuples."""
+        transcript = tmp_path / "test.jsonl"
+        transcript.write_text("\n".join([
+            json.dumps({"type": "user", "message": {"content": "Hello"}, "timestamp": "T1"}),
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi!"}]}, "timestamp": "T2"}),
+        ]))
+
+        results = list(read_transcript(str(transcript)))
+
+        assert len(results) == 2
+        assert results[0][0] == 1  # line number
+        assert results[0][1]["content"] == "Hello"
+        assert results[1][0] == 2
+        assert results[1][1]["content"] == "Hi!"
+
+    def test_read_transcript_skips_unparseable_lines(self, tmp_path):
+        """Unparseable lines are skipped."""
+        transcript = tmp_path / "test.jsonl"
+        transcript.write_text("\n".join([
+            json.dumps({"type": "user", "message": {"content": "First"}, "timestamp": "T1"}),
+            "invalid json line",
+            json.dumps({"type": "user", "message": {"content": "Third"}, "timestamp": "T3"}),
+        ]))
+
+        results = list(read_transcript(str(transcript)))
+
+        assert len(results) == 2
+        assert results[0][0] == 1
+        assert results[1][0] == 3  # Line 2 was skipped
+
+    def test_read_transcript_from_offset(self, tmp_path):
+        """Can start reading from a specific line offset."""
+        transcript = tmp_path / "test.jsonl"
+        transcript.write_text("\n".join([
+            json.dumps({"type": "user", "message": {"content": "Line 1"}, "timestamp": "T1"}),
+            json.dumps({"type": "user", "message": {"content": "Line 2"}, "timestamp": "T2"}),
+            json.dumps({"type": "user", "message": {"content": "Line 3"}, "timestamp": "T3"}),
+        ]))
+
+        results = list(read_transcript(str(transcript), start_line=2))
+
+        assert len(results) == 2
+        assert results[0][0] == 2
+        assert results[0][1]["content"] == "Line 2"
 
 
 class TestExtractMessageContent:

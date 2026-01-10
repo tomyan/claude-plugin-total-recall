@@ -1,7 +1,7 @@
 """Transcript parsing for Claude conversation logs."""
 
 import json
-from typing import Optional
+from typing import Iterator, Optional
 
 
 def extract_message_content(message: dict) -> str:
@@ -80,3 +80,31 @@ def parse_transcript_line(line: str) -> Optional[dict]:
         "timestamp": data.get("timestamp", ""),
         "has_tool_use": has_tool_use,
     }
+
+
+def read_transcript(
+    file_path: str,
+    start_line: int = 1
+) -> Iterator[tuple[int, dict]]:
+    """Read a transcript file and yield parsed messages.
+
+    Args:
+        file_path: Path to the JSONL transcript file
+        start_line: Line number to start from (1-indexed)
+
+    Yields:
+        Tuples of (line_number, parsed_message_dict)
+        Skips lines that can't be parsed or aren't indexable.
+    """
+    with open(file_path, "r") as f:
+        for line_num, line in enumerate(f, start=1):
+            if line_num < start_line:
+                continue
+
+            line = line.strip()
+            if not line:
+                continue
+
+            parsed = parse_transcript_line(line)
+            if parsed is not None:
+                yield (line_num, parsed)
