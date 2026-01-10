@@ -188,3 +188,34 @@ def is_indexable(message: dict) -> bool:
                     return False
 
     return True
+
+
+def get_indexable_messages(
+    file_path: str,
+    start_line: int = 1
+) -> list[dict]:
+    """Get all indexable messages from a transcript file.
+
+    Combines read_transcript and is_indexable filtering.
+    Returns a list of dicts with line_num added to each message.
+
+    Args:
+        file_path: Path to the JSONL transcript file
+        start_line: Line number to start from (1-indexed)
+
+    Returns:
+        List of message dicts, each with:
+            - line_num: Source line number
+            - type: "user" or "assistant"
+            - content: Text content
+            - timestamp: ISO timestamp
+            - has_tool_use: bool (for assistant messages)
+    """
+    messages = []
+    for line_num, msg in read_transcript(file_path, start_line):
+        if is_indexable(msg):
+            messages.append({
+                "line_num": line_num,
+                **msg
+            })
+    return messages

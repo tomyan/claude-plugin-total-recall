@@ -8,7 +8,13 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
 
-from transcript import parse_transcript_line, extract_message_content, read_transcript, is_indexable
+from transcript import (
+    parse_transcript_line,
+    extract_message_content,
+    read_transcript,
+    is_indexable,
+    get_indexable_messages,
+)
 
 
 class TestParseTranscriptLine:
@@ -235,3 +241,57 @@ class TestIsIndexable:
         """Empty content is not indexable."""
         assert is_indexable({"type": "user", "content": ""}) is False
         assert is_indexable({"type": "user", "content": "   "}) is False
+
+
+class TestGetIndexableMessages:
+    """Test getting all indexable messages from a transcript."""
+
+    def test_returns_only_indexable_messages(self, tmp_path):
+        """Returns filtered list of indexable messages."""
+        transcript = tmp_path / "test.jsonl"
+        transcript.write_text("\n".join([
+            json.dumps({"type": "user", "message": {"content": "hello"}, "timestamp": "T1"}),
+            json.dumps({"type": "user", "message": {"content": "Can you help me design a database schema for user authentication?"}, "timestamp": "T2"}),
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "I'll help you design an authentication schema. You'll need tables for users, sessions, and password reset tokens."}]}, "timestamp": "T3"}),
+            json.dumps({"type": "user", "message": {"content": "ok"}, "timestamp": "T4"}),
+        ]))
+
+        messages = get_indexable_messages(str(transcript))
+
+        assert len(messages) == 2
+        assert messages[0]["line_num"] == 2
+        assert "database schema" in messages[0]["content"]
+        assert messages[1]["line_num"] == 3
+
+    def test_includes_metadata(self, tmp_path):
+        """Each message includes line_num, type, content, timestamp."""
+        transcript = tmp_path / "test.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "user",
+            "message": {"content": "Implement a caching layer using Redis for the API responses"},
+            "timestamp": "2026-01-10T12:00:00Z"
+        }))
+
+        messages = get_indexable_messages(str(transcript))
+
+        assert len(messages) == 1
+        msg = messages[0]
+        assert msg["line_num"] == 1
+        assert msg["type"] == "user"
+        assert "caching" in msg["content"]
+        assert msg["timestamp"] == "2026-01-10T12:00:00Z"
+
+    def test_respects_start_line(self, tmp_path):
+        """Can start from a specific line for incremental indexing."""
+        transcript = tmp_path / "test.jsonl"
+        transcript.write_text("\n".join([
+            json.dumps({"type": "user", "message": {"content": "First substantive message about API design patterns"}, "timestamp": "T1"}),
+            json.dumps({"type": "user", "message": {"content": "Second substantive message about database optimization"}, "timestamp": "T2"}),
+            json.dumps({"type": "user", "message": {"content": "Third substantive message about caching strategies"}, "timestamp": "T3"}),
+        ]))
+
+        messages = get_indexable_messages(str(transcript), start_line=2)
+
+        assert len(messages) == 2
+        assert messages[0]["line_num"] == 2
+        assert "database" in messages[0]["content"]
