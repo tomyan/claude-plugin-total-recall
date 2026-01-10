@@ -40,108 +40,67 @@ Use the provided file path.
 find ~/.claude/projects -name "*.jsonl" -type f
 ```
 
-### Step 3: For Each Transcript File
+### Step 3: Run Backfill
 
-Read the transcript and process each line:
+For each transcript file, use the backfill CLI:
 
 ```bash
-# Get session name from path
-SESSION=$(cd ~/.claude-plugin-memgraph && uv run python src/memory_db.py session-from-path "<file_path>")
+SKILL_DIR="$HOME/.claude/skills/memgraph"
+cd "$RUNTIME" && uv run python "$SKILL_DIR/src/backfill.py" backfill "<file_path>"
 ```
 
-For each JSON line in the transcript:
-1. Parse the JSON
-2. Skip system messages, tool calls, and low-value content
-3. For substantive content (decisions, insights, conclusions):
+This will:
+- Parse the transcript for indexable messages
+- Filter out greetings, acknowledgments, and low-value content (< 20 chars)
+- Store each substantive message as an idea with embeddings
+- Track progress for incremental indexing (only new content on re-run)
 
-**Identify the type (intent):**
-- `decision` - "We decided...", "Going with...", "Chose..."
-- `conclusion` - "The key insight is...", "Learned that..."
-- `question` - Questions asked (note if answered later)
-- `problem` - "The issue is...", "Problem with..."
-- `solution` - "Fixed by...", "The solution is..."
-- `todo` - "Need to...", "Should implement..."
-- `context` - Background information, requirements
+### Step 4: Check Progress
 
-**Assess confidence (0.0-1.0):**
-- 0.8-1.0: Firm decisions, validated conclusions
-- 0.5-0.7: Discussion points, tentative conclusions
-- 0.3-0.4: Exploratory ideas, questions
-
-**Extract entities:**
-- Projects: control-v1.1, lora-test
-- Technologies: ESP32, SX1262, SQLite, LoRa
-- Concepts: mesh networking, fail-safe, cartridge design
-
-**Detect topic spans:**
-- Look for natural topic boundaries
-- Explicit transitions: "let's move on to...", "back to..."
-- Domain changes
-- Create spans with summaries
-
-### Step 4: Store Ideas
-
-For each extracted idea:
+To see indexing progress for a file:
 ```bash
-cd ~/.claude-plugin-memgraph && uv run python src/memory_db.py store \
-  "<idea_content>" "<source_file>" <line_number> <span_id> "<intent>" <confidence>
+cd "$RUNTIME" && uv run python "$SKILL_DIR/src/backfill.py" progress "<file_path>"
 ```
 
-### Step 5: Report Progress
+Returns:
+- `last_indexed_line`: Last line that was processed
+- `total_lines`: Total lines in the file
+
+### Step 5: Report Results
 
 After processing, report:
 ```markdown
 ## Backfill Complete
 
 **Processed:** <file_path>
-**Session:** <session_name>
-**Ideas extracted:** <count>
-**Topic spans:** <count>
-**Entities found:** <list>
-
-### Topics Indexed
-1. <topic name>: <brief summary>
-2. <topic name>: <brief summary>
-
-### Sample Ideas
-- <high-value idea 1>
-- <high-value idea 2>
+**Messages indexed:** <count>
+**Lines processed:** <start_line> to <end_line>
 ```
 
 ### Step 6: Verify
 
 Check stats after backfill:
 ```bash
-cd ~/.claude-plugin-memgraph && uv run python src/memory_db.py stats
+cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" stats
 ```
 
-## Processing Guidelines
+## What Gets Indexed
 
-### What to Extract (High Value)
+### High Value (Indexed)
 - Architecture decisions and rationale
 - Technology choices and trade-offs
-- Constraints and requirements discovered
+- Substantive questions and answers
 - Solutions to problems encountered
 - Key insights and conclusions
 
-### What to Skip (Low Value)
-- Greetings and acknowledgments
-- Debugging output and error traces
-- Repeated information
-- Pure code without explanation
-- Tool invocation details
-
-### Topic Detection
-
-A new topic span starts when:
-- User explicitly changes subject
-- Significant domain shift (e.g., hardware → software)
-- Return to previous topic after digression
-
-Close each span with a 1-2 sentence summary capturing the key points discussed.
+### Low Value (Filtered)
+- Greetings ("hello", "hi there")
+- Acknowledgments ("ok", "thanks", "got it")
+- Very short messages (< 20 characters)
+- Tool use preambles ("Let me check that file")
 
 ## Notes
 
-- Backfill can be run multiple times safely (tracks last indexed line)
-- Large transcripts may take a while due to embedding API calls
-- Focus on quality over quantity - extract meaningful insights
+- Backfill is incremental - running again only indexes new content
+- Large transcripts may take time due to embedding API calls
+- The stop hook automatically indexes new content after each turn
