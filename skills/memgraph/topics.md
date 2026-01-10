@@ -17,24 +17,17 @@ Lists topic spans across sessions, showing what has been discussed and when.
 
 When the user invokes `/memory-topics`:
 
-### Step 1: Bootstrap
+### Step 1: List Topics
 
-Ensure runtime is ready:
+Run the memgraph CLI:
 ```bash
 SKILL_DIR="$HOME/.claude/skills/memgraph"
-RUNTIME=$("$SKILL_DIR/bootstrap.sh")
-```
-
-### Step 2: List Spans
-
-For all sessions:
-```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" list-spans
+uv run python "$SKILL_DIR/src/cli.py" topics
 ```
 
 For a specific session:
 ```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" list-spans <session>
+uv run python "$SKILL_DIR/src/cli.py" topics -s <session>
 ```
 
 This returns spans with:
@@ -45,7 +38,7 @@ This returns spans with:
 - `start_line`, `end_line`: Line range
 - `depth`: Hierarchy depth
 
-### Step 3: Present Results
+### Step 2: Present Results
 
 Format the topics for the user:
 
@@ -64,7 +57,7 @@ Format the topics for the user:
 ...
 ```
 
-### Step 4: Offer Actions
+### Step 3: Offer Actions
 
 After listing topics, offer:
 - `/remember <topic>` to search within a topic

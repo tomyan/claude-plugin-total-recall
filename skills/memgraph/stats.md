@@ -16,19 +16,12 @@ Shows statistics about the memory database - how many ideas, sessions, and entit
 
 When the user invokes `/memory-stats`:
 
-### Step 1: Bootstrap
+### Step 1: Get Stats
 
-Ensure runtime is ready:
+Run the memgraph CLI:
 ```bash
 SKILL_DIR="$HOME/.claude/skills/memgraph"
-RUNTIME=$("$SKILL_DIR/bootstrap.sh")
-```
-
-### Step 2: Get Stats
-
-Run the stats command:
-```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" stats
+uv run python "$SKILL_DIR/src/cli.py" stats
 ```
 
 This returns:
@@ -40,7 +33,7 @@ This returns:
 - `by_intent`: Breakdown by idea type (decision, question, etc.)
 - `entities_by_type`: Breakdown by entity type
 
-### Step 3: Present Results
+### Step 2: Present Results
 
 Format the stats for the user:
 

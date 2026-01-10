@@ -18,19 +18,14 @@ Indexes existing conversation history that occurred before the memory skill was 
 
 When the user invokes `/memory-backfill`:
 
-### Step 1: Bootstrap
+### Step 1: Determine Scope
 
-Ensure runtime is ready:
 ```bash
-RUNTIME=$("$SKILL_DIR/bootstrap.sh")
+SKILL_DIR="$HOME/.claude/skills/memgraph"
 ```
 
-### Step 2: Determine Scope
-
-Based on arguments:
-
 **Current session (no args):**
-The current transcript path is available in the conversation context. Look for the session's transcript file.
+The current transcript path is available in the conversation context.
 
 **Specific file:**
 Use the provided file path.
@@ -40,48 +35,40 @@ Use the provided file path.
 find ~/.claude/projects -name "*.jsonl" -type f
 ```
 
-### Step 3: Run Backfill
+### Step 2: Run Backfill
 
-For each transcript file, use the backfill CLI:
-
+For each transcript file:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/memgraph"
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/backfill.py" backfill "<file_path>"
+uv run python "$SKILL_DIR/src/cli.py" index "<file_path>"
 ```
 
 This will:
 - Parse the transcript for indexable messages
-- Filter out greetings, acknowledgments, and low-value content (< 20 chars)
-- Store each substantive message as an idea with embeddings
-- Track progress for incremental indexing (only new content on re-run)
+- Detect topic shifts and create spans
+- Classify intent (decision, question, problem, solution, etc.)
+- Extract entities and assess confidence
+- Track progress for incremental indexing
 
-### Step 4: Check Progress
+### Step 3: Check Progress
 
-To see indexing progress for a file:
 ```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/backfill.py" progress "<file_path>"
+uv run python "$SKILL_DIR/src/cli.py" progress "<file_path>"
 ```
 
-Returns:
-- `last_indexed_line`: Last line that was processed
-- `total_lines`: Total lines in the file
+### Step 4: Report Results
 
-### Step 5: Report Results
-
-After processing, report:
 ```markdown
 ## Backfill Complete
 
 **Processed:** <file_path>
 **Messages indexed:** <count>
-**Lines processed:** <start_line> to <end_line>
+**Spans created:** <count>
 ```
 
-### Step 6: Verify
+### Step 5: Verify
 
-Check stats after backfill:
 ```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" stats
+uv run python "$SKILL_DIR/src/cli.py" stats
 ```
 
 ## What Gets Indexed

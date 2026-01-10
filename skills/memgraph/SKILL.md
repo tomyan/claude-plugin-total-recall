@@ -21,24 +21,12 @@ Examples:
 
 When the user invokes `/remember <query>`:
 
-### Step 1: Bootstrap
+### Step 1: Search
 
-Ensure the runtime is ready:
+Run the memgraph CLI (handles bootstrap automatically):
 ```bash
 SKILL_DIR="$HOME/.claude/skills/memgraph"
-RUNTIME=$("$SKILL_DIR/bootstrap.sh")
-```
-
-If this fails, the dependencies need to be installed. Run:
-```bash
-cd ~/.claude-plugin-memgraph && uv sync
-```
-
-### Step 2: Search
-
-Run vector search for relevant ideas:
-```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" search "<query>" 10
+uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10
 ```
 
 This returns ideas with:
@@ -50,33 +38,26 @@ This returns ideas with:
 - `source_line`: Line number
 - `distance`: Semantic similarity (lower = more similar)
 
-### Step 3: Search Topic Spans (if needed)
-
-For broader context, also search topic spans:
-```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" search-spans "<query>" 5
-```
-
-### Step 4: Choose Search Strategy
+### Step 2: Choose Search Strategy
 
 Based on the query, choose the best search strategy:
 
 **Hybrid Search** - For queries with specific terms:
 ```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" hybrid "<query>" 10
+uv run python "$SKILL_DIR/src/cli.py" hybrid "<query>" -n 10
 ```
 
-**HyDE Search** - For vague/conceptual queries (generates hypothetical answer first):
+**HyDE Search** - For vague/conceptual queries:
 ```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" hyde "<query>" 10
+uv run python "$SKILL_DIR/src/cli.py" hyde "<query>" -n 10
 ```
 
-**Filtered Search** - For queries with intent or temporal qualifiers:
-- "decisions about X" → filter by intent=decision
-- "last week X" → filter by date range
-- "problems with X" → filter by intent=problem
+**Filtered Search** - For queries with intent:
+```bash
+uv run python "$SKILL_DIR/src/cli.py" search "<query>" -i decision -n 10
+```
 
-### Step 5: Present Results
+### Step 3: Present Results
 
 Format the results for the user:
 
@@ -102,7 +83,7 @@ Found <N> relevant ideas across <M> sessions.
 Most relevant from: <session names>
 ```
 
-### Step 6: Offer Deep Dive
+### Step 4: Offer Deep Dive
 
 If results seem incomplete or user wants more detail:
 - Offer to read the original transcript sections
@@ -113,7 +94,7 @@ If results seem incomplete or user wants more detail:
 
 To check what's indexed:
 ```bash
-cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" stats
+uv run python "$SKILL_DIR/src/cli.py" stats
 ```
 
 ## Notes

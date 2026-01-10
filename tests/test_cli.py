@@ -11,6 +11,45 @@ import pytest
 SKILL_SRC = Path(__file__).parent.parent / "skills" / "memgraph" / "src"
 
 
+class TestUnifiedCLI:
+    """Test the unified memgraph CLI."""
+
+    def test_cli_help(self):
+        """CLI shows help without error."""
+        result = subprocess.run(
+            [sys.executable, str(SKILL_SRC / "cli.py"), "--help"],
+            capture_output=True,
+            text=True
+        )
+        assert result.returncode == 0
+        assert "memgraph" in result.stdout.lower() or "memory" in result.stdout.lower()
+
+    def test_cli_stats_command(self):
+        """CLI stats command returns JSON."""
+        result = subprocess.run(
+            [sys.executable, str(SKILL_SRC / "cli.py"), "stats"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        # May fail if no DB, but should not crash
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            assert "total_ideas" in data
+
+    def test_cli_topics_command(self):
+        """CLI topics command returns JSON list."""
+        result = subprocess.run(
+            [sys.executable, str(SKILL_SRC / "cli.py"), "topics"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            assert isinstance(data, list)
+
+
 class TestTranscriptCLI:
     """Test transcript.py CLI commands."""
 

@@ -51,5 +51,4 @@ if [ ! -d "$RUNTIME_DIR/.venv" ]; then
 fi
 
 # Run incremental indexing with full topic tracking
-cd "$RUNTIME_DIR"
-uv run python "$SKILL_DIR/src/indexer.py" index "$TRANSCRIPT" 2>/dev/null || true
+uv run python "$SKILL_DIR/src/cli.py" index "$TRANSCRIPT" 2>/dev/null || true
