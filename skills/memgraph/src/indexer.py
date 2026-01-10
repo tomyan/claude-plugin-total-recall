@@ -9,6 +9,7 @@ Processes transcripts to:
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,14 @@ from typing import Optional
 import memory_db
 from memory_db import DB_PATH, MemgraphError, get_embedding, logger
 from transcript import get_indexable_messages
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+# Valid intent types
+VALID_INTENTS = {"decision", "conclusion", "question", "problem", "solution", "todo", "context"}
 
 
 # Topic shift patterns
@@ -136,7 +145,7 @@ _TODO_PATTERNS = [
 
 
 def classify_intent(content: str) -> str:
-    """Classify the intent of a message.
+    """Classify the intent of a message using regex patterns.
 
     Args:
         content: Message content
@@ -173,6 +182,62 @@ def classify_intent(content: str) -> str:
 
     # Default to context
     return "context"
+
+
+def classify_intent_with_llm(content: str) -> str:
+    """Classify the intent using LLM for better accuracy on ambiguous content.
+
+    Falls back to regex classification if LLM unavailable.
+
+    Args:
+        content: Message content
+
+    Returns:
+        Intent string: decision, question, problem, solution, conclusion, todo, or context
+    """
+    # First try regex - if it finds a clear pattern, use it
+    regex_intent = classify_intent(content)
+
+    # Get API key
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key or OpenAI is None:
+        return regex_intent
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Classify this message into exactly one category:
+- decision: A choice or decision that was made
+- conclusion: An insight or conclusion reached
+- question: A question being asked
+- problem: A problem or issue being described
+- solution: A solution to a problem
+- todo: A task that needs to be done
+- context: General context or information
+
+Respond with just the category name, nothing else."""
+                },
+                {"role": "user", "content": content[:500]}
+            ],
+            max_tokens=10,
+            temperature=0,
+        )
+        llm_intent = response.choices[0].message.content.strip().lower()
+
+        # Validate the response
+        if llm_intent in VALID_INTENTS:
+            return llm_intent
+        else:
+            logger.warning(f"LLM returned invalid intent '{llm_intent}', using regex fallback")
+            return regex_intent
+
+    except Exception as e:
+        logger.warning(f"LLM intent classification failed, using regex: {e}")
+        return regex_intent
 
 
 # Known technologies for entity extraction
@@ -369,7 +434,7 @@ def _content_overlap(content1: str, content2: str) -> bool:
 
 
 def summarize_span(messages: list[dict]) -> str:
-    """Generate a summary of messages in a span.
+    """Generate a basic summary of messages in a span (fallback).
 
     Args:
         messages: List of message dicts with content
@@ -377,8 +442,6 @@ def summarize_span(messages: list[dict]) -> str:
     Returns:
         Summary string
     """
-    # TODO: Use LLM for better summarization
-    # For now, extract key sentences
     if not messages:
         return ""
 
@@ -394,6 +457,56 @@ def summarize_span(messages: list[dict]) -> str:
         return sentences[0].strip()[:200]
 
     return first[:200]
+
+
+def summarize_span_with_llm(messages: list[dict]) -> str:
+    """Generate an LLM-powered summary of messages in a span.
+
+    Falls back to basic summarization if LLM is unavailable.
+
+    Args:
+        messages: List of message dicts with content
+
+    Returns:
+        Summary string
+    """
+    if not messages:
+        return ""
+
+    # Get API key
+    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    if not api_key or OpenAI is None:
+        return summarize_span(messages)
+
+    # Build prompt with message content
+    contents = [m.get("content", "")[:500] for m in messages if m.get("content")]
+    if not contents:
+        return "Brief discussion"
+
+    combined = "\n---\n".join(contents[:10])  # Limit to first 10 messages
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Summarize the following conversation excerpt in 1-2 sentences. "
+                               "Focus on key decisions, conclusions, or topics discussed. "
+                               "Be concise and factual."
+                },
+                {"role": "user", "content": combined}
+            ],
+            max_tokens=100,
+            temperature=0.3,
+        )
+        summary = response.choices[0].message.content.strip()
+        logger.info(f"LLM summary generated: {summary[:50]}...")
+        return summary
+    except Exception as e:
+        logger.warning(f"LLM summarization failed, using fallback: {e}")
+        return summarize_span(messages)
 
 
 def index_transcript(
