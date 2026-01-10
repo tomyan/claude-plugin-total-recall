@@ -402,3 +402,106 @@ class TestEntityResolution:
 
         # File type should stay unchanged
         assert resolve_entity("config.js", "file") == "config.js"
+
+
+class TestQuestionAnswered:
+    """Test question.answered field tracking."""
+
+    @pytest.fixture
+    def mock_db(self, tmp_path, monkeypatch):
+        """Mock database path."""
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        return db_path
+
+    @pytest.fixture
+    def mock_embeddings(self, monkeypatch):
+        """Mock embeddings."""
+        fake_embedding = [0.1] * 1536
+        monkeypatch.setattr("memory_db.get_embedding", lambda x, use_cache=True: fake_embedding)
+
+    def test_mark_question_answered(self, mock_db, mock_embeddings):
+        """Mark a question as answered."""
+        import memory_db
+        memory_db.init_db()
+
+        # Store a question
+        q_id = memory_db.store_idea(
+            content="How should we handle authentication?",
+            source_file="test.jsonl",
+            source_line=1,
+            intent="question"
+        )
+
+        # Initially not answered
+        db = memory_db.get_db()
+        cursor = db.execute("SELECT answered FROM ideas WHERE id = ?", (q_id,))
+        assert cursor.fetchone()["answered"] is None
+
+        # Mark as answered
+        memory_db.mark_question_answered(q_id)
+
+        cursor = db.execute("SELECT answered FROM ideas WHERE id = ?", (q_id,))
+        assert cursor.fetchone()["answered"] == 1
+        db.close()
+
+    def test_solution_marks_related_question_answered(self, mock_db, mock_embeddings):
+        """Storing a solution marks related question as answered."""
+        import memory_db
+        memory_db.init_db()
+
+        # Store a question
+        q_id = memory_db.store_idea(
+            content="How do we implement caching?",
+            source_file="test.jsonl",
+            source_line=1,
+            intent="question"
+        )
+
+        # Add answers relation and mark answered
+        s_id = memory_db.store_idea(
+            content="We implement caching using Redis with a TTL of 1 hour",
+            source_file="test.jsonl",
+            source_line=2,
+            intent="solution"
+        )
+
+        # Add answers relation
+        memory_db.add_relation(s_id, q_id, "answers")
+
+        # Mark the question as answered
+        memory_db.mark_question_answered(q_id)
+
+        # Verify question is marked answered
+        db = memory_db.get_db()
+        cursor = db.execute("SELECT answered FROM ideas WHERE id = ?", (q_id,))
+        assert cursor.fetchone()["answered"] == 1
+        db.close()
+
+    def test_get_unanswered_questions(self, mock_db, mock_embeddings):
+        """Get list of unanswered questions."""
+        import memory_db
+        memory_db.init_db()
+
+        # Store questions - one answered, one not
+        q1_id = memory_db.store_idea(
+            content="What database should we use?",
+            source_file="test.jsonl",
+            source_line=1,
+            intent="question"
+        )
+        q2_id = memory_db.store_idea(
+            content="How do we deploy to production?",
+            source_file="test.jsonl",
+            source_line=2,
+            intent="question"
+        )
+
+        # Mark first as answered
+        memory_db.mark_question_answered(q1_id)
+
+        # Get unanswered
+        unanswered = memory_db.get_unanswered_questions()
+
+        assert len(unanswered) == 1
+        assert unanswered[0]["id"] == q2_id

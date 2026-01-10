@@ -434,6 +434,53 @@ def add_relation(from_id: int, to_id: int, relation_type: str):
     db.close()
 
 
+def mark_question_answered(idea_id: int):
+    """Mark a question idea as answered.
+
+    Args:
+        idea_id: ID of the question to mark
+    """
+    db = get_db()
+    db.execute("""
+        UPDATE ideas SET answered = 1 WHERE id = ? AND intent = 'question'
+    """, (idea_id,))
+    db.commit()
+    db.close()
+
+
+def get_unanswered_questions(session: Optional[str] = None) -> list[dict]:
+    """Get list of unanswered questions.
+
+    Args:
+        session: Optional session filter
+
+    Returns:
+        List of question idea dicts
+    """
+    db = get_db()
+
+    sql = """
+        SELECT i.id, i.content, i.source_file, i.source_line, i.created_at,
+               s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.intent = 'question' AND (i.answered IS NULL OR i.answered = 0)
+    """
+    params = []
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+
+    sql += " ORDER BY i.created_at DESC"
+
+    cursor = db.execute(sql, params)
+    results = [dict(row) for row in cursor]
+    db.close()
+
+    return results
+
+
 # =============================================================================
 # Search Operations
 # =============================================================================
