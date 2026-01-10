@@ -243,6 +243,38 @@ class TestIsIndexable:
         assert is_indexable({"type": "user", "content": "   "}) is False
 
 
+class TestExtractSessionFromPath:
+    """Test session name extraction from paths."""
+
+    def test_extract_from_standard_path(self):
+        """Extract session from standard Claude path."""
+        from memory_db import extract_session_from_path
+
+        path = "/Users/alice/.claude/projects/-Users-alice-my-project/abc123.jsonl"
+        assert extract_session_from_path(path) == "my-project"
+
+    def test_extract_from_different_username(self):
+        """Works with any username, not just hardcoded ones."""
+        from memory_db import extract_session_from_path
+
+        path = "/home/bob/.claude/projects/-home-bob-cool-app/xyz.jsonl"
+        assert extract_session_from_path(path) == "cool-app"
+
+    def test_extract_from_nested_project(self):
+        """Handle nested project paths."""
+        from memory_db import extract_session_from_path
+
+        path = "/Users/charlie/.claude/projects/-Users-charlie-code-myorg-repo/session.jsonl"
+        assert extract_session_from_path(path) == "code-myorg-repo"
+
+    def test_fallback_to_filename(self):
+        """Fall back to filename if pattern doesn't match."""
+        from memory_db import extract_session_from_path
+
+        path = "/tmp/random/transcript.jsonl"
+        assert extract_session_from_path(path) == "transcript"
+
+
 class TestGetIndexableMessages:
     """Test getting all indexable messages from a transcript."""
 

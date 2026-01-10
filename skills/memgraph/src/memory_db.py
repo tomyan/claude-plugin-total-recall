@@ -771,19 +771,31 @@ def extract_session_from_path(file_path: str) -> str:
     """Extract session name from Claude transcript path.
 
     Paths look like: ~/.claude/projects/-Users-tom-rad-control-v1-1/xyz.jsonl
-    Returns: 'rad-control-v1-1' (the meaningful part of the project path)
+    The project dir encodes the actual path with dashes: /Users/tom/rad-control-v1-1
+    Returns: 'rad-control-v1-1' (the project folder name)
     """
     import re
     match = re.search(r'/\.claude/projects/([^/]+)/', file_path)
     if match:
         project_dir = match.group(1)
-        # Remove leading path components like -Users-tom-
-        parts = project_dir.split('-')
-        # Find where the actual project name starts (after -Users-username-)
-        for i, part in enumerate(parts):
-            if part and part[0].islower() and part not in ('Users', 'tom', 'home'):
-                return '-'.join(parts[i:])
-        return project_dir
+        # The format is: -<path>-<segments>-<joined>-<by>-<dashes>
+        # e.g., -Users-alice-my-project or -home-bob-code-app
+        # We want to skip the home directory prefix
+
+        # Common patterns: -Users-<username>- or -home-<username>-
+        # Skip first 3 parts (empty, Users/home, username)
+        patterns = [
+            r'^-Users-[^-]+-(.+)$',  # macOS: -Users-alice-project
+            r'^-home-[^-]+-(.+)$',   # Linux: -home-bob-project
+        ]
+        for pattern in patterns:
+            m = re.match(pattern, project_dir)
+            if m:
+                return m.group(1)
+
+        # Fallback: remove leading dash and return as-is
+        return project_dir.lstrip('-')
+
     return Path(file_path).stem
 
 
