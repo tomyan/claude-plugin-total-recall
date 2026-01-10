@@ -794,7 +794,7 @@ def extract_session_from_path(file_path: str) -> str:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: memory_db.py <command> [args]")
-        print("Commands: init, store, search, search-spans, hybrid, stats")
+        print("Commands: init, store, search, search-spans, hybrid, hyde, stats")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -843,6 +843,15 @@ if __name__ == "__main__":
         query = sys.argv[2]
         limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10
         results = hybrid_search(query, limit)
+        print(json.dumps(results, indent=2, default=str))
+
+    elif cmd == "hyde":
+        if len(sys.argv) < 3:
+            print("Usage: memory_db.py hyde <query> [limit]")
+            sys.exit(1)
+        query = sys.argv[2]
+        limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+        results = hyde_search(query, limit)
         print(json.dumps(results, indent=2, default=str))
 
     elif cmd == "stats":

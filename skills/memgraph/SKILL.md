@@ -57,14 +57,24 @@ For broader context, also search topic spans:
 cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" search-spans "<query>" 5
 ```
 
-### Step 4: Hybrid Search (for specific terms)
+### Step 4: Choose Search Strategy
 
-If the query contains specific terminology the user might remember exactly:
+Based on the query, choose the best search strategy:
+
+**Hybrid Search** - For queries with specific terms:
 ```bash
 cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" hybrid "<query>" 10
 ```
 
-This combines vector similarity with BM25 keyword matching.
+**HyDE Search** - For vague/conceptual queries (generates hypothetical answer first):
+```bash
+cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" hyde "<query>" 10
+```
+
+**Filtered Search** - For queries with intent or temporal qualifiers:
+- "decisions about X" → filter by intent=decision
+- "last week X" → filter by date range
+- "problems with X" → filter by intent=problem
 
 ### Step 5: Present Results
 
