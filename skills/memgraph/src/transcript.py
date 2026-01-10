@@ -120,11 +120,20 @@ _ACKNOWLEDGMENT_PATTERNS = frozenset([
     "ok", "okay", "yes", "no", "yeah", "yep", "nope",
     "thanks", "thank you", "got it", "understood",
     "sure", "right", "correct", "exactly",
+    "sounds good", "sounds great", "looks good", "looks great",
+    "perfect", "great", "awesome", "nice", "cool",
 ])
 
 _TOOL_PREAMBLE_PATTERNS = frozenset([
     "let me", "i'll", "i will", "let's",
 ])
+
+# Assistant greeting patterns (prefix match)
+_ASSISTANT_GREETING_PREFIXES = [
+    "hello!", "hi!", "hey!",
+    "hello,", "hi,", "hey,",
+    "hello.", "hi.", "hey.",
+]
 
 MIN_INDEXABLE_LENGTH = 20
 
@@ -163,6 +172,12 @@ def is_indexable(message: dict) -> bool:
     # Check for acknowledgment patterns
     if content_lower in _ACKNOWLEDGMENT_PATTERNS:
         return False
+
+    # Check for assistant greeting responses (short messages starting with greeting)
+    if len(content) < 50:
+        for prefix in _ASSISTANT_GREETING_PREFIXES:
+            if content_lower.startswith(prefix):
+                return False
 
     # For assistant messages with tool use, check if it's just preamble
     if message.get("has_tool_use"):
