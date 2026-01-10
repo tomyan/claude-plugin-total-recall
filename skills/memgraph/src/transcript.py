@@ -219,3 +219,34 @@ def get_indexable_messages(
                 **msg
             })
     return messages
+
+
+def main():
+    """CLI entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Transcript parsing utilities")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # get-indexable command
+    get_cmd = subparsers.add_parser(
+        "get-indexable",
+        help="Get indexable messages from a transcript"
+    )
+    get_cmd.add_argument("transcript", help="Path to JSONL transcript file")
+    get_cmd.add_argument(
+        "--start-line",
+        type=int,
+        default=1,
+        help="Line number to start from (1-indexed)"
+    )
+
+    args = parser.parse_args()
+
+    if args.command == "get-indexable":
+        messages = get_indexable_messages(args.transcript, args.start_line)
+        print(json.dumps(messages))
+
+
+if __name__ == "__main__":
+    main()
