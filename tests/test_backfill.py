@@ -181,3 +181,111 @@ class TestGetProgress:
         progress = get_progress(str(transcript))
         assert progress["last_indexed_line"] == 1
         assert progress["total_lines"] == 2
+
+
+class TestDeduplication:
+    """Test deduplication during backfill."""
+
+    @pytest.fixture
+    def mock_db(self, tmp_path, monkeypatch):
+        """Mock database path to use tmp directory."""
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        monkeypatch.setattr("backfill.DB_PATH", db_path)
+        return db_path
+
+    @pytest.fixture
+    def mock_embeddings(self, monkeypatch):
+        """Mock OpenAI embeddings to avoid API calls."""
+        fake_embedding = [0.1] * 1536
+        mock_get = MagicMock(return_value=fake_embedding)
+        monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        return mock_get
+
+    def test_duplicate_content_not_stored(self, mock_db, mock_embeddings, tmp_path):
+        """Same content is not stored twice."""
+        import memory_db
+        memory_db.init_db()
+
+        transcript = tmp_path / "session.jsonl"
+        # Same content appears twice
+        lines = [
+            {"type": "user", "message": {"content": "We should use PostgreSQL for the database"}, "timestamp": "T1"},
+            {"type": "user", "message": {"content": "We should use PostgreSQL for the database"}, "timestamp": "T2"},
+        ]
+        transcript.write_text("\n".join(json.dumps(line) for line in lines))
+
+        result = backfill_transcript(str(transcript))
+
+        # Only one should be stored
+        stats = memory_db.get_stats()
+        assert stats["total_ideas"] == 1
+        assert result["skipped_duplicates"] == 1
+
+    def test_compute_content_hash(self):
+        """Content hash is consistent."""
+        from backfill import compute_content_hash
+
+        hash1 = compute_content_hash("Test content")
+        hash2 = compute_content_hash("Test content")
+        hash3 = compute_content_hash("Different content")
+
+        assert hash1 == hash2
+        assert hash1 != hash3
+
+    def test_hash_ignores_whitespace_variations(self):
+        """Hash normalizes whitespace."""
+        from backfill import compute_content_hash
+
+        hash1 = compute_content_hash("Test  content")
+        hash2 = compute_content_hash("Test content")
+        hash3 = compute_content_hash("  Test content  ")
+
+        assert hash1 == hash2
+        assert hash1 == hash3
+
+    def test_is_duplicate_idea(self, mock_db, mock_embeddings, tmp_path):
+        """Check if idea already exists."""
+        import memory_db
+        from backfill import is_duplicate_idea
+
+        memory_db.init_db()
+
+        # Store an idea
+        memory_db.store_idea(
+            content="Original idea about databases",
+            source_file="test.jsonl",
+            source_line=1
+        )
+
+        # Same content should be detected as duplicate
+        assert is_duplicate_idea("Original idea about databases") is True
+        # Different content should not
+        assert is_duplicate_idea("Different idea about caching") is False
+
+    def test_dedup_works_across_backfills(self, mock_db, mock_embeddings, tmp_path):
+        """Deduplication works when rerunning backfill."""
+        import memory_db
+        memory_db.init_db()
+
+        transcript = tmp_path / "session.jsonl"
+        lines = [
+            {"type": "user", "message": {"content": "We should implement caching for performance"}, "timestamp": "T1"},
+        ]
+        transcript.write_text("\n".join(json.dumps(line) for line in lines))
+
+        # First backfill
+        result1 = backfill_transcript(str(transcript))
+        assert result1["messages_indexed"] == 1
+
+        # Reset index state to force reprocessing
+        memory_db.update_index_state(str(transcript), 0)
+
+        # Second backfill - should skip the duplicate
+        result2 = backfill_transcript(str(transcript))
+        assert result2["messages_indexed"] == 0
+        assert result2["skipped_duplicates"] == 1
+
+        # Only one idea in DB
+        stats = memory_db.get_stats()
+        assert stats["total_ideas"] == 1

@@ -1,12 +1,52 @@
 """Backfill functionality for indexing existing transcripts."""
 
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
 import memory_db
 from memory_db import DB_PATH
 from transcript import get_indexable_messages
+
+
+def compute_content_hash(content: str) -> str:
+    """Compute a hash of content for deduplication.
+
+    Normalizes whitespace to catch near-duplicates.
+
+    Args:
+        content: Text content to hash
+
+    Returns:
+        SHA256 hash of normalized content
+    """
+    # Normalize whitespace
+    normalized = re.sub(r'\s+', ' ', content.strip())
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+
+def is_duplicate_idea(content: str) -> bool:
+    """Check if an idea with this content already exists.
+
+    Args:
+        content: Content to check
+
+    Returns:
+        True if duplicate exists
+    """
+    db = memory_db.get_db()
+
+    # Check for exact match
+    cursor = db.execute(
+        "SELECT id FROM ideas WHERE content = ? LIMIT 1",
+        (content,)
+    )
+    exact_match = cursor.fetchone()
+    db.close()
+
+    return exact_match is not None
 
 
 def backfill_transcript(
@@ -17,6 +57,7 @@ def backfill_transcript(
 
     Indexes all indexable messages from the transcript, storing each as an idea.
     Supports incremental indexing - only processes lines after the last indexed line.
+    Deduplicates content to avoid storing the same idea twice.
 
     Args:
         file_path: Path to the JSONL transcript file
@@ -26,6 +67,7 @@ def backfill_transcript(
         Dict with:
             - file_path: The processed file
             - messages_indexed: Count of messages stored
+            - skipped_duplicates: Count of duplicates skipped
             - start_line: Line indexing started from
             - end_line: Last line processed
     """
@@ -46,13 +88,22 @@ def backfill_transcript(
     if open_span:
         span_id = open_span["id"]
 
-    # Store each message as an idea
+    # Store each message as an idea (with deduplication)
     messages_indexed = 0
+    skipped_duplicates = 0
     last_line = start_line - 1
 
     for msg in messages:
+        content = msg["content"]
+
+        # Check for duplicate
+        if is_duplicate_idea(content):
+            skipped_duplicates += 1
+            last_line = max(last_line, msg["line_num"])
+            continue
+
         memory_db.store_idea(
-            content=msg["content"],
+            content=content,
             source_file=file_path,
             source_line=msg["line_num"],
             span_id=span_id,
@@ -73,6 +124,7 @@ def backfill_transcript(
     return {
         "file_path": file_path,
         "messages_indexed": messages_indexed,
+        "skipped_duplicates": skipped_duplicates,
         "start_line": start_line,
         "end_line": last_line if last_line >= start_line else start_line - 1
     }
