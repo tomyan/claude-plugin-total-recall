@@ -284,20 +284,120 @@ _TECHNOLOGIES = {
     "jwt", "oauth", "oauth2", "openid",
     "esp32", "arduino", "raspberry pi", "stm32", "lora", "sx1262",
     "git", "github", "gitlab", "bitbucket",
+    "pg", "js", "ts",
 }
+
+# Entity resolution: maps variants to canonical names
+_ENTITY_RESOLUTION = {
+    # Databases
+    "postgres": "PostgreSQL",
+    "postgresql": "PostgreSQL",
+    "pg": "PostgreSQL",
+    "mysql": "MySQL",
+    "mongodb": "MongoDB",
+    "mongo": "MongoDB",
+    "redis": "Redis",
+    "sqlite": "SQLite",
+    "dynamodb": "DynamoDB",
+    "elasticsearch": "Elasticsearch",
+    "elastic": "Elasticsearch",
+    "cassandra": "Cassandra",
+
+    # Languages
+    "javascript": "JavaScript",
+    "js": "JavaScript",
+    "typescript": "TypeScript",
+    "ts": "TypeScript",
+    "python": "Python",
+    "rust": "Rust",
+    "golang": "Go",
+    "go": "Go",
+    "java": "Java",
+
+    # Runtimes
+    "node": "Node.js",
+    "nodejs": "Node.js",
+    "node.js": "Node.js",
+    "deno": "Deno",
+    "bun": "Bun",
+
+    # Frameworks
+    "react": "React",
+    "reactjs": "React",
+    "vue": "Vue",
+    "vuejs": "Vue",
+    "angular": "Angular",
+    "svelte": "Svelte",
+    "nextjs": "Next.js",
+    "next.js": "Next.js",
+    "django": "Django",
+    "flask": "Flask",
+    "fastapi": "FastAPI",
+    "express": "Express",
+    "nestjs": "NestJS",
+
+    # Infrastructure
+    "docker": "Docker",
+    "kubernetes": "Kubernetes",
+    "k8s": "Kubernetes",
+    "terraform": "Terraform",
+    "ansible": "Ansible",
+
+    # Cloud
+    "aws": "AWS",
+    "amazon web services": "AWS",
+    "gcp": "GCP",
+    "google cloud": "GCP",
+    "azure": "Azure",
+
+    # Protocols
+    "graphql": "GraphQL",
+    "grpc": "gRPC",
+    "websocket": "WebSocket",
+    "websockets": "WebSocket",
+
+    # Auth
+    "jwt": "JWT",
+    "oauth": "OAuth",
+    "oauth2": "OAuth",
+    "openid": "OpenID",
+}
+
+
+def resolve_entity(name: str, entity_type: str) -> str:
+    """Resolve an entity name to its canonical form.
+
+    Args:
+        name: Entity name to resolve
+        entity_type: Type of entity (technology, file, etc.)
+
+    Returns:
+        Canonical entity name
+    """
+    # Only resolve technology entities
+    if entity_type != "technology":
+        return name
+
+    # Look up in resolution map (case-insensitive)
+    canonical = _ENTITY_RESOLUTION.get(name.lower())
+    if canonical:
+        return canonical
+
+    # Return as-is if not found
+    return name
 
 # File path pattern
 _FILE_PATTERN = re.compile(r'[\w./\-]+\.(py|js|ts|tsx|jsx|go|rs|java|c|cpp|h|hpp|md|json|yaml|yml|toml|sql|sh|bash)')
 
 
 def extract_entities(content: str) -> list[tuple[str, str]]:
-    """Extract entities from content.
+    """Extract entities from content with resolution to canonical names.
 
     Args:
         content: Message content
 
     Returns:
-        List of (name, type) tuples
+        List of (name, type) tuples with resolved names
     """
     entities = []
     content_lower = content.lower()
@@ -309,9 +409,11 @@ def extract_entities(content: str) -> list[tuple[str, str]]:
             pattern = re.compile(re.escape(tech), re.IGNORECASE)
             match = pattern.search(content)
             if match:
-                entities.append((match.group(), "technology"))
+                # Resolve to canonical name
+                resolved = resolve_entity(match.group(), "technology")
+                entities.append((resolved, "technology"))
 
-    # Extract file paths
+    # Extract file paths (no resolution needed)
     for match in _FILE_PATTERN.finditer(content):
         entities.append((match.group(), "file"))
 

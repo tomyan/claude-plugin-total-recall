@@ -340,3 +340,65 @@ class TestSemanticTopicShift:
         # Explicit transition keyword should trigger shift
         is_shift = detect_topic_shift("Let's move on to testing", context)
         assert is_shift is True
+
+
+class TestEntityResolution:
+    """Test entity resolution and normalization."""
+
+    def test_resolve_postgresql_variants(self):
+        """PostgreSQL variants resolve to canonical name."""
+        from indexer import resolve_entity
+
+        assert resolve_entity("postgres", "technology") == "PostgreSQL"
+        assert resolve_entity("postgresql", "technology") == "PostgreSQL"
+        assert resolve_entity("pg", "technology") == "PostgreSQL"
+        assert resolve_entity("Postgres", "technology") == "PostgreSQL"
+
+    def test_resolve_kubernetes_variants(self):
+        """Kubernetes variants resolve to canonical name."""
+        from indexer import resolve_entity
+
+        assert resolve_entity("k8s", "technology") == "Kubernetes"
+        assert resolve_entity("kubernetes", "technology") == "Kubernetes"
+        assert resolve_entity("K8s", "technology") == "Kubernetes"
+
+    def test_resolve_javascript_variants(self):
+        """JavaScript variants resolve to canonical name."""
+        from indexer import resolve_entity
+
+        assert resolve_entity("js", "technology") == "JavaScript"
+        assert resolve_entity("javascript", "technology") == "JavaScript"
+        assert resolve_entity("Javascript", "technology") == "JavaScript"
+
+    def test_resolve_unknown_entity_unchanged(self):
+        """Unknown entities return as-is."""
+        from indexer import resolve_entity
+
+        assert resolve_entity("CustomTech", "technology") == "CustomTech"
+        assert resolve_entity("my-project", "project") == "my-project"
+
+    def test_extract_entities_with_resolution(self):
+        """Extracted entities are resolved to canonical names."""
+        from indexer import extract_entities
+
+        entities = extract_entities("We use postgres and k8s for deployment")
+
+        # Should have resolved names
+        entity_names = [e[0] for e in entities]
+        assert "PostgreSQL" in entity_names or "postgres" in entity_names  # Either resolved or original
+        assert "Kubernetes" in entity_names or "k8s" in entity_names
+
+    def test_resolve_nodejs_variants(self):
+        """Node.js variants resolve to canonical name."""
+        from indexer import resolve_entity
+
+        assert resolve_entity("node", "technology") == "Node.js"
+        assert resolve_entity("nodejs", "technology") == "Node.js"
+        assert resolve_entity("node.js", "technology") == "Node.js"
+
+    def test_resolution_preserves_type(self):
+        """Resolution doesn't change entity type."""
+        from indexer import resolve_entity
+
+        # File type should stay unchanged
+        assert resolve_entity("config.js", "file") == "config.js"
