@@ -150,6 +150,10 @@ def run_command(args):
             result = get_progress(args.file)
             print(json.dumps(result))
 
+        elif args.command == "questions":
+            questions = memory_db.get_unanswered_questions(args.session)
+            print(json.dumps(questions, indent=2, default=str))
+
     except memory_db.MemgraphError as e:
         print(json.dumps(e.to_dict()), file=sys.stderr)
         sys.exit(1)
@@ -205,6 +209,10 @@ def main():
     # progress
     progress_p = subparsers.add_parser("progress", help="Show indexing progress")
     progress_p.add_argument("file", help="Transcript file path")
+
+    # questions
+    questions_p = subparsers.add_parser("questions", help="List unanswered questions")
+    questions_p.add_argument("-s", "--session", help="Filter by session")
 
     args = parser.parse_args()
 

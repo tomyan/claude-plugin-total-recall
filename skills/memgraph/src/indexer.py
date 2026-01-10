@@ -837,7 +837,8 @@ def index_transcript(
         if detect_topic_shift(content, {}):
             # Close current span if exists
             if current_span_id and span_messages:
-                summary = summarize_span(span_messages)
+                # Use LLM summarization if available
+                summary = summarize_span_with_llm(span_messages)
                 try:
                     memory_db.close_span(current_span_id, line_num - 1, summary)
                 except MemgraphError as e:
