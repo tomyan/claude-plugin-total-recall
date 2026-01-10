@@ -7,15 +7,18 @@ set -e
 echo "=== PRE-COMMIT REVIEW ==="
 echo ""
 
+# Dependencies for tests
+DEPS="--with pytest --with sqlite-vec --with openai"
+
 # 1. Test count check
 echo "1. Test count:"
-CURRENT_TESTS=$(uv run --with pytest pytest --collect-only -q 2>/dev/null | tail -1 | grep -o '[0-9]*' | head -1)
+CURRENT_TESTS=$(uv run $DEPS pytest --collect-only -q 2>/dev/null | tail -1 | grep -o '[0-9]*' | head -1)
 echo "   Current: $CURRENT_TESTS tests"
 
 # 2. All tests pass
 echo ""
 echo "2. Test results:"
-if uv run --with pytest pytest -q 2>/dev/null; then
+if uv run $DEPS pytest -q 2>/dev/null; then
     echo "   ✓ All tests pass"
 else
     echo "   ✗ TESTS FAILING - DO NOT COMMIT"
