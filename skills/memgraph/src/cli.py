@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # Ensure we can import our modules
 SKILL_DIR = Path(__file__).parent.parent
@@ -18,6 +19,43 @@ SRC_DIR = SKILL_DIR / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 RUNTIME_DIR = Path.home() / ".claude-plugin-memgraph"
+
+
+def safe_result(data: Any) -> dict:
+    """Wrap successful result."""
+    return {"success": True, "data": data}
+
+
+def error_result(error: str, code: str = "unknown", details: dict = None) -> dict:
+    """Wrap error result."""
+    result = {"success": False, "error": error, "error_code": code}
+    if details:
+        result["details"] = details
+    return result
+
+
+def run_search_command(query: str, limit: int = 10, session: str = None, intent: str = None) -> dict:
+    """Run search command with error handling."""
+    try:
+        import memory_db
+        results = memory_db.search_ideas(query, limit=limit, session=session, intent=intent)
+        return safe_result(results)
+    except memory_db.MemgraphError as e:
+        return error_result(str(e), e.error_code, e.details)
+    except Exception as e:
+        return error_result(f"Search failed: {e}", "search_error")
+
+
+def run_stats_command() -> dict:
+    """Run stats command with error handling."""
+    try:
+        import memory_db
+        stats = memory_db.get_stats()
+        return safe_result(stats)
+    except memory_db.MemgraphError as e:
+        return error_result(str(e), e.error_code, e.details)
+    except Exception as e:
+        return error_result(f"Failed to get stats: {e}", "stats_error")
 
 
 def ensure_runtime():
@@ -44,65 +82,80 @@ def ensure_runtime():
 
 
 def run_command(args):
-    """Run a command with proper imports."""
-    # Import here after path setup
+    """Run a command with proper imports and error handling."""
     import memory_db
 
-    if args.command == "init":
-        memory_db.init_db()
-        print("Database initialized")
+    try:
+        if args.command == "init":
+            memory_db.init_db()
+            print(json.dumps({"success": True, "message": "Database initialized"}))
 
-    elif args.command == "search":
-        results = memory_db.search_ideas(
-            args.query,
-            limit=args.limit,
-            session=args.session,
-            intent=args.intent
-        )
-        print(json.dumps(results, indent=2, default=str))
+        elif args.command == "search":
+            result = run_search_command(
+                args.query,
+                limit=args.limit,
+                session=args.session,
+                intent=args.intent
+            )
+            if result["success"]:
+                print(json.dumps(result["data"], indent=2, default=str))
+            else:
+                print(json.dumps(result), file=sys.stderr)
+                sys.exit(1)
 
-    elif args.command == "hybrid":
-        results = memory_db.hybrid_search(args.query, limit=args.limit)
-        print(json.dumps(results, indent=2, default=str))
+        elif args.command == "hybrid":
+            results = memory_db.hybrid_search(args.query, limit=args.limit)
+            print(json.dumps(results, indent=2, default=str))
 
-    elif args.command == "hyde":
-        results = memory_db.hyde_search(args.query, limit=args.limit)
-        print(json.dumps(results, indent=2, default=str))
+        elif args.command == "hyde":
+            results = memory_db.hyde_search(args.query, limit=args.limit)
+            print(json.dumps(results, indent=2, default=str))
 
-    elif args.command == "stats":
-        stats = memory_db.get_stats()
-        print(json.dumps(stats, indent=2))
+        elif args.command == "stats":
+            result = run_stats_command()
+            if result["success"]:
+                print(json.dumps(result["data"], indent=2))
+            else:
+                print(json.dumps(result), file=sys.stderr)
+                sys.exit(1)
 
-    elif args.command == "backfill":
-        from backfill import backfill_transcript
-        result = backfill_transcript(args.file, args.start_line)
-        print(json.dumps(result))
+        elif args.command == "backfill":
+            from backfill import backfill_transcript
+            result = backfill_transcript(args.file, args.start_line)
+            print(json.dumps(result))
 
-    elif args.command == "index":
-        from indexer import index_transcript
-        result = index_transcript(args.file, args.start_line)
-        print(json.dumps(result))
+        elif args.command == "index":
+            from indexer import index_transcript
+            result = index_transcript(args.file, args.start_line)
+            print(json.dumps(result))
 
-    elif args.command == "topics":
-        db = memory_db.get_db()
-        if args.session:
-            cursor = db.execute("""
-                SELECT id, session, name, summary, start_line, end_line, depth
-                FROM spans WHERE session = ? ORDER BY start_line
-            """, (args.session,))
-        else:
-            cursor = db.execute("""
-                SELECT id, session, name, summary, start_line, end_line, depth
-                FROM spans ORDER BY session, start_line
-            """)
-        results = [dict(row) for row in cursor]
-        db.close()
-        print(json.dumps(results, indent=2, default=str))
+        elif args.command == "topics":
+            db = memory_db.get_db()
+            if args.session:
+                cursor = db.execute("""
+                    SELECT id, session, name, summary, start_line, end_line, depth
+                    FROM spans WHERE session = ? ORDER BY start_line
+                """, (args.session,))
+            else:
+                cursor = db.execute("""
+                    SELECT id, session, name, summary, start_line, end_line, depth
+                    FROM spans ORDER BY session, start_line
+                """)
+            results = [dict(row) for row in cursor]
+            db.close()
+            print(json.dumps(results, indent=2, default=str))
 
-    elif args.command == "progress":
-        from backfill import get_progress
-        result = get_progress(args.file)
-        print(json.dumps(result))
+        elif args.command == "progress":
+            from backfill import get_progress
+            result = get_progress(args.file)
+            print(json.dumps(result))
+
+    except memory_db.MemgraphError as e:
+        print(json.dumps(e.to_dict()), file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": str(e), "error_code": "unexpected"}), file=sys.stderr)
+        sys.exit(1)
 
 
 def main():

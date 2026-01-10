@@ -8,11 +8,13 @@ Processes transcripts to:
 """
 
 import json
+import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 import memory_db
-from memory_db import DB_PATH, get_embedding
+from memory_db import DB_PATH, MemgraphError, get_embedding, logger
 from transcript import get_indexable_messages
 
 
@@ -406,14 +408,30 @@ def index_transcript(
 
     Returns:
         Dict with indexing stats
+
+    Raises:
+        MemgraphError: If file not found or other critical errors
     """
+    # Check file exists
+    if not Path(file_path).exists():
+        raise MemgraphError(
+            f"Transcript file not found: {file_path}",
+            "file_not_found",
+            {"path": file_path}
+        )
+
     # Get start line from index state if not provided
     if start_line is None:
         last_indexed = memory_db.get_last_indexed_line(file_path)
         start_line = last_indexed + 1
 
     # Get indexable messages
-    messages = get_indexable_messages(file_path, start_line)
+    try:
+        messages = get_indexable_messages(file_path, start_line)
+    except Exception as e:
+        logger.warning(f"Error reading transcript: {e}")
+        # Continue with empty messages - file might be corrupted or malformed
+        messages = []
 
     if not messages:
         return {
@@ -446,8 +464,11 @@ def index_transcript(
                 summary = summarize_span(span_messages)
                 try:
                     memory_db.close_span(current_span_id, line_num - 1, summary)
-                except Exception:
-                    pass  # May fail if no embedding API key
+                except MemgraphError as e:
+                    # Log but continue - span closing is non-critical
+                    logger.warning(f"Failed to close span {current_span_id}: {e}")
+                except Exception as e:
+                    logger.warning(f"Unexpected error closing span: {e}")
 
             # Create new span
             span_name = content[:100]  # Use transition message as name
@@ -491,8 +512,14 @@ def index_transcript(
                 entities=entities if entities else None
             )
             ideas_created += 1
-        except Exception:
-            pass  # May fail if no embedding API key
+        except MemgraphError as e:
+            # Log embedding failures but continue processing
+            if e.error_code == "missing_api_key":
+                logger.warning("Skipping idea storage: API key not configured")
+            else:
+                logger.warning(f"Failed to store idea at line {line_num}: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error storing idea at line {line_num}: {e}")
 
         span_messages.append(msg)
         last_line = max(last_line, line_num)

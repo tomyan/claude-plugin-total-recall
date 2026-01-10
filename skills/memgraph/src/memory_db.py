@@ -6,12 +6,13 @@ Uses OpenAI for embeddings.
 """
 
 import json
+import logging
 import os
 import sqlite3
 import struct
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import sqlite_vec
 from openai import OpenAI
@@ -22,20 +23,83 @@ DB_PATH = Path.home() / ".claude-plugin-memgraph" / "memory.db"
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 
+# Logging setup
+LOG_PATH = Path.home() / ".claude-plugin-memgraph" / "memgraph.log"
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH),
+    ]
+)
+logger = logging.getLogger("memgraph")
+
+
+# =============================================================================
+# Custom Exception
+# =============================================================================
+
+class MemgraphError(Exception):
+    """Custom exception for memgraph errors with structured info."""
+
+    def __init__(
+        self,
+        message: str,
+        error_code: str,
+        details: Optional[dict[str, Any]] = None
+    ):
+        super().__init__(message)
+        self.error_code = error_code
+        self.details = details or {}
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "error": str(self),
+            "error_code": self.error_code,
+            "details": self.details,
+        }
+
 
 def get_db() -> sqlite3.Connection:
     """Get database connection with sqlite-vec loaded."""
-    db = sqlite3.connect(str(DB_PATH))
-    db.enable_load_extension(True)
-    sqlite_vec.load(db)
-    db.enable_load_extension(False)
-    db.row_factory = sqlite3.Row
-    return db
+    try:
+        db = sqlite3.connect(str(DB_PATH))
+        db.enable_load_extension(True)
+        sqlite_vec.load(db)
+        db.enable_load_extension(False)
+        db.row_factory = sqlite3.Row
+        return db
+    except sqlite3.DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        raise MemgraphError(
+            f"Failed to open database at {DB_PATH}: {e}",
+            "database_error",
+            {"path": str(DB_PATH), "original_error": str(e)}
+        ) from e
+    except Exception as e:
+        logger.error(f"Unexpected error opening database: {e}")
+        raise MemgraphError(
+            f"Failed to open database: {e}",
+            "database_error",
+            {"original_error": str(e)}
+        ) from e
 
 
 def init_db():
     """Initialize the database schema."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error(f"Failed to create database directory: {e}")
+        raise MemgraphError(
+            f"Cannot create database directory: {e}",
+            "database_error",
+            {"path": str(DB_PATH.parent), "original_error": str(e)}
+        ) from e
+
     db = get_db()
 
     db.executescript("""
@@ -175,6 +239,9 @@ def get_embedding(text: str, use_cache: bool = True) -> list[float]:
 
     Returns:
         Embedding vector (1536 floats)
+
+    Raises:
+        MemgraphError: If API key is missing or API call fails
     """
     # Check cache first
     if use_cache and text in _embedding_cache:
@@ -182,14 +249,26 @@ def get_embedding(text: str, use_cache: bool = True) -> list[float]:
 
     api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
     if not api_key:
-        raise ValueError("OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set")
+        raise MemgraphError(
+            "OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set. "
+            "Set this to your OpenAI API key to enable memory search.",
+            "missing_api_key"
+        )
 
-    client = OpenAI(api_key=api_key)
-    response = client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=text
-    )
-    embedding = response.data[0].embedding
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=text
+        )
+        embedding = response.data[0].embedding
+    except Exception as e:
+        logger.error(f"Embedding API call failed: {e}")
+        raise MemgraphError(
+            f"Failed to get embedding from OpenAI: {e}",
+            "embedding_failed",
+            {"model": EMBEDDING_MODEL, "original_error": str(e)}
+        ) from e
 
     # Cache the result (with simple LRU eviction)
     if use_cache:
