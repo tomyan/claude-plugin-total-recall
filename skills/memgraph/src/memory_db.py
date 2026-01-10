@@ -321,7 +321,8 @@ def search_ideas(
     query: str,
     limit: int = 10,
     session: Optional[str] = None,
-    intent: Optional[str] = None
+    intent: Optional[str] = None,
+    recency_weight: float = 0.0
 ) -> list[dict]:
     """Search for similar ideas using vector similarity."""
     db = get_db()
@@ -442,6 +443,255 @@ def hybrid_search(query: str, limit: int = 10) -> list[dict]:
 
     # Return in ranked order
     return [results[id] for id in top_ids if id in results]
+
+
+# =============================================================================
+# Advanced Retrieval
+# =============================================================================
+
+def generate_hypothetical_doc(query: str) -> str:
+    """Generate a hypothetical document that would answer the query.
+
+    Used for HyDE (Hypothetical Document Embeddings) to improve retrieval.
+
+    Args:
+        query: The user's search query
+
+    Returns:
+        A hypothetical answer document
+    """
+    # TODO: Use LLM to generate better hypothetical docs
+    # For now, expand the query into a statement
+    query_lower = query.lower().strip()
+
+    # Remove question words and rephrase as statement
+    for prefix in ["how ", "what ", "why ", "when ", "where ", "which ", "who "]:
+        if query_lower.startswith(prefix):
+            query_lower = query_lower[len(prefix):]
+            break
+
+    # Remove trailing question mark
+    query_lower = query_lower.rstrip("?")
+
+    # Create a hypothetical answer
+    return f"The answer involves {query_lower}. This was decided based on careful consideration of the requirements and constraints."
+
+
+def hyde_search(query: str, limit: int = 10) -> list[dict]:
+    """HyDE search - generates hypothetical answer then searches.
+
+    For vague queries, this often retrieves better matches than raw query.
+
+    Args:
+        query: Search query
+        limit: Maximum results
+
+    Returns:
+        List of matching idea dicts
+    """
+    # Generate hypothetical document
+    hypothetical = generate_hypothetical_doc(query)
+
+    # Embed the hypothetical document
+    hypo_embedding = get_embedding(hypothetical)
+
+    # Search with hypothetical embedding
+    db = get_db()
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.session, s.name as topic,
+            e.distance
+        FROM idea_embeddings e
+        JOIN ideas i ON i.id = e.idea_id
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE e.embedding MATCH ? AND k = ?
+        ORDER BY e.distance
+    """, (serialize_embedding(hypo_embedding), limit))
+
+    results = [dict(row) for row in cursor]
+    db.close()
+    return results
+
+
+def expand_with_relations(idea_ids: list[int]) -> list[int]:
+    """Expand a set of idea IDs by following relations.
+
+    Args:
+        idea_ids: Initial set of idea IDs
+
+    Returns:
+        Expanded set including related ideas
+    """
+    if not idea_ids:
+        return []
+
+    db = get_db()
+    expanded = set(idea_ids)
+
+    # Follow relations in both directions
+    placeholders = ','.join('?' * len(idea_ids))
+
+    # Ideas that the input ideas relate to
+    cursor = db.execute(f"""
+        SELECT to_id FROM relations WHERE from_id IN ({placeholders})
+    """, idea_ids)
+    for row in cursor:
+        expanded.add(row['to_id'])
+
+    # Ideas that relate to the input ideas
+    cursor = db.execute(f"""
+        SELECT from_id FROM relations WHERE to_id IN ({placeholders})
+    """, idea_ids)
+    for row in cursor:
+        expanded.add(row['from_id'])
+
+    db.close()
+    return list(expanded)
+
+
+def get_idea_context(idea_id: int) -> dict:
+    """Get context for an idea including its span.
+
+    Args:
+        idea_id: ID of the idea
+
+    Returns:
+        Dict with idea and span context
+    """
+    db = get_db()
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.id as span_id, s.name as span_name, s.summary as span_summary,
+            s.session
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.id = ?
+    """, (idea_id,))
+    row = cursor.fetchone()
+    db.close()
+
+    if row:
+        return dict(row)
+    return {}
+
+
+def search_ideas_temporal(
+    query: str,
+    limit: int = 10,
+    since: Optional[str] = None,
+    until: Optional[str] = None
+) -> list[dict]:
+    """Search ideas with temporal filtering.
+
+    Args:
+        query: Search query
+        limit: Maximum results
+        since: ISO datetime string for start of range
+        until: ISO datetime string for end of range
+
+    Returns:
+        List of matching idea dicts
+    """
+    db = get_db()
+    query_embedding = get_embedding(query)
+
+    # Build query with temporal filter
+    sql = """
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.session, s.name as topic,
+            e.distance
+        FROM idea_embeddings e
+        JOIN ideas i ON i.id = e.idea_id
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE e.embedding MATCH ? AND k = ?
+    """
+    params = [serialize_embedding(query_embedding), limit * 2]
+
+    if since:
+        sql += " AND i.created_at >= ?"
+        params.append(since)
+    if until:
+        sql += " AND i.created_at <= ?"
+        params.append(until)
+
+    sql += " ORDER BY e.distance LIMIT ?"
+    params.append(limit)
+
+    cursor = db.execute(sql, params)
+    results = [dict(row) for row in cursor]
+    db.close()
+    return results
+
+
+def analyze_query(query: str) -> dict:
+    """Analyze a query to extract filters and entities.
+
+    Args:
+        query: Search query
+
+    Returns:
+        Dict with temporal, intent_filter, entities
+    """
+    import re
+    query_lower = query.lower()
+    result = {}
+
+    # Temporal qualifiers
+    temporal_patterns = [
+        ("last week", "1w"),
+        ("yesterday", "1d"),
+        ("last month", "1m"),
+        ("recently", "1w"),
+        ("recent", "1w"),
+        ("today", "1d"),
+        ("this week", "1w"),
+    ]
+    for pattern, duration in temporal_patterns:
+        if pattern in query_lower:
+            result["temporal"] = duration
+            break
+
+    # Intent filters
+    intent_patterns = [
+        (r"\bdecisions?\b", "decision"),
+        (r"\bproblems?\b", "problem"),
+        (r"\bquestions?\b", "question"),
+        (r"\bsolutions?\b", "solution"),
+        (r"\btodos?\b", "todo"),
+        (r"\bconclusions?\b", "conclusion"),
+    ]
+    for pattern, intent in intent_patterns:
+        if re.search(pattern, query_lower):
+            result["intent_filter"] = intent
+            break
+
+    # Extract entities (technologies)
+    technologies = [
+        "postgresql", "mysql", "redis", "mongodb", "elasticsearch",
+        "python", "javascript", "typescript", "rust", "go",
+        "react", "vue", "angular", "django", "flask", "fastapi",
+        "docker", "kubernetes", "aws", "gcp", "azure",
+        "jwt", "oauth", "graphql", "rest", "grpc",
+    ]
+    found_entities = []
+    for tech in technologies:
+        if tech in query_lower:
+            # Find original case
+            pattern = re.compile(re.escape(tech), re.IGNORECASE)
+            match = pattern.search(query)
+            if match:
+                found_entities.append(match.group())
+
+    if found_entities:
+        result["entities"] = found_entities
+
+    return result
 
 
 # =============================================================================
