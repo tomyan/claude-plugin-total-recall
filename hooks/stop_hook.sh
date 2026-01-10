@@ -50,6 +50,6 @@ if [ ! -d "$RUNTIME_DIR/.venv" ]; then
     uv sync 2>/dev/null || true
 fi
 
-# Run incremental indexing
+# Run incremental indexing with full topic tracking
 cd "$RUNTIME_DIR"
-uv run python "$SKILL_DIR/src/backfill.py" backfill "$TRANSCRIPT" 2>/dev/null || true
+uv run python "$SKILL_DIR/src/indexer.py" index "$TRANSCRIPT" 2>/dev/null || true

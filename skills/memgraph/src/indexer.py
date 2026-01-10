@@ -293,6 +293,79 @@ def assess_confidence(content: str, intent: str) -> float:
     return max(0.1, min(1.0, confidence))
 
 
+def detect_relations(content: str, intent: str, recent_ideas: list[dict]) -> list[tuple[int, str]]:
+    """Detect relations between new content and recent ideas.
+
+    Args:
+        content: New message content
+        intent: Intent of new message
+        recent_ideas: List of recent idea dicts with id, content, intent
+
+    Returns:
+        List of (idea_id, relation_type) tuples
+    """
+    relations = []
+    content_lower = content.lower()
+
+    # Supersession patterns - new idea replaces old
+    supersession_markers = [
+        "instead", "rather than", "changed to", "switching to",
+        "no longer", "not anymore", "actually", "correction",
+        "updated", "revised", "new approach",
+    ]
+
+    # Build-on patterns - new idea extends old
+    buildon_markers = [
+        "additionally", "also", "furthermore", "moreover",
+        "building on", "extending", "adding to", "on top of",
+        "in addition", "as well",
+    ]
+
+    # Check for supersession
+    for marker in supersession_markers:
+        if marker in content_lower:
+            # Find related ideas to supersede (same topic/intent)
+            for idea in recent_ideas:
+                if idea["intent"] == intent or _content_overlap(content, idea["content"]):
+                    relations.append((idea["id"], "supersedes"))
+                    break
+            break
+
+    # Check for build-on
+    for marker in buildon_markers:
+        if marker in content_lower:
+            # Find related ideas to build on
+            for idea in recent_ideas:
+                if _content_overlap(content, idea["content"]):
+                    relations.append((idea["id"], "builds_on"))
+                    break
+            break
+
+    # Solution answers question/problem
+    if intent == "solution":
+        for idea in recent_ideas:
+            if idea["intent"] in ("question", "problem"):
+                if _content_overlap(content, idea["content"]):
+                    relations.append((idea["id"], "answers"))
+
+    return relations
+
+
+def _content_overlap(content1: str, content2: str) -> bool:
+    """Check if two content strings have significant word overlap."""
+    # Extract significant words (> 4 chars, not common)
+    stopwords = {"this", "that", "with", "from", "have", "been", "were", "will", "would", "could", "should"}
+
+    words1 = set(w.lower() for w in re.findall(r'\b\w{5,}\b', content1)) - stopwords
+    words2 = set(w.lower() for w in re.findall(r'\b\w{5,}\b', content2)) - stopwords
+
+    if not words1 or not words2:
+        return False
+
+    overlap = len(words1 & words2)
+    return overlap >= 2  # At least 2 significant words in common
+
+
 def summarize_span(messages: list[dict]) -> str:
     """Generate a summary of messages in a span.
 

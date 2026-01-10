@@ -156,6 +156,63 @@ class TestConfidenceAssessment:
         assert 0.4 <= conf <= 0.6
 
 
+class TestRelationDetection:
+    """Test relation detection between ideas."""
+
+    def test_detect_supersession(self):
+        """Detect when new idea supersedes old."""
+        from indexer import detect_relations
+
+        recent = [{"id": 1, "content": "Using PostgreSQL for the database", "intent": "decision"}]
+
+        # Supersession with "instead"
+        relations = detect_relations(
+            "Using MySQL instead for better compatibility",
+            "decision",
+            recent
+        )
+        assert (1, "supersedes") in relations
+
+    def test_detect_builds_on(self):
+        """Detect when new idea builds on old."""
+        from indexer import detect_relations
+
+        recent = [{"id": 1, "content": "Implementing caching layer with Redis cluster", "intent": "decision"}]
+
+        relations = detect_relations(
+            "Additionally, we're adding caching invalidation for the Redis cluster",
+            "decision",
+            recent
+        )
+        assert (1, "builds_on") in relations
+
+    def test_detect_solution_answers_question(self):
+        """Detect when solution answers a question."""
+        from indexer import detect_relations
+
+        recent = [{"id": 1, "content": "How should we handle authentication tokens?", "intent": "question"}]
+
+        relations = detect_relations(
+            "Fixed the authentication issue by using refresh tokens",
+            "solution",
+            recent
+        )
+        assert (1, "answers") in relations
+
+    def test_no_relation_for_unrelated(self):
+        """No relation for unrelated content."""
+        from indexer import detect_relations
+
+        recent = [{"id": 1, "content": "Database schema design", "intent": "context"}]
+
+        relations = detect_relations(
+            "The frontend uses React components",
+            "context",
+            recent
+        )
+        assert len(relations) == 0
+
+
 class TestIndexerIntegration:
     """Integration tests for the full indexer."""
 
