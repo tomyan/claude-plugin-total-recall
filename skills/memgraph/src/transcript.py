@@ -108,3 +108,68 @@ def read_transcript(
             parsed = parse_transcript_line(line)
             if parsed is not None:
                 yield (line_num, parsed)
+
+
+# Low-value patterns to filter out
+_GREETING_PATTERNS = frozenset([
+    "hello", "hi", "hey", "hi there", "hello there",
+    "good morning", "good afternoon", "good evening",
+])
+
+_ACKNOWLEDGMENT_PATTERNS = frozenset([
+    "ok", "okay", "yes", "no", "yeah", "yep", "nope",
+    "thanks", "thank you", "got it", "understood",
+    "sure", "right", "correct", "exactly",
+])
+
+_TOOL_PREAMBLE_PATTERNS = frozenset([
+    "let me", "i'll", "i will", "let's",
+])
+
+MIN_INDEXABLE_LENGTH = 20
+
+
+def is_indexable(message: dict) -> bool:
+    """Determine if a message contains indexable content.
+
+    Filters out:
+    - Greetings ("hello", "hi there")
+    - Simple acknowledgments ("ok", "yes", "thanks")
+    - Very short content (< 20 chars)
+    - Tool use preambles without substance
+
+    Args:
+        message: Parsed message dict with 'type', 'content', 'has_tool_use'
+
+    Returns:
+        True if message should be indexed, False otherwise
+    """
+    content = message.get("content", "").strip()
+
+    # Empty or whitespace-only
+    if not content:
+        return False
+
+    content_lower = content.lower()
+
+    # Too short
+    if len(content) < MIN_INDEXABLE_LENGTH:
+        return False
+
+    # Check for greeting patterns
+    if content_lower in _GREETING_PATTERNS:
+        return False
+
+    # Check for acknowledgment patterns
+    if content_lower in _ACKNOWLEDGMENT_PATTERNS:
+        return False
+
+    # For assistant messages with tool use, check if it's just preamble
+    if message.get("has_tool_use"):
+        # If short and starts with tool preamble, skip
+        if len(content) < 50:
+            for pattern in _TOOL_PREAMBLE_PATTERNS:
+                if content_lower.startswith(pattern):
+                    return False
+
+    return True

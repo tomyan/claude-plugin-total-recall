@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
 
-from transcript import parse_transcript_line, extract_message_content, read_transcript
+from transcript import parse_transcript_line, extract_message_content, read_transcript, is_indexable
 
 
 class TestParseTranscriptLine:
@@ -174,3 +174,64 @@ class TestExtractMessageContent:
         """Empty content returns empty string."""
         msg = {"content": ""}
         assert extract_message_content(msg) == ""
+
+
+class TestIsIndexable:
+    """Test filtering of low-value content."""
+
+    def test_substantive_user_message_is_indexable(self):
+        """User messages with substantive content are indexable."""
+        msg = {"type": "user", "content": "Can you help me implement a caching layer for the API?"}
+        assert is_indexable(msg) is True
+
+    def test_greeting_not_indexable(self):
+        """Simple greetings are not indexable."""
+        assert is_indexable({"type": "user", "content": "Hello"}) is False
+        assert is_indexable({"type": "user", "content": "Hi there"}) is False
+        assert is_indexable({"type": "user", "content": "hey"}) is False
+
+    def test_acknowledgment_not_indexable(self):
+        """Simple acknowledgments are not indexable."""
+        assert is_indexable({"type": "user", "content": "ok"}) is False
+        assert is_indexable({"type": "user", "content": "okay"}) is False
+        assert is_indexable({"type": "user", "content": "yes"}) is False
+        assert is_indexable({"type": "user", "content": "no"}) is False
+        assert is_indexable({"type": "user", "content": "thanks"}) is False
+        assert is_indexable({"type": "user", "content": "got it"}) is False
+
+    def test_short_content_not_indexable(self):
+        """Very short content (< 20 chars) is not indexable."""
+        assert is_indexable({"type": "user", "content": "do it"}) is False
+        assert is_indexable({"type": "user", "content": "go ahead"}) is False
+
+    def test_assistant_explanation_is_indexable(self):
+        """Assistant explanations are indexable."""
+        msg = {
+            "type": "assistant",
+            "content": "The issue is that the TCXO needs to be enabled via DIO3 for reliable transmission."
+        }
+        assert is_indexable(msg) is True
+
+    def test_assistant_tool_only_not_indexable(self):
+        """Assistant messages with only tool use commentary are not indexable."""
+        msg = {
+            "type": "assistant",
+            "content": "Let me check that file.",
+            "has_tool_use": True
+        }
+        # Short content that's just tool preamble
+        assert is_indexable(msg) is False
+
+    def test_assistant_substantive_with_tool_is_indexable(self):
+        """Assistant messages with substantive content + tool use ARE indexable."""
+        msg = {
+            "type": "assistant",
+            "content": "The database schema needs to include a foreign key constraint to maintain referential integrity. Let me update the migration file.",
+            "has_tool_use": True
+        }
+        assert is_indexable(msg) is True
+
+    def test_empty_content_not_indexable(self):
+        """Empty content is not indexable."""
+        assert is_indexable({"type": "user", "content": ""}) is False
+        assert is_indexable({"type": "user", "content": "   "}) is False
