@@ -257,3 +257,86 @@ class TestEmbeddingRelations:
 
         # Should not find relations - topics are unrelated
         assert len(relations) == 0
+
+
+class TestSemanticTopicShift:
+    """Test semantic topic shift detection."""
+
+    def test_detect_semantic_shift(self, monkeypatch):
+        """Detect topic shift using embedding distance."""
+        # Mock embeddings to show topic shift - use very different vectors
+        def mock_embedding(text, use_cache=True):
+            if "database" in text.lower():
+                # Database topics point in one direction
+                return [1.0] * 768 + [0.0] * 768
+            elif "authentication" in text.lower():
+                # Auth topics point in opposite direction
+                return [0.0] * 768 + [1.0] * 768
+            else:
+                return [0.5] * 1536
+
+        monkeypatch.setattr("indexer.get_embedding", mock_embedding)
+
+        from indexer import detect_topic_shift_semantic
+
+        # Previous topic was database
+        context = {
+            "last_embedding": mock_embedding("database"),
+            "threshold": 0.5,
+        }
+
+        # New topic is authentication - should detect shift (similarity ~0)
+        is_shift = detect_topic_shift_semantic(
+            "Let's set up user authentication",
+            context
+        )
+        assert is_shift is True
+
+    def test_no_shift_on_similar_topic(self, monkeypatch):
+        """No topic shift detected when topics are similar."""
+        def mock_embedding(text, use_cache=True):
+            # All database-related topics use similar vectors
+            if "database" in text.lower() or "postgres" in text.lower():
+                return [1.0] * 768 + [0.0] * 768
+            return [0.5] * 1536
+
+        monkeypatch.setattr("indexer.get_embedding", mock_embedding)
+
+        from indexer import detect_topic_shift_semantic
+
+        context = {
+            "last_embedding": mock_embedding("database setup"),
+            "threshold": 0.5,
+        }
+
+        # Still talking about database - no shift (similarity = 1.0)
+        is_shift = detect_topic_shift_semantic(
+            "We should use PostgreSQL for the database",
+            context
+        )
+        assert is_shift is False
+
+    def test_shift_detection_without_context(self, monkeypatch):
+        """No shift detected without previous context."""
+        from indexer import detect_topic_shift_semantic
+
+        # No previous embedding
+        context = {}
+
+        is_shift = detect_topic_shift_semantic("Some new topic", context)
+        assert is_shift is False
+
+    def test_combined_keyword_and_semantic_shift(self, monkeypatch):
+        """Both keyword and semantic detection work together."""
+        def mock_embedding(text, use_cache=True):
+            return [0.1] * 1536
+
+        monkeypatch.setattr("indexer.get_embedding", mock_embedding)
+
+        from indexer import detect_topic_shift
+
+        context = {}
+
+        # Explicit transition keyword should trigger shift
+        is_shift = detect_topic_shift("Let's move on to testing", context)
+        assert is_shift is True

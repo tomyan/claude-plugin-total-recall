@@ -49,6 +49,8 @@ _TRANSITION_RE = re.compile("|".join(_TRANSITION_PATTERNS), re.IGNORECASE)
 def detect_topic_shift(content: str, context: dict) -> bool:
     """Detect if content represents a topic shift.
 
+    Uses both keyword patterns and semantic embedding distance.
+
     Args:
         content: Message content
         context: Current context with last_embedding, threshold, etc.
@@ -62,12 +64,40 @@ def detect_topic_shift(content: str, context: dict) -> bool:
     if _TRANSITION_RE.search(content_lower):
         return True
 
-    # TODO: Add embedding distance check for semantic shifts
-    # if "last_embedding" in context:
-    #     current_embedding = get_embedding(content)
-    #     distance = cosine_distance(context["last_embedding"], current_embedding)
-    #     if distance > context.get("threshold", 0.5):
-    #         return True
+    # Check for semantic shift using embeddings
+    if detect_topic_shift_semantic(content, context):
+        return True
+
+    return False
+
+
+def detect_topic_shift_semantic(content: str, context: dict) -> bool:
+    """Detect topic shift using embedding similarity.
+
+    Args:
+        content: Message content
+        context: Context with last_embedding and threshold
+
+    Returns:
+        True if semantic topic shift detected
+    """
+    if "last_embedding" not in context:
+        return False
+
+    threshold = context.get("threshold", 0.5)
+
+    try:
+        current_embedding = get_embedding(content)
+        similarity = cosine_similarity(context["last_embedding"], current_embedding)
+
+        # Low similarity = topic shift
+        if similarity < threshold:
+            logger.info(f"Semantic topic shift detected (similarity: {similarity:.2f})")
+            return True
+
+    except MemgraphError:
+        # Can't get embedding, skip semantic check
+        pass
 
     return False
 
