@@ -827,7 +827,12 @@ def index_transcript(
 
     ideas_created = 0
     spans_created = 0
+    relations_created = 0
     last_line = start_line - 1
+
+    # Track recent ideas for relation detection
+    recent_ideas: list[dict] = []
+    MAX_RECENT = 10  # Only check last N ideas for relations
 
     for msg in messages:
         content = msg["content"]
@@ -857,6 +862,8 @@ def index_transcript(
             )
             spans_created += 1
             span_messages = []
+            # Clear recent ideas on topic shift
+            recent_ideas = []
 
         # If no span exists, create initial one
         if current_span_id is None:
@@ -878,8 +885,9 @@ def index_transcript(
         confidence = assess_confidence(content, intent)
 
         # Store idea
+        idea_id = None
         try:
-            memory_db.store_idea(
+            idea_id = memory_db.store_idea(
                 content=content,
                 source_file=file_path,
                 source_line=line_num,
@@ -889,6 +897,30 @@ def index_transcript(
                 entities=entities if entities else None
             )
             ideas_created += 1
+
+            # Detect and store relations to recent ideas
+            if recent_ideas:
+                recent_ids = [r["id"] for r in recent_ideas]
+                try:
+                    relations = detect_relations_with_embeddings(
+                        content, intent, recent_ids, similarity_threshold=0.7
+                    )
+                    for to_id, relation_type in relations:
+                        memory_db.add_relation(idea_id, to_id, relation_type)
+                        relations_created += 1
+
+                        # Mark questions as answered when solution found
+                        if relation_type == "answers":
+                            memory_db.mark_question_answered(to_id)
+
+                except Exception as e:
+                    logger.debug(f"Relation detection failed: {e}")
+
+            # Add to recent ideas
+            recent_ideas.append({"id": idea_id, "content": content, "intent": intent})
+            if len(recent_ideas) > MAX_RECENT:
+                recent_ideas.pop(0)
+
         except MemgraphError as e:
             # Log embedding failures but continue processing
             if e.error_code == "missing_api_key":
@@ -914,6 +946,7 @@ def index_transcript(
         "messages_indexed": len(messages),
         "ideas_created": ideas_created,
         "spans_created": spans_created,
+        "relations_created": relations_created,
         "start_line": start_line,
         "end_line": last_line,
     }

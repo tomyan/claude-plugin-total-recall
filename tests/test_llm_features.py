@@ -505,3 +505,52 @@ class TestQuestionAnswered:
 
         assert len(unanswered) == 1
         assert unanswered[0]["id"] == q2_id
+
+
+class TestRelationAutoDetection:
+    """Test automatic relation detection during indexing."""
+
+    @pytest.fixture
+    def mock_db(self, tmp_path, monkeypatch):
+        """Mock database path."""
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        return db_path
+
+    @pytest.fixture
+    def mock_embeddings(self, monkeypatch):
+        """Mock embeddings with topic-based similarity."""
+        def mock_embedding(text, use_cache=True):
+            base = [0.1] * 1536
+            # Make database-related content similar
+            if "database" in text.lower() or "postgres" in text.lower() or "pooling" in text.lower():
+                base = [0.9] * 768 + [0.1] * 768
+            return base
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
+        monkeypatch.setattr("indexer.get_embedding", mock_embedding)
+
+    def test_index_with_relation_detection(self, mock_db, mock_embeddings, tmp_path):
+        """Indexer stores relations between related ideas."""
+        import memory_db
+        memory_db.init_db()
+
+        transcript = tmp_path / "test.jsonl"
+        lines = [
+            {"type": "user", "message": {"content": "How should we handle database connection pooling?"}, "timestamp": "T1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "The solution is to use PgBouncer for database connection pooling."}]}, "timestamp": "T2"},
+        ]
+        transcript.write_text("\n".join(json.dumps(line) for line in lines))
+
+        from indexer import index_transcript
+        result = index_transcript(str(transcript))
+
+        assert result["ideas_created"] == 2
+
+        # Verify ideas exist with correct intents
+        db = memory_db.get_db()
+        cursor = db.execute("SELECT intent FROM ideas ORDER BY source_line")
+        intents = [row["intent"] for row in cursor]
+        db.close()
+
+        assert "question" in intents
+        assert "solution" in intents
