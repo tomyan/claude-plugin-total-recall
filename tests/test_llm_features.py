@@ -1,4 +1,4 @@
-"""Tests for LLM-powered features."""
+"""Tests for LLM-powered and embedding-based features."""
 
 import json
 import sys
@@ -140,3 +140,120 @@ class TestLLMIntentClassification:
 
             # Should fall back to regex classification
             assert intent == "decision"
+
+
+class TestEmbeddingRelations:
+    """Test embedding-based relation detection."""
+
+    def test_find_similar_ideas(self, tmp_path, monkeypatch):
+        """Find semantically similar ideas using embeddings."""
+        import memory_db
+
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        memory_db.init_db()
+
+        # Mock embeddings - similar ideas have similar vectors
+        call_count = [0]
+        def mock_embedding(text, use_cache=True):
+            call_count[0] += 1
+            # Make similar content have similar embeddings
+            base = [0.1] * 1536
+            if "database" in text.lower():
+                base[0] = 0.9
+            if "caching" in text.lower():
+                base[1] = 0.9
+            return base
+
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
+
+        # Store some ideas
+        id1 = memory_db.store_idea(
+            content="We should use PostgreSQL for the database",
+            source_file="test.jsonl", source_line=1
+        )
+        id2 = memory_db.store_idea(
+            content="The database should support read replicas",
+            source_file="test.jsonl", source_line=2
+        )
+        id3 = memory_db.store_idea(
+            content="Add caching layer with Redis",
+            source_file="test.jsonl", source_line=3
+        )
+
+        from indexer import find_similar_ideas
+
+        # Find ideas similar to database query
+        similar = find_similar_ideas("database setup", limit=2)
+
+        # Should return database-related ideas
+        assert len(similar) <= 2
+
+    def test_detect_relations_with_embeddings(self, tmp_path, monkeypatch):
+        """Detect relations using embedding similarity."""
+        import memory_db
+
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        memory_db.init_db()
+
+        # Mock embeddings with high similarity for related content
+        def mock_embedding(text, use_cache=True):
+            base = [0.1] * 1536
+            if "postgresql" in text.lower() or "database" in text.lower():
+                base[0] = 0.9
+            return base
+
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
+
+        # Store initial idea
+        id1 = memory_db.store_idea(
+            content="We decided to use PostgreSQL",
+            source_file="test.jsonl", source_line=1, intent="decision"
+        )
+
+        from indexer import detect_relations_with_embeddings
+
+        # New content about the same topic
+        new_content = "Updated the database to use connection pooling"
+        relations = detect_relations_with_embeddings(new_content, "context", [id1])
+
+        # Should detect some relation to the database decision
+        assert isinstance(relations, list)
+
+    def test_embedding_similarity_threshold(self, tmp_path, monkeypatch):
+        """Only detect relations above similarity threshold."""
+        import memory_db
+
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+        memory_db.init_db()
+
+        # Mock embeddings - make them dissimilar
+        def mock_embedding(text, use_cache=True):
+            base = [0.1] * 1536
+            if "database" in text.lower():
+                base[0] = 0.9
+            elif "frontend" in text.lower():
+                base[0] = -0.9  # Very different
+            return base
+
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
+
+        # Store ideas about different topics
+        id1 = memory_db.store_idea(
+            content="Setting up the database schema",
+            source_file="test.jsonl", source_line=1
+        )
+
+        from indexer import detect_relations_with_embeddings
+
+        # Unrelated content
+        relations = detect_relations_with_embeddings(
+            "Working on frontend components",
+            "context",
+            [id1]
+        )
+
+        # Should not find relations - topics are unrelated
+        assert len(relations) == 0

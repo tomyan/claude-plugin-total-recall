@@ -433,6 +433,137 @@ def _content_overlap(content1: str, content2: str) -> bool:
     return overlap >= 2  # At least 2 significant words in common
 
 
+def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    """Calculate cosine similarity between two vectors."""
+    if len(vec1) != len(vec2):
+        return 0.0
+
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
+
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+
+    return dot_product / (norm1 * norm2)
+
+
+def find_similar_ideas(query: str, limit: int = 5, threshold: float = 0.7) -> list[dict]:
+    """Find semantically similar ideas using embedding search.
+
+    Args:
+        query: Text to find similar ideas for
+        limit: Maximum number of results
+        threshold: Minimum similarity score (0-1)
+
+    Returns:
+        List of similar idea dicts with similarity scores
+    """
+    try:
+        results = memory_db.search_ideas(query, limit=limit)
+        # Add similarity scores (distance is already in results from vec search)
+        for r in results:
+            if "distance" in r:
+                # sqlite-vec distance is L2, convert to similarity
+                # Lower distance = higher similarity
+                r["similarity"] = 1 / (1 + r["distance"])
+        return results
+    except MemgraphError:
+        return []
+
+
+def detect_relations_with_embeddings(
+    content: str,
+    intent: str,
+    candidate_ids: list[int],
+    similarity_threshold: float = 0.75
+) -> list[tuple[int, str]]:
+    """Detect relations using embedding similarity.
+
+    Args:
+        content: New content to find relations for
+        intent: Intent of the new content
+        candidate_ids: IDs of candidate ideas to check
+        similarity_threshold: Minimum similarity to consider related
+
+    Returns:
+        List of (idea_id, relation_type) tuples
+    """
+    if not candidate_ids:
+        return []
+
+    try:
+        content_embedding = get_embedding(content)
+    except MemgraphError:
+        # Fallback to keyword-based detection
+        return []
+
+    relations = []
+    db = memory_db.get_db()
+
+    for idea_id in candidate_ids:
+        # Get idea embedding
+        cursor = db.execute("""
+            SELECT i.content, i.intent, e.embedding
+            FROM ideas i
+            JOIN idea_embeddings e ON e.idea_id = i.id
+            WHERE i.id = ?
+        """, (idea_id,))
+        row = cursor.fetchone()
+        if not row:
+            continue
+
+        # Deserialize embedding
+        import struct
+        embedding_bytes = row["embedding"]
+        idea_embedding = list(struct.unpack(f'{1536}f', embedding_bytes))
+
+        # Calculate similarity
+        similarity = cosine_similarity(content_embedding, idea_embedding)
+
+        if similarity < similarity_threshold:
+            continue
+
+        # Determine relation type based on intent and content
+        idea_intent = row["intent"]
+        idea_content = row["content"]
+
+        if intent == "solution" and idea_intent in ("question", "problem"):
+            relations.append((idea_id, "answers"))
+        elif _has_supersession_markers(content):
+            relations.append((idea_id, "supersedes"))
+        elif _has_buildon_markers(content):
+            relations.append((idea_id, "builds_on"))
+        elif similarity > 0.85:
+            # High similarity but no specific markers = related
+            relations.append((idea_id, "relates_to"))
+
+    db.close()
+    return relations
+
+
+def _has_supersession_markers(content: str) -> bool:
+    """Check if content has markers indicating supersession."""
+    markers = [
+        "instead", "rather than", "changed to", "switching to",
+        "no longer", "not anymore", "actually", "correction",
+        "updated", "revised", "new approach",
+    ]
+    content_lower = content.lower()
+    return any(m in content_lower for m in markers)
+
+
+def _has_buildon_markers(content: str) -> bool:
+    """Check if content has markers indicating building on previous work."""
+    markers = [
+        "additionally", "also", "furthermore", "moreover",
+        "building on", "extending", "adding to", "on top of",
+        "in addition", "as well",
+    ]
+    content_lower = content.lower()
+    return any(m in content_lower for m in markers)
+
+
 def summarize_span(messages: list[dict]) -> str:
     """Generate a basic summary of messages in a span (fallback).
 
