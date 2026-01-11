@@ -192,6 +192,23 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_relations_from ON relations(from_id);
         CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_id);
 
+        -- Topic links for cross-session topic relationships
+        CREATE TABLE IF NOT EXISTS topic_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+            related_topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+            similarity REAL NOT NULL,
+            time_overlap BOOLEAN DEFAULT FALSE,
+            link_type TEXT DEFAULT 'semantic' CHECK(link_type IN (
+                'semantic', 'manual', 'merged'
+            )),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(topic_id, related_topic_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_topic_links_topic ON topic_links(topic_id);
+        CREATE INDEX IF NOT EXISTS idx_topic_links_related ON topic_links(related_topic_id);
+
         -- Index state tracking
         CREATE TABLE IF NOT EXISTS index_state (
             file_path TEXT PRIMARY KEY,
@@ -481,6 +498,11 @@ def migrate_timestamps_from_transcripts() -> dict:
 def serialize_embedding(embedding: list[float]) -> bytes:
     """Serialize embedding to bytes for sqlite-vec."""
     return struct.pack(f'{len(embedding)}f', *embedding)
+
+
+def deserialize_embedding(data: bytes, dim: int = 1536) -> list[float]:
+    """Deserialize embedding from bytes."""
+    return list(struct.unpack(f'{dim}f', data))
 
 
 # LRU cache for embeddings to reduce API calls
@@ -1150,6 +1172,626 @@ def merge_topics(source_topic_id: int, target_topic_id: int) -> dict:
     db.close()
 
     return {"spans_moved": spans_moved, "source_deleted": source_topic_id}
+
+
+# =============================================================================
+# Topic Linking (Cross-Session)
+# =============================================================================
+
+def find_related_topics(
+    topic_id: int,
+    exclude_sessions: list[str] = None,
+    min_similarity: float = 0.8,
+    limit: int = 5
+) -> list[dict]:
+    """Find topics semantically similar to the given topic.
+
+    Args:
+        topic_id: The topic to find relations for
+        exclude_sessions: Sessions to exclude (typically current session)
+        min_similarity: Minimum similarity threshold (0-1, higher = more similar)
+        limit: Maximum results
+
+    Returns:
+        List of dicts with topic info and similarity score
+    """
+    db = get_db()
+
+    # Get the topic's embedding (average of its span embeddings)
+    cursor = db.execute("""
+        SELECT se.embedding
+        FROM span_embeddings se
+        JOIN spans s ON s.id = se.span_id
+        WHERE s.topic_id = ?
+        LIMIT 1
+    """, (topic_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        db.close()
+        return []
+
+    topic_embedding = deserialize_embedding(row['embedding'])
+
+    # Convert similarity threshold to distance (lower distance = more similar)
+    # For normalized embeddings, distance ≈ 2*(1-similarity)
+    max_distance = 2 * (1 - min_similarity)
+
+    # Find similar topics via their span embeddings
+    sql = """
+        SELECT DISTINCT
+            t.id, t.name, t.summary, t.first_seen, t.last_seen,
+            s.session,
+            MIN(se.distance) as distance
+        FROM span_embeddings se
+        JOIN spans s ON s.id = se.span_id
+        JOIN topics t ON t.id = s.topic_id
+        WHERE se.embedding MATCH ? AND k = ?
+          AND t.id != ?
+    """
+    params = [serialize_embedding(topic_embedding), limit * 3, topic_id]
+
+    if exclude_sessions:
+        placeholders = ','.join('?' * len(exclude_sessions))
+        sql += f" AND s.session NOT IN ({placeholders})"
+        params.extend(exclude_sessions)
+
+    sql += """
+        GROUP BY t.id
+        HAVING MIN(se.distance) <= ?
+        ORDER BY MIN(se.distance)
+        LIMIT ?
+    """
+    params.extend([max_distance, limit])
+
+    cursor = db.execute(sql, params)
+    results = []
+    for row in cursor:
+        r = dict(row)
+        # Convert distance to similarity
+        r['similarity'] = 1 - (r['distance'] / 2)
+        results.append(r)
+
+    db.close()
+    return results
+
+
+def link_topics(
+    topic_id: int,
+    related_topic_id: int,
+    similarity: float,
+    time_overlap: bool = False,
+    link_type: str = 'semantic'
+) -> int:
+    """Create a link between two topics.
+
+    Args:
+        topic_id: First topic ID
+        related_topic_id: Second topic ID
+        similarity: Similarity score (0-1)
+        time_overlap: Whether the topics' time ranges overlap
+        link_type: Type of link ('semantic', 'manual', 'merged')
+
+    Returns:
+        Link ID
+    """
+    db = get_db()
+    cursor = db.execute("""
+        INSERT OR REPLACE INTO topic_links
+            (topic_id, related_topic_id, similarity, time_overlap, link_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, (topic_id, related_topic_id, similarity, time_overlap, link_type))
+    link_id = cursor.lastrowid
+    db.commit()
+    db.close()
+    return link_id
+
+
+def get_topic_links(topic_id: int, include_reverse: bool = True) -> list[dict]:
+    """Get all links for a topic.
+
+    Args:
+        topic_id: Topic ID
+        include_reverse: Also include links where this topic is the related_topic
+
+    Returns:
+        List of link dicts with related topic info
+    """
+    db = get_db()
+
+    if include_reverse:
+        cursor = db.execute("""
+            SELECT
+                tl.id as link_id,
+                tl.similarity,
+                tl.time_overlap,
+                tl.link_type,
+                tl.created_at as linked_at,
+                CASE WHEN tl.topic_id = ? THEN tl.related_topic_id ELSE tl.topic_id END as other_topic_id,
+                t.name as other_topic_name,
+                t.summary as other_topic_summary,
+                t.first_seen,
+                t.last_seen,
+                (SELECT DISTINCT session FROM spans WHERE topic_id = t.id LIMIT 1) as session
+            FROM topic_links tl
+            JOIN topics t ON t.id = CASE WHEN tl.topic_id = ? THEN tl.related_topic_id ELSE tl.topic_id END
+            WHERE tl.topic_id = ? OR tl.related_topic_id = ?
+            ORDER BY tl.similarity DESC
+        """, (topic_id, topic_id, topic_id, topic_id))
+    else:
+        cursor = db.execute("""
+            SELECT
+                tl.id as link_id,
+                tl.related_topic_id as other_topic_id,
+                tl.similarity,
+                tl.time_overlap,
+                tl.link_type,
+                tl.created_at as linked_at,
+                t.name as other_topic_name,
+                t.summary as other_topic_summary,
+                t.first_seen,
+                t.last_seen,
+                (SELECT DISTINCT session FROM spans WHERE topic_id = t.id LIMIT 1) as session
+            FROM topic_links tl
+            JOIN topics t ON t.id = tl.related_topic_id
+            WHERE tl.topic_id = ?
+            ORDER BY tl.similarity DESC
+        """, (topic_id,))
+
+    results = [dict(row) for row in cursor]
+    db.close()
+    return results
+
+
+def check_time_overlap(
+    start1: Optional[str],
+    end1: Optional[str],
+    start2: Optional[str],
+    end2: Optional[str]
+) -> bool:
+    """Check if two time ranges overlap.
+
+    Args:
+        start1, end1: First time range (ISO strings)
+        start2, end2: Second time range (ISO strings)
+
+    Returns:
+        True if ranges overlap
+    """
+    if not all([start1, end1, start2, end2]):
+        return False
+
+    # Two ranges overlap if one starts before the other ends
+    return start1 <= end2 and start2 <= end1
+
+
+def auto_link_topic(topic_id: int, current_session: str, min_similarity: float = 0.8) -> list[dict]:
+    """Automatically link a topic to similar topics in other sessions.
+
+    Args:
+        topic_id: Topic to link
+        current_session: Current session to exclude
+        min_similarity: Minimum similarity for linking
+
+    Returns:
+        List of created links
+    """
+    # Find related topics
+    related = find_related_topics(
+        topic_id,
+        exclude_sessions=[current_session],
+        min_similarity=min_similarity
+    )
+
+    if not related:
+        return []
+
+    # Get current topic's time range
+    db = get_db()
+    cursor = db.execute("""
+        SELECT MIN(start_time) as start_time, MAX(end_time) as end_time
+        FROM spans WHERE topic_id = ?
+    """, (topic_id,))
+    current_times = cursor.fetchone()
+    db.close()
+
+    created_links = []
+    for rel in related:
+        # Check time overlap
+        overlap = check_time_overlap(
+            current_times['start_time'], current_times['end_time'],
+            rel.get('first_seen'), rel.get('last_seen')
+        )
+
+        # Create bidirectional link
+        link_id = link_topics(
+            topic_id, rel['id'],
+            similarity=rel['similarity'],
+            time_overlap=overlap,
+            link_type='semantic'
+        )
+
+        created_links.append({
+            'link_id': link_id,
+            'related_topic_id': rel['id'],
+            'related_topic_name': rel['name'],
+            'similarity': rel['similarity'],
+            'time_overlap': overlap,
+            'session': rel.get('session')
+        })
+
+    return created_links
+
+
+# =============================================================================
+# Timeline Functions
+# =============================================================================
+
+def get_topic_timeline(topic_id: int = None, topic_name: str = None) -> dict:
+    """Get timeline for a topic showing activity across sessions.
+
+    Args:
+        topic_id: Topic ID (preferred)
+        topic_name: Topic name (used if topic_id not provided)
+
+    Returns:
+        Dict with topic info and timeline entries grouped by date
+    """
+    db = get_db()
+
+    # Find topic
+    if topic_id:
+        cursor = db.execute(
+            "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE id = ?",
+            (topic_id,)
+        )
+    else:
+        cursor = db.execute(
+            "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE name LIKE ?",
+            (f"%{topic_name}%",)
+        )
+    topic = cursor.fetchone()
+    if not topic:
+        db.close()
+        return {"error": "Topic not found"}
+
+    topic_id = topic['id']
+
+    # Get all spans for this topic with their time ranges and idea counts
+    cursor = db.execute("""
+        SELECT
+            s.id as span_id,
+            s.session,
+            s.name as span_name,
+            s.start_time,
+            s.end_time,
+            COUNT(i.id) as idea_count
+        FROM spans s
+        LEFT JOIN ideas i ON i.span_id = s.id
+        WHERE s.topic_id = ?
+        GROUP BY s.id
+        ORDER BY COALESCE(s.start_time, s.created_at)
+    """, (topic_id,))
+    spans = [dict(r) for r in cursor]
+
+    # Get key ideas (decisions, conclusions) for each span
+    for span in spans:
+        cursor = db.execute("""
+            SELECT content, intent, message_time
+            FROM ideas
+            WHERE span_id = ? AND intent IN ('decision', 'conclusion')
+            ORDER BY COALESCE(message_time, created_at)
+            LIMIT 3
+        """, (span['span_id'],))
+        span['key_ideas'] = [dict(r) for r in cursor]
+
+    db.close()
+
+    # Group by date
+    from datetime import datetime
+    timeline = {}
+    for span in spans:
+        if span['start_time']:
+            try:
+                dt = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
+                date_key = dt.strftime('%Y-%m-%d')
+            except:
+                date_key = 'unknown'
+        else:
+            date_key = 'unknown'
+
+        if date_key not in timeline:
+            timeline[date_key] = []
+        timeline[date_key].append(span)
+
+    return {
+        "topic": dict(topic),
+        "timeline": timeline,
+        "total_spans": len(spans),
+        "total_ideas": sum(s['idea_count'] for s in spans)
+    }
+
+
+def get_project_timeline(session: str, days: int = 7) -> dict:
+    """Get activity timeline for a project/session.
+
+    Args:
+        session: Session name (project)
+        days: Number of days to look back
+
+    Returns:
+        Dict with daily activity grouped by date
+    """
+    from datetime import datetime, timedelta
+
+    db = get_db()
+
+    # Calculate date range
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days)
+    start_iso = start_date.isoformat() + 'Z'
+
+    # Get spans with their topics and idea counts
+    cursor = db.execute("""
+        SELECT
+            s.id as span_id,
+            s.name as span_name,
+            s.start_time,
+            s.end_time,
+            t.id as topic_id,
+            t.name as topic_name,
+            COUNT(i.id) as idea_count
+        FROM spans s
+        LEFT JOIN topics t ON t.id = s.topic_id
+        LEFT JOIN ideas i ON i.span_id = s.id
+        WHERE s.session = ?
+          AND COALESCE(s.start_time, s.created_at) >= ?
+        GROUP BY s.id
+        ORDER BY COALESCE(s.start_time, s.created_at)
+    """, (session, start_iso))
+    spans = [dict(r) for r in cursor]
+    db.close()
+
+    # Group by date
+    timeline = {}
+    for span in spans:
+        if span['start_time']:
+            try:
+                dt = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
+                date_key = dt.strftime('%Y-%m-%d')
+            except:
+                date_key = 'unknown'
+        else:
+            date_key = 'unknown'
+
+        if date_key not in timeline:
+            timeline[date_key] = {
+                "topics": set(),
+                "idea_count": 0,
+                "spans": []
+            }
+        timeline[date_key]["topics"].add(span['topic_name'] or span['span_name'][:30])
+        timeline[date_key]["idea_count"] += span['idea_count']
+        timeline[date_key]["spans"].append(span)
+
+    # Convert sets to lists for JSON
+    for date_key in timeline:
+        timeline[date_key]["topics"] = list(timeline[date_key]["topics"])
+
+    return {
+        "session": session,
+        "days": days,
+        "timeline": timeline,
+        "total_spans": len(spans),
+        "total_ideas": sum(s['idea_count'] for s in spans)
+    }
+
+
+def get_activity_by_period(
+    period: str = "day",
+    days: int = 7,
+    session: str = None
+) -> dict:
+    """Get idea activity aggregated by time period.
+
+    Args:
+        period: Aggregation period - 'day', 'week', or 'month'
+        days: Number of days to look back
+        session: Optional session to filter by
+
+    Returns:
+        Dict with period counts and metadata
+    """
+    from datetime import datetime, timedelta
+
+    db = get_db()
+
+    # Calculate date range
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days)
+    start_iso = start_date.isoformat() + 'Z'
+
+    # Build query
+    sql = """
+        SELECT
+            i.id,
+            COALESCE(i.message_time, i.created_at) as idea_time,
+            i.intent,
+            s.session
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        WHERE COALESCE(i.message_time, i.created_at) >= ?
+    """
+    params = [start_iso]
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+
+    sql += " ORDER BY idea_time"
+
+    cursor = db.execute(sql, params)
+    ideas = list(cursor)
+    db.close()
+
+    # Aggregate by period
+    period_counts = {}
+    intent_counts = {}
+
+    for idea in ideas:
+        idea_time = idea['idea_time']
+        intent = idea['intent']
+
+        # Parse time and determine period key
+        try:
+            dt = datetime.fromisoformat(idea_time.replace('Z', '+00:00'))
+            if period == "day":
+                period_key = dt.strftime('%Y-%m-%d')
+            elif period == "week":
+                # ISO week
+                period_key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
+            elif period == "month":
+                period_key = dt.strftime('%Y-%m')
+            else:
+                period_key = dt.strftime('%Y-%m-%d')
+        except:
+            period_key = 'unknown'
+
+        # Count by period
+        if period_key not in period_counts:
+            period_counts[period_key] = {
+                "total": 0,
+                "decisions": 0,
+                "questions": 0,
+                "conclusions": 0,
+                "sessions": set()
+            }
+        period_counts[period_key]["total"] += 1
+        period_counts[period_key]["sessions"].add(idea['session'])
+        if intent == 'decision':
+            period_counts[period_key]["decisions"] += 1
+        elif intent == 'question':
+            period_counts[period_key]["questions"] += 1
+        elif intent == 'conclusion':
+            period_counts[period_key]["conclusions"] += 1
+
+        # Count by intent
+        if intent not in intent_counts:
+            intent_counts[intent] = 0
+        intent_counts[intent] += 1
+
+    # Convert sets to counts for JSON
+    for pk in period_counts:
+        period_counts[pk]["session_count"] = len(period_counts[pk]["sessions"])
+        del period_counts[pk]["sessions"]
+
+    return {
+        "period": period,
+        "days": days,
+        "session": session,
+        "total_ideas": len(ideas),
+        "by_period": period_counts,
+        "by_intent": intent_counts
+    }
+
+
+def get_topic_activity(
+    topic_id: int,
+    period: str = "week",
+    days: int = 90
+) -> dict:
+    """Get activity for a specific topic over time.
+
+    Args:
+        topic_id: Topic ID to analyze
+        period: Aggregation period - 'day', 'week', or 'month'
+        days: Number of days to look back
+
+    Returns:
+        Dict with topic info and activity by period
+    """
+    from datetime import datetime, timedelta
+
+    db = get_db()
+
+    # Get topic info
+    cursor = db.execute(
+        "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE id = ?",
+        (topic_id,)
+    )
+    topic = cursor.fetchone()
+    if not topic:
+        db.close()
+        return {"error": "Topic not found"}
+
+    # Calculate date range
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days)
+    start_iso = start_date.isoformat() + 'Z'
+
+    # Get ideas for this topic
+    cursor = db.execute("""
+        SELECT
+            i.id,
+            COALESCE(i.message_time, i.created_at) as idea_time,
+            i.intent,
+            i.content,
+            s.session
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        WHERE s.topic_id = ?
+          AND COALESCE(i.message_time, i.created_at) >= ?
+        ORDER BY idea_time
+    """, (topic_id, start_iso))
+    ideas = list(cursor)
+    db.close()
+
+    # Aggregate by period
+    period_activity = {}
+
+    for idea in ideas:
+        idea_time = idea['idea_time']
+
+        try:
+            dt = datetime.fromisoformat(idea_time.replace('Z', '+00:00'))
+            if period == "day":
+                period_key = dt.strftime('%Y-%m-%d')
+            elif period == "week":
+                period_key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
+            elif period == "month":
+                period_key = dt.strftime('%Y-%m')
+            else:
+                period_key = dt.strftime('%Y-%m-%d')
+        except:
+            period_key = 'unknown'
+
+        if period_key not in period_activity:
+            period_activity[period_key] = {
+                "total": 0,
+                "sessions": set(),
+                "key_ideas": []
+            }
+        period_activity[period_key]["total"] += 1
+        period_activity[period_key]["sessions"].add(idea['session'])
+
+        # Track key ideas (decisions/conclusions)
+        if idea['intent'] in ('decision', 'conclusion') and len(period_activity[period_key]["key_ideas"]) < 3:
+            period_activity[period_key]["key_ideas"].append({
+                "content": idea['content'][:100],
+                "intent": idea['intent']
+            })
+
+    # Convert sets to lists for JSON
+    for pk in period_activity:
+        period_activity[pk]["sessions"] = list(period_activity[pk]["sessions"])
+
+    return {
+        "topic": dict(topic),
+        "period": period,
+        "days": days,
+        "total_ideas": len(ideas),
+        "by_period": period_activity
+    }
 
 
 # Bad topic name patterns (matched case-insensitively)
@@ -2020,16 +2662,18 @@ def close_span(span_id: int, end_line: int, summary: str, end_time: Optional[str
     """, (end_line, summary, end_time, span_id))
 
     # Get span for embedding and topic update
-    cursor = db.execute("SELECT name, summary, topic_id FROM spans WHERE id = ?", (span_id,))
+    cursor = db.execute("SELECT name, summary, topic_id, session FROM spans WHERE id = ?", (span_id,))
     row = cursor.fetchone()
+    topic_id = row['topic_id']
+    session = row['session']
 
     # Update topic last_seen if this is later
-    if end_time and row['topic_id']:
+    if end_time and topic_id:
         db.execute("""
             UPDATE topics
             SET last_seen = ?
             WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)
-        """, (end_time, row['topic_id'], end_time))
+        """, (end_time, topic_id, end_time))
 
     # Embed and store
     embed_text = f"{row['name']}: {row['summary']}"
@@ -2048,6 +2692,90 @@ def close_span(span_id: int, end_line: int, summary: str, end_time: Optional[str
     db.commit()
     db.close()
 
+    # Auto-link topic to similar topics in other sessions
+    if topic_id:
+        try:
+            links = auto_link_topic(topic_id, session, min_similarity=0.8)
+            if links:
+                logger.info(f"Auto-linked topic {topic_id} to {len(links)} related topics")
+        except Exception as e:
+            logger.warning(f"Auto-link failed for topic {topic_id}: {e}")
+
+
+def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
+    """Update span embedding incrementally.
+
+    Can be called during indexing to keep embeddings fresh without waiting
+    for span close. Uses span name + summary (if available) + sample of ideas.
+
+    Args:
+        span_id: Span to update
+        include_ideas: Whether to include idea content in embedding
+
+    Returns:
+        True if embedding was updated
+    """
+    db = get_db()
+
+    # Get span info
+    cursor = db.execute(
+        "SELECT name, summary, topic_id, session FROM spans WHERE id = ?",
+        (span_id,)
+    )
+    span = cursor.fetchone()
+    if not span:
+        db.close()
+        return False
+
+    # Build embedding text from span name + summary + sample ideas
+    parts = [span['name']]
+    if span['summary']:
+        parts.append(span['summary'])
+
+    if include_ideas:
+        # Get a sample of ideas (first few + most recent)
+        cursor = db.execute("""
+            SELECT content FROM ideas
+            WHERE span_id = ?
+            ORDER BY id ASC
+            LIMIT 3
+        """, (span_id,))
+        first_ideas = [r['content'][:200] for r in cursor]
+
+        cursor = db.execute("""
+            SELECT content FROM ideas
+            WHERE span_id = ?
+            ORDER BY id DESC
+            LIMIT 3
+        """, (span_id,))
+        recent_ideas = [r['content'][:200] for r in cursor]
+
+        # Combine unique ideas
+        all_ideas = first_ideas + [i for i in recent_ideas if i not in first_ideas]
+        if all_ideas:
+            parts.append("Key points: " + "; ".join(all_ideas[:5]))
+
+    embed_text = " | ".join(parts)[:2000]  # Limit length
+    embedding = get_embedding(embed_text)
+
+    db.execute("""
+        INSERT OR REPLACE INTO span_embeddings (span_id, embedding)
+        VALUES (?, ?)
+    """, (span_id, serialize_embedding(embedding)))
+    db.commit()
+    db.close()
+
+    # Try to auto-link if we have a topic
+    if span['topic_id']:
+        try:
+            links = auto_link_topic(span['topic_id'], span['session'], min_similarity=0.8)
+            if links:
+                logger.info(f"Auto-linked topic {span['topic_id']} to {len(links)} related topics")
+        except Exception as e:
+            logger.debug(f"Auto-link check: {e}")
+
+    return True
+
 
 def get_open_span(session: str) -> Optional[dict]:
     """Get the current open span for a session."""
@@ -2061,6 +2789,100 @@ def get_open_span(session: str) -> Optional[dict]:
     row = cursor.fetchone()
     db.close()
     return dict(row) if row else None
+
+
+# =============================================================================
+# Semantic Topic Shift Detection
+# =============================================================================
+
+def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
+    """Check how similar a message is to the current span's topic.
+
+    Args:
+        span_id: Current span ID
+        message: New message content
+
+    Returns:
+        Similarity score (0-1), or None if span has no embedding
+    """
+    db = get_db()
+
+    # Get span embedding
+    cursor = db.execute(
+        "SELECT embedding FROM span_embeddings WHERE span_id = ?",
+        (span_id,)
+    )
+    row = cursor.fetchone()
+    db.close()
+
+    if not row:
+        return None
+
+    span_embedding = deserialize_embedding(row['embedding'])
+    message_embedding = get_embedding(message[:1000])  # Limit message length
+
+    # Compute cosine similarity directly for accuracy
+    import math
+    dot_product = sum(a * b for a, b in zip(span_embedding, message_embedding))
+    norm_a = math.sqrt(sum(a * a for a in span_embedding))
+    norm_b = math.sqrt(sum(b * b for b in message_embedding))
+
+    if norm_a == 0 or norm_b == 0:
+        return None
+
+    similarity = dot_product / (norm_a * norm_b)
+    return similarity
+
+
+def detect_semantic_topic_shift(
+    span_id: int,
+    message: str,
+    threshold: float = 0.55,
+    divergence_history: list[float] = None
+) -> tuple[bool, float, list[float]]:
+    """Detect if a message represents a topic shift using semantic similarity.
+
+    Uses hysteresis: requires multiple consecutive divergent messages to
+    trigger a shift, avoiding false positives from brief tangents.
+
+    Args:
+        span_id: Current span ID
+        message: New message content
+        threshold: Similarity threshold (below = divergent)
+        divergence_history: List of recent similarity scores (modified in place)
+
+    Returns:
+        Tuple of (is_shift, similarity, updated_history)
+    """
+    if divergence_history is None:
+        divergence_history = []
+
+    similarity = check_topic_similarity(span_id, message)
+
+    if similarity is None:
+        # No embedding yet, can't detect shift semantically
+        return False, 0.0, divergence_history
+
+    # Track recent similarities
+    divergence_history.append(similarity)
+
+    # Keep only last 3 messages for hysteresis
+    if len(divergence_history) > 3:
+        divergence_history.pop(0)
+
+    # Require 2+ consecutive divergent messages for a shift
+    # This avoids triggering on brief tangents or clarifying questions
+    divergent_count = sum(1 for s in divergence_history if s < threshold)
+
+    # Strong shift: very low similarity on current message
+    strong_shift = similarity < (threshold - 0.15)
+
+    # Gradual shift: multiple consecutive divergent messages
+    gradual_shift = divergent_count >= 2 and similarity < threshold
+
+    is_shift = strong_shift or gradual_shift
+
+    return is_shift, similarity, divergence_history
 
 
 # =============================================================================
@@ -2418,13 +3240,21 @@ def search_spans(query: str, limit: int = 5) -> list[dict]:
     return results
 
 
-def hybrid_search(query: str, limit: int = 10, session: str = None) -> list[dict]:
+def hybrid_search(
+    query: str,
+    limit: int = 10,
+    session: str = None,
+    since: str = None,
+    until: str = None
+) -> list[dict]:
     """Hybrid search combining vector similarity and BM25.
 
     Args:
         query: Search query
         limit: Maximum results
         session: Optional session to filter by (project scope)
+        since: Optional ISO datetime for temporal start
+        until: Optional ISO datetime for temporal end
 
     Returns:
         List of matching idea dicts
@@ -2473,29 +3303,31 @@ def hybrid_search(query: str, limit: int = 10, session: str = None) -> list[dict
         db.close()
         return []
 
-    # Fetch full records with session filter
+    # Fetch full records with filters
     placeholders = ','.join('?' * len(top_ids))
-    if session:
-        cursor = db.execute(f"""
-            SELECT
-                i.id, i.content, i.intent, i.confidence,
-                i.source_file, i.source_line, i.created_at,
-                s.session, s.name as topic
-            FROM ideas i
-            LEFT JOIN spans s ON s.id = i.span_id
-            WHERE i.id IN ({placeholders}) AND s.session = ?
-        """, top_ids + [session])
-    else:
-        cursor = db.execute(f"""
-            SELECT
-                i.id, i.content, i.intent, i.confidence,
-                i.source_file, i.source_line, i.created_at,
-                s.session, s.name as topic
-            FROM ideas i
-            LEFT JOIN spans s ON s.id = i.span_id
-            WHERE i.id IN ({placeholders})
-        """, top_ids)
+    sql = f"""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            i.message_time,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.id IN ({placeholders})
+    """
+    params = list(top_ids)
 
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+    if since:
+        sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
+        params.append(since)
+    if until:
+        sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
+        params.append(until)
+
+    cursor = db.execute(sql, params)
     results = {row['id']: dict(row) for row in cursor}
     db.close()
 
@@ -2574,7 +3406,13 @@ Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably".""
         return _generate_hypothetical_doc_heuristic(query)
 
 
-def hyde_search(query: str, limit: int = 10, session: str = None) -> list[dict]:
+def hyde_search(
+    query: str,
+    limit: int = 10,
+    session: str = None,
+    since: str = None,
+    until: str = None
+) -> list[dict]:
     """HyDE search - generates hypothetical answer then searches.
 
     For vague queries, this often retrieves better matches than raw query.
@@ -2583,6 +3421,8 @@ def hyde_search(query: str, limit: int = 10, session: str = None) -> list[dict]:
         query: Search query
         limit: Maximum results
         session: Optional session to filter by (project scope)
+        since: Optional ISO datetime for temporal start
+        until: Optional ISO datetime for temporal end
 
     Returns:
         List of matching idea dicts
@@ -2595,36 +3435,159 @@ def hyde_search(query: str, limit: int = 10, session: str = None) -> list[dict]:
 
     # Search with hypothetical embedding
     db = get_db()
-    if session:
-        cursor = db.execute("""
-            SELECT
-                i.id, i.content, i.intent, i.confidence,
-                i.source_file, i.source_line, i.created_at,
-                s.session, s.name as topic,
-                e.distance
-            FROM idea_embeddings e
-            JOIN ideas i ON i.id = e.idea_id
-            LEFT JOIN spans s ON s.id = i.span_id
-            WHERE e.embedding MATCH ? AND k = ? AND s.session = ?
-            ORDER BY e.distance
-        """, (serialize_embedding(hypo_embedding), limit, session))
-    else:
-        cursor = db.execute("""
-            SELECT
-                i.id, i.content, i.intent, i.confidence,
-                i.source_file, i.source_line, i.created_at,
-                s.session, s.name as topic,
-                e.distance
-            FROM idea_embeddings e
-            JOIN ideas i ON i.id = e.idea_id
-            LEFT JOIN spans s ON s.id = i.span_id
-            WHERE e.embedding MATCH ? AND k = ?
-            ORDER BY e.distance
-        """, (serialize_embedding(hypo_embedding), limit))
 
+    # Build query with filters
+    sql = """
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            i.message_time,
+            s.session, s.name as topic,
+            e.distance
+        FROM idea_embeddings e
+        JOIN ideas i ON i.id = e.idea_id
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE e.embedding MATCH ? AND k = ?
+    """
+    params = [serialize_embedding(hypo_embedding), limit * 2]  # Get more for filtering
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+    if since:
+        sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
+        params.append(since)
+    if until:
+        sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
+        params.append(until)
+
+    sql += " ORDER BY e.distance LIMIT ?"
+    params.append(limit)
+
+    cursor = db.execute(sql, params)
     results = [dict(row) for row in cursor]
     db.close()
     return results
+
+
+def search_with_topic_expansion(
+    query: str,
+    limit: int = 10,
+    session: str = None,
+    expand_limit: int = 5
+) -> dict:
+    """Search with automatic expansion to linked topics in other sessions.
+
+    This search first finds relevant ideas, then identifies their topics
+    and follows topic links to find related ideas in other sessions.
+
+    Args:
+        query: Search query
+        limit: Maximum results per session
+        session: Primary session to search (None = all)
+        expand_limit: Max linked topics to expand to
+
+    Returns:
+        Dict with:
+            - primary_results: Ideas from primary session
+            - linked_results: Ideas from linked topics (grouped by session)
+            - topic_links: The topic links that were followed
+    """
+    # First do regular search
+    if session:
+        primary_results = search_ideas(query, limit=limit, session=session)
+    else:
+        primary_results = search_ideas(query, limit=limit)
+
+    if not primary_results:
+        return {
+            "primary_results": [],
+            "linked_results": {},
+            "topic_links": []
+        }
+
+    # Find topics from results
+    topic_ids = set()
+    for r in primary_results:
+        if r.get('span_id'):
+            # Get topic for this span
+            db = get_db()
+            cursor = db.execute(
+                "SELECT topic_id FROM spans WHERE id = ?",
+                (r['span_id'],)
+            )
+            row = cursor.fetchone()
+            db.close()
+            if row and row['topic_id']:
+                topic_ids.add(row['topic_id'])
+
+    if not topic_ids:
+        return {
+            "primary_results": primary_results,
+            "linked_results": {},
+            "topic_links": []
+        }
+
+    # Get linked topics
+    all_links = []
+    linked_topic_ids = set()
+    for topic_id in topic_ids:
+        links = get_topic_links(topic_id)
+        for link in links:
+            if link['other_topic_id'] not in topic_ids:
+                all_links.append(link)
+                linked_topic_ids.add(link['other_topic_id'])
+                if len(linked_topic_ids) >= expand_limit:
+                    break
+        if len(linked_topic_ids) >= expand_limit:
+            break
+
+    if not linked_topic_ids:
+        return {
+            "primary_results": primary_results,
+            "linked_results": {},
+            "topic_links": []
+        }
+
+    # Search within linked topics
+    db = get_db()
+    query_embedding = get_embedding(query)
+
+    # Get ideas from linked topics
+    placeholders = ','.join('?' * len(linked_topic_ids))
+    cursor = db.execute(f"""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            i.message_time,
+            s.session, s.name as topic,
+            s.topic_id,
+            e.distance
+        FROM idea_embeddings e
+        JOIN ideas i ON i.id = e.idea_id
+        JOIN spans s ON s.id = i.span_id
+        WHERE e.embedding MATCH ? AND k = ?
+          AND s.topic_id IN ({placeholders})
+        ORDER BY e.distance
+        LIMIT ?
+    """, [serialize_embedding(query_embedding), limit * 2] + list(linked_topic_ids) + [limit])
+
+    linked_results_raw = [dict(row) for row in cursor]
+    db.close()
+
+    # Group by session
+    linked_results = {}
+    for r in linked_results_raw:
+        sess = r.get('session', 'unknown')
+        if sess not in linked_results:
+            linked_results[sess] = []
+        linked_results[sess].append(r)
+
+    return {
+        "primary_results": primary_results,
+        "linked_results": linked_results,
+        "topic_links": all_links
+    }
 
 
 def expand_with_relations(idea_ids: list[int]) -> list[int]:
@@ -2763,7 +3726,9 @@ def search_ideas_temporal(
     query: str,
     limit: int = 10,
     since: Optional[str] = None,
-    until: Optional[str] = None
+    until: Optional[str] = None,
+    relative: Optional[str] = None,
+    session: Optional[str] = None
 ) -> list[dict]:
     """Search ideas with temporal filtering.
 
@@ -2772,18 +3737,25 @@ def search_ideas_temporal(
         limit: Maximum results
         since: ISO datetime string for start of range
         until: ISO datetime string for end of range
+        relative: Duration string like "1d", "1w", "1m" (overrides since/until)
+        session: Filter to specific session
 
     Returns:
-        List of matching idea dicts
+        List of matching idea dicts with message_time
     """
+    # Resolve relative time if provided
+    if relative:
+        since, until = resolve_temporal_qualifier(relative)
+
     db = get_db()
     query_embedding = get_embedding(query)
 
-    # Build query with temporal filter
+    # Build query with temporal filter - use message_time with fallback to created_at
     sql = """
         SELECT
             i.id, i.content, i.intent, i.confidence,
             i.source_file, i.source_line, i.created_at,
+            i.message_time,
             s.session, s.name as topic,
             e.distance
         FROM idea_embeddings e
@@ -2794,11 +3766,14 @@ def search_ideas_temporal(
     params = [serialize_embedding(query_embedding), limit * 2]
 
     if since:
-        sql += " AND i.created_at >= ?"
+        sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
         params.append(since)
     if until:
-        sql += " AND i.created_at <= ?"
+        sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
         params.append(until)
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
 
     sql += " ORDER BY e.distance LIMIT ?"
     params.append(limit)
@@ -2851,6 +3826,126 @@ def expand_query(query: str) -> list[str]:
             expanded.update(_SYNONYMS[word])
 
     return list(expanded)
+
+
+def resolve_temporal_qualifier(qualifier: str) -> tuple[str, str]:
+    """Convert a temporal qualifier to absolute date range.
+
+    Args:
+        qualifier: Duration string like "1d", "1w", "1m", "3m", "1y"
+                   or natural language like "last week", "yesterday",
+                   "since tuesday", "since jan 5"
+
+    Returns:
+        Tuple of (since, until) ISO datetime strings
+    """
+    from datetime import datetime, timedelta
+    import re
+
+    now = datetime.utcnow()
+    until = now.isoformat() + "Z"
+    qualifier = qualifier.lower().strip()
+
+    # Day names for "since tuesday" etc.
+    day_names = {
+        "monday": 0, "mon": 0,
+        "tuesday": 1, "tue": 1, "tues": 1,
+        "wednesday": 2, "wed": 2,
+        "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+        "friday": 4, "fri": 4,
+        "saturday": 5, "sat": 5,
+        "sunday": 6, "sun": 6,
+    }
+
+    # Month names
+    month_names = {
+        "january": 1, "jan": 1, "february": 2, "feb": 2,
+        "march": 3, "mar": 3, "april": 4, "apr": 4,
+        "may": 5, "june": 6, "jun": 6,
+        "july": 7, "jul": 7, "august": 8, "aug": 8,
+        "september": 9, "sep": 9, "sept": 9,
+        "october": 10, "oct": 10, "november": 11, "nov": 11,
+        "december": 12, "dec": 12,
+    }
+
+    # Handle "since <day>" (e.g., "since tuesday", "since monday")
+    since_day_match = re.match(r"since\s+(\w+)", qualifier)
+    if since_day_match:
+        day_word = since_day_match.group(1)
+        if day_word in day_names:
+            target_weekday = day_names[day_word]
+            current_weekday = now.weekday()
+            days_ago = (current_weekday - target_weekday) % 7
+            if days_ago == 0:
+                days_ago = 7  # If same day, go back a week
+            target_date = now - timedelta(days=days_ago)
+            since = target_date.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+            return (since, until)
+        # Check if it's a month reference (e.g., "since january")
+        elif day_word in month_names:
+            target_month = month_names[day_word]
+            year = now.year if target_month <= now.month else now.year - 1
+            target_date = datetime(year, target_month, 1)
+            since = target_date.isoformat() + "Z"
+            return (since, until)
+
+    # Handle "since <month> <day>" (e.g., "since jan 5", "since january 5")
+    since_date_match = re.match(r"since\s+(\w+)\s+(\d{1,2})", qualifier)
+    if since_date_match:
+        month_word = since_date_match.group(1)
+        day_num = int(since_date_match.group(2))
+        if month_word in month_names:
+            target_month = month_names[month_word]
+            year = now.year
+            target_date = datetime(year, target_month, day_num)
+            if target_date > now:
+                year -= 1
+                target_date = datetime(year, target_month, day_num)
+            since = target_date.isoformat() + "Z"
+            return (since, until)
+
+    # Simple natural language mappings
+    if qualifier == "today":
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        return (since, until)
+    elif qualifier == "yesterday":
+        yesterday = now - timedelta(days=1)
+        since = yesterday.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        yesterday_end = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        return (since, yesterday_end)
+    elif qualifier in ("last week", "this week"):
+        since = (now - timedelta(weeks=1)).isoformat() + "Z"
+        return (since, until)
+    elif qualifier in ("last month", "this month"):
+        since = (now - timedelta(days=30)).isoformat() + "Z"
+        return (since, until)
+    elif qualifier in ("recently", "recent"):
+        since = (now - timedelta(weeks=1)).isoformat() + "Z"
+        return (since, until)
+
+    # Parse duration like "1d", "2w", "1m", "1y"
+    match = re.match(r"(\d+)([dwmy])", qualifier)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+
+        if unit == "d":
+            delta = timedelta(days=amount)
+        elif unit == "w":
+            delta = timedelta(weeks=amount)
+        elif unit == "m":
+            delta = timedelta(days=amount * 30)  # Approximate
+        elif unit == "y":
+            delta = timedelta(days=amount * 365)  # Approximate
+        else:
+            delta = timedelta(weeks=1)  # Default
+
+        since = (now - delta).isoformat() + "Z"
+        return (since, until)
+
+    # Default: last week
+    since = (now - timedelta(weeks=1)).isoformat() + "Z"
+    return (since, until)
 
 
 def analyze_query(query: str) -> dict:
@@ -3008,6 +4103,36 @@ def get_stats() -> dict:
         stats["db_size_mb"] = round(size_bytes / (1024 * 1024), 2)
 
     return stats
+
+
+def get_session_time_range(session: str) -> dict | None:
+    """Get the time range (first/last idea) for a session.
+
+    Args:
+        session: Session name
+
+    Returns:
+        Dict with start_time, end_time (ISO format) or None if not found
+    """
+    db = get_db()
+    cursor = db.execute("""
+        SELECT
+            MIN(COALESCE(i.message_time, i.created_at)) as start_time,
+            MAX(COALESCE(i.message_time, i.created_at)) as end_time
+        FROM spans s
+        JOIN ideas i ON i.span_id = s.id
+        WHERE s.session = ?
+    """, (session,))
+    row = cursor.fetchone()
+    db.close()
+
+    if row and row['start_time']:
+        return {
+            "session": session,
+            "start_time": row['start_time'],
+            "end_time": row['end_time']
+        }
+    return None
 
 
 def list_sessions() -> list[dict]:

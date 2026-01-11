@@ -269,3 +269,46 @@ uv run python "$SKILL_DIR/src/cli.py" assign-topic <topic_id> "My Project"
 ```bash
 uv run python "$SKILL_DIR/src/cli.py" tree
 ```
+
+## Timeline Visualization
+
+See activity across time for topics or projects.
+
+**Topic timeline (see activity for a topic across sessions):**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" timeline --topic "LoRa prototyping"
+```
+
+**Project timeline (see recent activity by date):**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" timeline --project rad-control-v1-1 --days 14
+```
+
+Output shows spans grouped by date with key decisions and conclusions highlighted.
+
+## Temporal Queries
+
+Search with natural language time expressions and temporal aggregation.
+
+**Natural language time in search:**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" search "heating" --when "last week"
+uv run python "$SKILL_DIR/src/cli.py" search "decisions" --when "since tuesday"
+uv run python "$SKILL_DIR/src/cli.py" search "LoRa" --when "since jan 5"
+```
+
+**Search after a specific session:**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" search "follow up" --after-session abc123 --global
+```
+
+**Activity aggregation by period:**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" activity --by day --days 7
+uv run python "$SKILL_DIR/src/cli.py" activity --by week --days 30 -s rad-control-v1-1
+```
+
+**Topic activity over time:**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" topic-activity 42 --by week --days 90
+```

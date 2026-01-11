@@ -77,22 +77,46 @@ def run_search_command(
     session: str = None,
     intent: str = None,
     since: str = None,
-    until: str = None
+    until: str = None,
+    recent: str = None,
+    auto_analyze: bool = True
 ) -> dict:
-    """Run search command with error handling."""
+    """Run search command with error handling.
+
+    Args:
+        auto_analyze: If True, uses analyze_query() to detect temporal/intent
+                     filters from natural language (unless explicitly provided)
+    """
     try:
         import memory_db
-        if since or until:
+
+        # Auto-analyze query for temporal/intent filters if not explicitly provided
+        detected = {}
+        if auto_analyze:
+            detected = memory_db.analyze_query(query)
+            # Only use detected filters if not explicitly provided
+            if not recent and not since and not until:
+                recent = detected.get("temporal")
+            if not intent:
+                intent = detected.get("intent_filter")
+
+        if since or until or recent:
             # Use temporal search when date filters provided
-            results = memory_db.search_ideas_temporal(query, limit=limit, since=since, until=until)
-            # Apply additional filters
-            if session:
-                results = [r for r in results if r.get('session') == session]
+            results = memory_db.search_ideas_temporal(
+                query, limit=limit, since=since, until=until,
+                relative=recent, session=session
+            )
+            # Apply intent filter if specified
             if intent:
                 results = [r for r in results if r.get('intent') == intent]
         else:
             results = memory_db.search_ideas(query, limit=limit, session=session, intent=intent)
-        return safe_result(results)
+
+        # Add metadata about detected filters
+        return safe_result({
+            "results": results,
+            "detected_filters": detected if detected else None
+        })
     except memory_db.MemgraphError as e:
         return error_result(str(e), e.error_code, e.details)
     except Exception as e:
@@ -146,20 +170,44 @@ def run_command(args):
         elif args.command == "search":
             # Resolve session from args (--global, --session, --cwd)
             session = resolve_session(args)
+            # --when takes precedence over --recent
+            recent = args.when if args.when else args.recent
+            # --after-session sets since to the end of that session
+            since = args.since
+            if args.after_session:
+                session_range = memory_db.get_session_time_range(args.after_session)
+                if session_range:
+                    since = session_range['end_time']
+                    print(f"# Searching after session '{args.after_session}' (since {since[:10]})", file=sys.stderr)
+                else:
+                    print(f"# Warning: Session '{args.after_session}' not found", file=sys.stderr)
             result = run_search_command(
                 args.query,
                 limit=args.limit,
                 session=session,
                 intent=args.intent,
-                since=args.since,
-                until=args.until
+                since=since,
+                until=args.until,
+                recent=recent
             )
             if result["success"]:
-                # Include session info in output for transparency
-                output = result["data"]
+                data = result["data"]
+                results = data.get("results", data) if isinstance(data, dict) else data
+                detected = data.get("detected_filters") if isinstance(data, dict) else None
+
+                # Show session and detected filters for transparency
                 if session:
                     print(f"# Searching project: {session}", file=sys.stderr)
-                print(json.dumps(output, indent=2, default=str))
+                if detected:
+                    filters = []
+                    if detected.get("temporal"):
+                        filters.append(f"temporal={detected['temporal']}")
+                    if detected.get("intent_filter"):
+                        filters.append(f"intent={detected['intent_filter']}")
+                    if filters:
+                        print(f"# Detected filters: {', '.join(filters)}", file=sys.stderr)
+
+                print(json.dumps(results, indent=2, default=str))
             else:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -169,7 +217,16 @@ def run_command(args):
             session = resolve_session(args)
             if session:
                 print(f"# Searching project: {session}", file=sys.stderr)
-            results = memory_db.hybrid_search(args.query, limit=args.limit, session=session)
+            # Resolve temporal filters (--when takes precedence over --recent)
+            since, until = args.since, args.until
+            time_filter = args.when if args.when else args.recent
+            if time_filter:
+                since, until = memory_db.resolve_temporal_qualifier(time_filter)
+                print(f"# Time filter: {time_filter} ({since[:10]} to {until[:10]})", file=sys.stderr)
+            results = memory_db.hybrid_search(
+                args.query, limit=args.limit, session=session,
+                since=since, until=until
+            )
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "hyde":
@@ -177,8 +234,133 @@ def run_command(args):
             session = resolve_session(args)
             if session:
                 print(f"# Searching project: {session}", file=sys.stderr)
-            results = memory_db.hyde_search(args.query, limit=args.limit, session=session)
+            # Resolve temporal filters (--when takes precedence over --recent)
+            since, until = args.since, args.until
+            time_filter = args.when if args.when else args.recent
+            if time_filter:
+                since, until = memory_db.resolve_temporal_qualifier(time_filter)
+                print(f"# Time filter: {time_filter} ({since[:10]} to {until[:10]})", file=sys.stderr)
+            results = memory_db.hyde_search(
+                args.query, limit=args.limit, session=session,
+                since=since, until=until
+            )
             print(json.dumps(results, indent=2, default=str))
+
+        elif args.command == "expand":
+            # Search with topic expansion
+            session = resolve_session(args)
+            if session:
+                print(f"# Primary session: {session}", file=sys.stderr)
+            results = memory_db.search_with_topic_expansion(
+                args.query,
+                limit=args.limit,
+                session=session,
+                expand_limit=args.expand_limit
+            )
+            # Format output
+            print(f"# Primary results: {len(results['primary_results'])}", file=sys.stderr)
+            if results['linked_results']:
+                linked_count = sum(len(v) for v in results['linked_results'].values())
+                print(f"# Linked results: {linked_count} from {len(results['linked_results'])} sessions", file=sys.stderr)
+            print(json.dumps(results, indent=2, default=str))
+
+        elif args.command == "topic-links":
+            links = memory_db.get_topic_links(args.topic_id)
+            print(json.dumps(links, indent=2, default=str))
+
+        elif args.command == "link-topics":
+            link_id = memory_db.link_topics(
+                args.topic_id,
+                args.related_id,
+                similarity=args.similarity,
+                link_type='manual'
+            )
+            print(json.dumps({"link_id": link_id, "success": True}))
+
+        elif args.command == "auto-link":
+            # Get all topics and auto-link them
+            topics = memory_db.list_topics()
+            all_links = []
+            for topic in topics:
+                # Get the session for this topic
+                db = memory_db.get_db()
+                cursor = db.execute(
+                    "SELECT DISTINCT session FROM spans WHERE topic_id = ?",
+                    (topic['id'],)
+                )
+                sessions = [r['session'] for r in cursor]
+                db.close()
+
+                if not sessions:
+                    continue
+
+                # Find related topics (excluding this topic's sessions)
+                related = memory_db.find_related_topics(
+                    topic['id'],
+                    exclude_sessions=sessions,
+                    min_similarity=args.min_similarity
+                )
+
+                for rel in related:
+                    link_info = {
+                        "topic_id": topic['id'],
+                        "topic_name": topic['name'],
+                        "related_id": rel['id'],
+                        "related_name": rel['name'],
+                        "similarity": rel['similarity'],
+                        "related_session": rel.get('session')
+                    }
+
+                    if args.dry_run:
+                        all_links.append(link_info)
+                    else:
+                        link_id = memory_db.link_topics(
+                            topic['id'], rel['id'],
+                            similarity=rel['similarity'],
+                            link_type='semantic'
+                        )
+                        link_info['link_id'] = link_id
+                        all_links.append(link_info)
+
+            print(json.dumps({
+                "dry_run": args.dry_run,
+                "links_found": len(all_links),
+                "links": all_links
+            }, indent=2, default=str))
+
+        elif args.command == "refresh-embeddings":
+            # Find spans without embeddings
+            db = memory_db.get_db()
+            sql = """
+                SELECT s.id, s.name, s.session
+                FROM spans s
+                LEFT JOIN span_embeddings se ON se.span_id = s.id
+                WHERE se.span_id IS NULL
+            """
+            params = []
+            if args.session:
+                sql += " AND s.session = ?"
+                params.append(args.session)
+
+            cursor = db.execute(sql, params)
+            spans_to_update = list(cursor)
+            db.close()
+
+            print(f"Found {len(spans_to_update)} spans without embeddings", file=sys.stderr)
+
+            updated = 0
+            for span in spans_to_update:
+                try:
+                    memory_db.update_span_embedding(span['id'])
+                    updated += 1
+                    print(f"  Updated: {span['name'][:50]}... ({span['session']})", file=sys.stderr)
+                except Exception as e:
+                    print(f"  Failed: {span['name'][:50]}... - {e}", file=sys.stderr)
+
+            print(json.dumps({
+                "spans_found": len(spans_to_update),
+                "spans_updated": updated
+            }, indent=2))
 
         elif args.command == "stats":
             result = run_stats_command()
@@ -538,6 +720,155 @@ def run_command(args):
             print(f"Kept in original: {result['kept_in_original']} ideas")
             print(f"\nRun 'tree' to see the new hierarchy.")
 
+        elif args.command == "timeline":
+            from datetime import datetime
+
+            if args.topic:
+                # Topic timeline
+                result = memory_db.get_topic_timeline(topic_name=args.topic)
+                if "error" in result:
+                    print(json.dumps(result), file=sys.stderr)
+                    sys.exit(1)
+
+                topic = result['topic']
+                print(f"\nTopic: {topic['name']}")
+                if topic.get('summary'):
+                    print(f"  {topic['summary']}")
+                print(f"\n  First seen: {topic.get('first_seen', 'unknown')}")
+                print(f"  Last seen: {topic.get('last_seen', 'unknown')}")
+                print(f"  Total: {result['total_spans']} spans, {result['total_ideas']} ideas")
+                print()
+
+                # Show timeline by date
+                for date_key in sorted(result['timeline'].keys(), reverse=True):
+                    spans = result['timeline'][date_key]
+                    try:
+                        date_display = datetime.strptime(date_key, '%Y-%m-%d').strftime('%b %d, %Y')
+                    except:
+                        date_display = date_key
+                    print(f"  {date_display}")
+
+                    for span in spans:
+                        time_range = ""
+                        if span.get('start_time') and span.get('end_time'):
+                            try:
+                                start = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
+                                end = datetime.fromisoformat(span['end_time'].replace('Z', '+00:00'))
+                                time_range = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+                            except:
+                                pass
+                        session_info = f"Session: {span['session']}"
+                        print(f"    {time_range:12} {session_info} ({span['idea_count']} ideas)")
+
+                        # Show key ideas
+                        for idea in span.get('key_ideas', []):
+                            prefix = "→" if idea['intent'] == 'decision' else "•"
+                            content = idea['content'][:70] + "..." if len(idea['content']) > 70 else idea['content']
+                            print(f"      {prefix} {content}")
+                    print()
+
+            elif args.project:
+                # Project timeline
+                session = args.project
+                if args.cwd:
+                    session = memory_db.get_session_for_cwd(args.cwd) or args.project
+
+                result = memory_db.get_project_timeline(session, days=args.days)
+                if "error" in result:
+                    print(json.dumps(result), file=sys.stderr)
+                    sys.exit(1)
+
+                print(f"\nProject: {result['session']} (last {result['days']} days)")
+                print(f"  Total: {result['total_spans']} spans, {result['total_ideas']} ideas")
+                print()
+
+                # Show activity by date
+                for date_key in sorted(result['timeline'].keys(), reverse=True):
+                    day_data = result['timeline'][date_key]
+                    try:
+                        date_display = datetime.strptime(date_key, '%Y-%m-%d').strftime('%b %d')
+                    except:
+                        date_display = date_key
+
+                    topics = ", ".join(day_data['topics'][:5])
+                    if len(day_data['topics']) > 5:
+                        topics += f" (+{len(day_data['topics']) - 5} more)"
+                    print(f"  {date_display}: {topics}")
+                print()
+
+            else:
+                print("Error: Specify --topic or --project", file=sys.stderr)
+                sys.exit(1)
+
+        elif args.command == "activity":
+            # Resolve session from args
+            session = resolve_session(args)
+            result = memory_db.get_activity_by_period(
+                period=args.by,
+                days=args.days,
+                session=session
+            )
+
+            print(f"\nActivity by {args.by} (last {args.days} days)")
+            if session:
+                print(f"  Project: {session}")
+            print(f"  Total ideas: {result['total_ideas']}")
+            print()
+
+            # Show by period
+            for period_key in sorted(result['by_period'].keys(), reverse=True):
+                data = result['by_period'][period_key]
+                bar = "█" * min(data['total'] // 5, 20)
+                extras = []
+                if data['decisions']:
+                    extras.append(f"{data['decisions']}D")
+                if data['conclusions']:
+                    extras.append(f"{data['conclusions']}C")
+                if data['questions']:
+                    extras.append(f"{data['questions']}Q")
+                extra_str = f" ({', '.join(extras)})" if extras else ""
+                sessions_str = f" [{data['session_count']} sessions]" if data['session_count'] > 1 else ""
+                print(f"  {period_key}: {data['total']:4d} {bar}{extra_str}{sessions_str}")
+
+            print()
+            print("Intent breakdown:")
+            for intent, count in sorted(result['by_intent'].items(), key=lambda x: -x[1]):
+                print(f"  {intent}: {count}")
+
+        elif args.command == "topic-activity":
+            result = memory_db.get_topic_activity(
+                topic_id=args.topic_id,
+                period=args.by,
+                days=args.days
+            )
+
+            if "error" in result:
+                print(json.dumps(result), file=sys.stderr)
+                sys.exit(1)
+
+            topic = result['topic']
+            print(f"\nTopic: {topic['name']}")
+            if topic.get('summary'):
+                print(f"  {topic['summary']}")
+            print(f"\n  Activity by {args.by} (last {args.days} days)")
+            print(f"  Total ideas: {result['total_ideas']}")
+            print()
+
+            # Show by period
+            for period_key in sorted(result['by_period'].keys(), reverse=True):
+                data = result['by_period'][period_key]
+                bar = "█" * min(data['total'] // 2, 20)
+                sessions = ", ".join(data['sessions'][:2])
+                if len(data['sessions']) > 2:
+                    sessions += f" (+{len(data['sessions']) - 2})"
+                print(f"  {period_key}: {data['total']:3d} {bar}  [{sessions}]")
+
+                # Show key ideas
+                for idea in data.get('key_ideas', []):
+                    prefix = "→" if idea['intent'] == 'decision' else "•"
+                    print(f"    {prefix} {idea['content']}")
+            print()
+
     except memory_db.MemgraphError as e:
         print(json.dumps(e.to_dict()), file=sys.stderr)
         sys.exit(1)
@@ -564,6 +895,9 @@ def main():
     search_p.add_argument("-i", "--intent", help="Filter by intent")
     search_p.add_argument("--since", help="Only ideas after this date (ISO format, e.g. 2024-01-01)")
     search_p.add_argument("--until", help="Only ideas before this date (ISO format)")
+    search_p.add_argument("--recent", help="Relative time filter (e.g. 1d, 1w, 1m, 3m, 1y)")
+    search_p.add_argument("--when", help="Natural language time (e.g. 'last week', 'since tuesday', 'since jan 5')")
+    search_p.add_argument("--after-session", help="Only ideas after this session ended (session name)")
     search_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
     search_p.add_argument("-g", "--global", dest="global_search", action="store_true",
                           help="Search across all projects (default: current project only)")
@@ -573,6 +907,10 @@ def main():
     hybrid_p.add_argument("query", help="Search query")
     hybrid_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
     hybrid_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
+    hybrid_p.add_argument("--since", help="Only ideas after this date (ISO format)")
+    hybrid_p.add_argument("--until", help="Only ideas before this date (ISO format)")
+    hybrid_p.add_argument("--recent", help="Relative time filter (e.g. 1d, 1w, 1m, 3m, 1y)")
+    hybrid_p.add_argument("--when", help="Natural language time (e.g. 'last week', 'since tuesday', 'since jan 5')")
     hybrid_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
     hybrid_p.add_argument("-g", "--global", dest="global_search", action="store_true",
                           help="Search across all projects (default: current project only)")
@@ -582,9 +920,40 @@ def main():
     hyde_p.add_argument("query", help="Search query")
     hyde_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
     hyde_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
+    hyde_p.add_argument("--since", help="Only ideas after this date (ISO format)")
+    hyde_p.add_argument("--until", help="Only ideas before this date (ISO format)")
+    hyde_p.add_argument("--recent", help="Relative time filter (e.g. 1d, 1w, 1m, 3m, 1y)")
+    hyde_p.add_argument("--when", help="Natural language time (e.g. 'last week', 'since tuesday', 'since jan 5')")
     hyde_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
     hyde_p.add_argument("-g", "--global", dest="global_search", action="store_true",
                           help="Search across all projects (default: current project only)")
+
+    # expand (search with topic expansion)
+    expand_p = subparsers.add_parser("expand", help="Search with cross-session topic expansion")
+    expand_p.add_argument("query", help="Search query")
+    expand_p.add_argument("-n", "--limit", type=int, default=10, help="Max results per session")
+    expand_p.add_argument("-s", "--session", help="Primary session to search")
+    expand_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    expand_p.add_argument("--expand-limit", type=int, default=5, help="Max linked topics to expand to")
+
+    # topic-links (view links for a topic)
+    links_p = subparsers.add_parser("topic-links", help="View links for a topic")
+    links_p.add_argument("topic_id", type=int, help="Topic ID")
+
+    # link-topics (manually link two topics)
+    link_p = subparsers.add_parser("link-topics", help="Manually link two topics")
+    link_p.add_argument("topic_id", type=int, help="First topic ID")
+    link_p.add_argument("related_id", type=int, help="Second topic ID")
+    link_p.add_argument("--similarity", type=float, default=1.0, help="Similarity score (0-1)")
+
+    # auto-link (auto-link all topics)
+    autolink_p = subparsers.add_parser("auto-link", help="Auto-link topics across sessions")
+    autolink_p.add_argument("--min-similarity", type=float, default=0.8, help="Min similarity threshold")
+    autolink_p.add_argument("--dry-run", action="store_true", help="Show what would be linked")
+
+    # refresh-embeddings (update span embeddings for spans missing them)
+    refresh_p = subparsers.add_parser("refresh-embeddings", help="Update span embeddings for spans missing them")
+    refresh_p.add_argument("-s", "--session", help="Only refresh spans in this session")
 
     # stats
     subparsers.add_parser("stats", help="Show database statistics")
@@ -740,6 +1109,26 @@ def main():
     split_p.add_argument("-n", "--clusters", type=int, help="Number of clusters (auto if not specified)")
     split_p.add_argument("-m", "--min-size", type=int, default=3, help="Min ideas for a sub-topic")
     split_p.add_argument("--keep-junk", action="store_true", help="Keep ideas in tiny clusters (default: delete)")
+
+    # Timeline visualization
+    timeline_p = subparsers.add_parser("timeline", help="Show activity timeline for a topic or project")
+    timeline_p.add_argument("--topic", "-t", help="Topic name to show timeline for")
+    timeline_p.add_argument("--project", "-p", help="Project/session to show timeline for")
+    timeline_p.add_argument("--days", "-d", type=int, default=7, help="Days to look back (for --project)")
+    timeline_p.add_argument("--cwd", help="Current working directory (for auto-detecting project)")
+
+    # Activity aggregation
+    activity_p = subparsers.add_parser("activity", help="Show idea activity aggregated by time period")
+    activity_p.add_argument("--by", choices=["day", "week", "month"], default="day", help="Aggregation period")
+    activity_p.add_argument("--days", "-d", type=int, default=7, help="Days to look back")
+    activity_p.add_argument("-s", "--session", help="Filter by session")
+    activity_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+
+    # Topic activity
+    topic_activity_p = subparsers.add_parser("topic-activity", help="Show activity for a specific topic over time")
+    topic_activity_p.add_argument("topic_id", type=int, help="Topic ID")
+    topic_activity_p.add_argument("--by", choices=["day", "week", "month"], default="week", help="Aggregation period")
+    topic_activity_p.add_argument("--days", "-d", type=int, default=90, help="Days to look back")
 
     args = parser.parse_args()
 

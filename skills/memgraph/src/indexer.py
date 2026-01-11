@@ -266,32 +266,47 @@ def detect_topic_shift(content: str, context: dict) -> bool:
 
 
 def detect_topic_shift_semantic(content: str, context: dict) -> bool:
-    """Detect topic shift using embedding similarity.
+    """Detect topic shift using embedding similarity against span embedding.
+
+    Compares the current message against the accumulated span embedding,
+    which represents what the current topic is about. This is more robust
+    than comparing to the previous message.
 
     Args:
         content: Message content
-        context: Context with last_embedding and threshold
+        context: Context with span_id, divergence_history, and threshold
 
     Returns:
         True if semantic topic shift detected
     """
-    if "last_embedding" not in context:
+    span_id = context.get("span_id")
+    if not span_id:
         return False
 
-    threshold = context.get("threshold", 0.5)
+    threshold = context.get("threshold", 0.55)
+    divergence_history = context.get("divergence_history", [])
 
     try:
-        current_embedding = get_embedding(content)
-        similarity = cosine_similarity(context["last_embedding"], current_embedding)
+        is_shift, similarity, updated_history = memory_db.detect_semantic_topic_shift(
+            span_id, content, threshold=threshold, divergence_history=divergence_history
+        )
 
-        # Low similarity = topic shift
-        if similarity < threshold:
-            logger.info(f"Semantic topic shift detected (similarity: {similarity:.2f})")
+        # Update history in context for next call
+        context["divergence_history"] = updated_history
+
+        if is_shift:
+            logger.info(f"Semantic topic shift detected (similarity: {similarity:.2f}, history: {[f'{s:.2f}' for s in updated_history]})")
             return True
+
+        # Log similarity for debugging even when no shift
+        if similarity < threshold + 0.1:
+            logger.debug(f"Message diverging from topic (similarity: {similarity:.2f})")
 
     except MemgraphError:
         # Can't get embedding, skip semantic check
         pass
+    except Exception as e:
+        logger.debug(f"Semantic shift detection failed: {e}")
 
     return False
 
@@ -1039,6 +1054,13 @@ def index_transcript(
     recent_ideas: list[dict] = []
     MAX_RECENT = 10  # Only check last N ideas for relations
 
+    # Context for semantic topic shift detection
+    semantic_context: dict = {
+        "span_id": None,
+        "divergence_history": [],
+        "threshold": 0.55
+    }
+
     def close_span_with_summary(span_id: int, end_line: int, messages: list, end_time: Optional[str] = None):
         """Helper to close a span with LLM summary and end time."""
         summary = summarize_span_with_llm(messages) if messages else ""
@@ -1062,6 +1084,9 @@ def index_transcript(
         # Update last_time for current span
         if span_stack and msg_time:
             span_stack[-1]["last_time"] = msg_time
+
+        # Update semantic context with current span for shift detection
+        semantic_context["span_id"] = current_span_id
 
         # Check for return to parent topic
         if detect_return_to_parent(content) and len(span_stack) > 1:
@@ -1094,9 +1119,16 @@ def index_transcript(
             current_span_id = new_span_id
             current_depth = new_depth
             span_messages = span_stack[-1]["messages"]
+            # Reset semantic context for new span
+            semantic_context["divergence_history"] = []
+            # Create initial embedding for cross-session linking
+            try:
+                memory_db.update_span_embedding(new_span_id, include_ideas=False)
+            except Exception:
+                pass
 
         # Check for topic shift (new top-level topic)
-        elif detect_topic_shift(content, {}):
+        elif detect_topic_shift(content, semantic_context):
             # Close all open spans with their end times
             while span_stack:
                 current = span_stack.pop()
@@ -1117,6 +1149,13 @@ def index_transcript(
             current_depth = 0
             span_stack = [{"id": current_span_id, "depth": 0, "messages": [], "start_time": msg_time, "last_time": msg_time}]
             span_messages = span_stack[-1]["messages"]
+            # Reset semantic context for new span
+            semantic_context["divergence_history"] = []
+            # Create initial embedding for cross-session linking
+            try:
+                memory_db.update_span_embedding(current_span_id, include_ideas=False)
+            except Exception:
+                pass
             # Clear recent ideas on topic shift
             recent_ideas = []
 
@@ -1137,6 +1176,13 @@ def index_transcript(
             current_depth = 0
             span_stack = [{"id": current_span_id, "depth": 0, "messages": [], "start_time": msg_time, "last_time": msg_time}]
             span_messages = span_stack[-1]["messages"]
+            # Reset semantic context for new span
+            semantic_context["divergence_history"] = []
+            # Create initial embedding for cross-session linking
+            try:
+                memory_db.update_span_embedding(current_span_id, include_ideas=False)
+            except Exception:
+                pass
 
         # Classify intent
         intent = classify_intent(content)
@@ -1184,6 +1230,14 @@ def index_transcript(
             recent_ideas.append({"id": idea_id, "content": content, "intent": intent})
             if len(recent_ideas) > MAX_RECENT:
                 recent_ideas.pop(0)
+
+            # Update span embedding incrementally every 10 ideas
+            if current_span_id and ideas_created % 10 == 0:
+                try:
+                    memory_db.update_span_embedding(current_span_id)
+                    logger.debug(f"Updated span {current_span_id} embedding at {ideas_created} ideas")
+                except Exception as e:
+                    logger.debug(f"Incremental span embedding failed: {e}")
 
         except MemgraphError as e:
             # Log embedding failures but continue processing
