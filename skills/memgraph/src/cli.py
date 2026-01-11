@@ -253,6 +253,10 @@ def run_command(args):
                     return
             print(json.dumps({"success": success}))
 
+        elif args.command == "migrate-timestamps":
+            result = memory_db.migrate_timestamps_from_transcripts()
+            print(json.dumps(result))
+
         elif args.command == "progress":
             from backfill import get_progress
             result = get_progress(args.file)
@@ -615,6 +619,9 @@ def main():
     rename_p.add_argument("id", type=int, help="Topic ID")
     rename_p.add_argument("--name", help="New name (if not provided, LLM suggests one)")
     rename_p.add_argument("--auto", action="store_true", help="Automatically apply LLM suggestion")
+
+    # migrate-timestamps
+    subparsers.add_parser("migrate-timestamps", help="Populate timestamps from transcripts for existing data")
 
     # progress
     progress_p = subparsers.add_parser("progress", help="Show indexing progress")

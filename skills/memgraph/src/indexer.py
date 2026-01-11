@@ -1025,10 +1025,10 @@ def index_transcript(
     current_depth = current_span["depth"] if current_span else 0
     span_messages = []
 
-    # Stack of spans for hierarchy (each entry: {"id": int, "depth": int, "messages": list})
+    # Stack of spans for hierarchy (each entry: {"id": int, "depth": int, "messages": list, "start_time": str, "last_time": str})
     span_stack: list[dict] = []
     if current_span_id:
-        span_stack.append({"id": current_span_id, "depth": current_depth, "messages": []})
+        span_stack.append({"id": current_span_id, "depth": current_depth, "messages": [], "start_time": None, "last_time": None})
 
     ideas_created = 0
     spans_created = 0
@@ -1039,11 +1039,11 @@ def index_transcript(
     recent_ideas: list[dict] = []
     MAX_RECENT = 10  # Only check last N ideas for relations
 
-    def close_span_with_summary(span_id: int, end_line: int, messages: list):
-        """Helper to close a span with LLM summary."""
+    def close_span_with_summary(span_id: int, end_line: int, messages: list, end_time: Optional[str] = None):
+        """Helper to close a span with LLM summary and end time."""
         summary = summarize_span_with_llm(messages) if messages else ""
         try:
-            memory_db.close_span(span_id, end_line, summary)
+            memory_db.close_span(span_id, end_line, summary, end_time=end_time)
         except MemgraphError as e:
             logger.warning(f"Failed to close span {span_id}: {e}")
         except Exception as e:
@@ -1052,17 +1052,22 @@ def index_transcript(
     for msg_idx, msg in enumerate(messages):
         content = msg["content"]
         line_num = msg["line_num"]
+        msg_time = msg.get("timestamp", "")  # ISO timestamp from transcript
 
         # Progress update every 10 messages
         if msg_idx > 0 and msg_idx % 10 == 0:
             pct = int(100 * msg_idx / total_messages)
             print(f"  [{pct:3d}%] {msg_idx}/{total_messages} - {ideas_created} ideas, {spans_created} topics", file=sys.stderr)
 
+        # Update last_time for current span
+        if span_stack and msg_time:
+            span_stack[-1]["last_time"] = msg_time
+
         # Check for return to parent topic
         if detect_return_to_parent(content) and len(span_stack) > 1:
             # Pop current span and return to parent
             current = span_stack.pop()
-            close_span_with_summary(current["id"], line_num - 1, current["messages"])
+            close_span_with_summary(current["id"], line_num - 1, current["messages"], end_time=current.get("last_time"))
             current_span_id = span_stack[-1]["id"] if span_stack else None
             current_depth = span_stack[-1]["depth"] if span_stack else 0
             span_messages = span_stack[-1]["messages"] if span_stack else []
@@ -1081,20 +1086,21 @@ def index_transcript(
                 name=span_name,
                 start_line=line_num,
                 parent_id=parent_id,
-                depth=new_depth
+                depth=new_depth,
+                start_time=msg_time or None
             )
             spans_created += 1
-            span_stack.append({"id": new_span_id, "depth": new_depth, "messages": []})
+            span_stack.append({"id": new_span_id, "depth": new_depth, "messages": [], "start_time": msg_time, "last_time": msg_time})
             current_span_id = new_span_id
             current_depth = new_depth
             span_messages = span_stack[-1]["messages"]
 
         # Check for topic shift (new top-level topic)
         elif detect_topic_shift(content, {}):
-            # Close all open spans
+            # Close all open spans with their end times
             while span_stack:
                 current = span_stack.pop()
-                close_span_with_summary(current["id"], line_num - 1, current["messages"])
+                close_span_with_summary(current["id"], line_num - 1, current["messages"], end_time=current.get("last_time"))
 
             # Create new top-level span with cleaned name
             span_name = clean_topic_name(content[:100])
@@ -1104,11 +1110,12 @@ def index_transcript(
                 session=session,
                 name=span_name,
                 start_line=line_num,
-                depth=0
+                depth=0,
+                start_time=msg_time or None
             )
             spans_created += 1
             current_depth = 0
-            span_stack = [{"id": current_span_id, "depth": 0, "messages": []}]
+            span_stack = [{"id": current_span_id, "depth": 0, "messages": [], "start_time": msg_time, "last_time": msg_time}]
             span_messages = span_stack[-1]["messages"]
             # Clear recent ideas on topic shift
             recent_ideas = []
@@ -1123,11 +1130,12 @@ def index_transcript(
                 session=session,
                 name=span_name,
                 start_line=line_num,
-                depth=0
+                depth=0,
+                start_time=msg_time or None
             )
             spans_created += 1
             current_depth = 0
-            span_stack = [{"id": current_span_id, "depth": 0, "messages": []}]
+            span_stack = [{"id": current_span_id, "depth": 0, "messages": [], "start_time": msg_time, "last_time": msg_time}]
             span_messages = span_stack[-1]["messages"]
 
         # Classify intent
@@ -1139,7 +1147,7 @@ def index_transcript(
         # Assess confidence
         confidence = assess_confidence(content, intent)
 
-        # Store idea
+        # Store idea with message timestamp
         idea_id = None
         try:
             idea_id = memory_db.store_idea(
@@ -1149,7 +1157,8 @@ def index_transcript(
                 span_id=current_span_id,
                 intent=intent,
                 confidence=confidence,
-                entities=entities if entities else None
+                entities=entities if entities else None,
+                message_time=msg_time or None
             )
             ideas_created += 1
 
