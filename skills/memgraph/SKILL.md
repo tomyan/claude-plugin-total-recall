@@ -1,7 +1,12 @@
 ---
 context: fork
-name: remember
+name: memgraph
 description: Search past conversations for relevant context
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: bash ~/.claude/skills/memgraph/hooks/index-on-stop.sh
 ---
 
 # Memory Retrieval Skill
