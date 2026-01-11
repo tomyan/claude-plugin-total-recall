@@ -34,6 +34,43 @@ def error_result(error: str, code: str = "unknown", details: dict = None) -> dic
     return result
 
 
+def resolve_session(args) -> str | None:
+    """Resolve the session to search based on args.
+
+    Priority:
+    1. If --global is set, return None (search all)
+    2. If --session is explicitly set, use it
+    3. If --cwd is set, try to derive session from it
+    4. Otherwise return None (will search all for backwards compat)
+
+    Args:
+        args: Parsed arguments with session, cwd, and global_search attributes
+
+    Returns:
+        Session name to filter by, or None for global search
+    """
+    import memory_db
+
+    # Global search - no session filter
+    if getattr(args, 'global_search', False):
+        return None
+
+    # Explicit session takes priority
+    if getattr(args, 'session', None):
+        return args.session
+
+    # Try to derive from cwd
+    cwd = getattr(args, 'cwd', None)
+    if cwd:
+        session = memory_db.get_session_for_cwd(cwd)
+        if session:
+            return session
+
+    # Default: return None (global search for backwards compatibility)
+    # In future, could change this to require --global for cross-project search
+    return None
+
+
 def run_search_command(
     query: str,
     limit: int = 10,
@@ -107,26 +144,40 @@ def run_command(args):
             print(json.dumps({"success": True, "message": "Database initialized"}))
 
         elif args.command == "search":
+            # Resolve session from args (--global, --session, --cwd)
+            session = resolve_session(args)
             result = run_search_command(
                 args.query,
                 limit=args.limit,
-                session=args.session,
+                session=session,
                 intent=args.intent,
                 since=args.since,
                 until=args.until
             )
             if result["success"]:
-                print(json.dumps(result["data"], indent=2, default=str))
+                # Include session info in output for transparency
+                output = result["data"]
+                if session:
+                    print(f"# Searching project: {session}", file=sys.stderr)
+                print(json.dumps(output, indent=2, default=str))
             else:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
 
         elif args.command == "hybrid":
-            results = memory_db.hybrid_search(args.query, limit=args.limit)
+            # Resolve session from args
+            session = resolve_session(args)
+            if session:
+                print(f"# Searching project: {session}", file=sys.stderr)
+            results = memory_db.hybrid_search(args.query, limit=args.limit, session=session)
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "hyde":
-            results = memory_db.hyde_search(args.query, limit=args.limit)
+            # Resolve session from args
+            session = resolve_session(args)
+            if session:
+                print(f"# Searching project: {session}", file=sys.stderr)
+            results = memory_db.hyde_search(args.query, limit=args.limit, session=session)
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "stats":
@@ -505,20 +556,31 @@ def main():
     search_p = subparsers.add_parser("search", help="Vector search for ideas")
     search_p.add_argument("query", help="Search query")
     search_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
-    search_p.add_argument("-s", "--session", help="Filter by session")
+    search_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
     search_p.add_argument("-i", "--intent", help="Filter by intent")
     search_p.add_argument("--since", help="Only ideas after this date (ISO format, e.g. 2024-01-01)")
     search_p.add_argument("--until", help="Only ideas before this date (ISO format)")
+    search_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    search_p.add_argument("-g", "--global", dest="global_search", action="store_true",
+                          help="Search across all projects (default: current project only)")
 
     # hybrid
     hybrid_p = subparsers.add_parser("hybrid", help="Hybrid vector+keyword search")
     hybrid_p.add_argument("query", help="Search query")
     hybrid_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
+    hybrid_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
+    hybrid_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    hybrid_p.add_argument("-g", "--global", dest="global_search", action="store_true",
+                          help="Search across all projects (default: current project only)")
 
     # hyde
     hyde_p = subparsers.add_parser("hyde", help="HyDE search (hypothetical doc)")
     hyde_p.add_argument("query", help="Search query")
     hyde_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
+    hyde_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
+    hyde_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    hyde_p.add_argument("-g", "--global", dest="global_search", action="store_true",
+                          help="Search across all projects (default: current project only)")
 
     # stats
     subparsers.add_parser("stats", help="Show database statistics")

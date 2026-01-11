@@ -2231,8 +2231,17 @@ def search_spans(query: str, limit: int = 5) -> list[dict]:
     return results
 
 
-def hybrid_search(query: str, limit: int = 10) -> list[dict]:
-    """Hybrid search combining vector similarity and BM25."""
+def hybrid_search(query: str, limit: int = 10, session: str = None) -> list[dict]:
+    """Hybrid search combining vector similarity and BM25.
+
+    Args:
+        query: Search query
+        limit: Maximum results
+        session: Optional session to filter by (project scope)
+
+    Returns:
+        List of matching idea dicts
+    """
     db = get_db()
     query_embedding = get_embedding(query)
 
@@ -2271,29 +2280,40 @@ def hybrid_search(query: str, limit: int = 10) -> list[dict]:
         scores[idea_id] = score
 
     # Get top results
-    top_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:limit]
+    top_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:limit * 2]  # Get more for filtering
 
     if not top_ids:
         db.close()
         return []
 
-    # Fetch full records
+    # Fetch full records with session filter
     placeholders = ','.join('?' * len(top_ids))
-    cursor = db.execute(f"""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.id IN ({placeholders})
-    """, top_ids)
+    if session:
+        cursor = db.execute(f"""
+            SELECT
+                i.id, i.content, i.intent, i.confidence,
+                i.source_file, i.source_line, i.created_at,
+                s.session, s.name as topic
+            FROM ideas i
+            LEFT JOIN spans s ON s.id = i.span_id
+            WHERE i.id IN ({placeholders}) AND s.session = ?
+        """, top_ids + [session])
+    else:
+        cursor = db.execute(f"""
+            SELECT
+                i.id, i.content, i.intent, i.confidence,
+                i.source_file, i.source_line, i.created_at,
+                s.session, s.name as topic
+            FROM ideas i
+            LEFT JOIN spans s ON s.id = i.span_id
+            WHERE i.id IN ({placeholders})
+        """, top_ids)
 
     results = {row['id']: dict(row) for row in cursor}
     db.close()
 
-    # Return in ranked order
-    return [results[id] for id in top_ids if id in results]
+    # Return in ranked order, limited
+    return [results[id] for id in top_ids if id in results][:limit]
 
 
 # =============================================================================
@@ -2367,7 +2387,7 @@ Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably".""
         return _generate_hypothetical_doc_heuristic(query)
 
 
-def hyde_search(query: str, limit: int = 10) -> list[dict]:
+def hyde_search(query: str, limit: int = 10, session: str = None) -> list[dict]:
     """HyDE search - generates hypothetical answer then searches.
 
     For vague queries, this often retrieves better matches than raw query.
@@ -2375,6 +2395,7 @@ def hyde_search(query: str, limit: int = 10) -> list[dict]:
     Args:
         query: Search query
         limit: Maximum results
+        session: Optional session to filter by (project scope)
 
     Returns:
         List of matching idea dicts
@@ -2387,18 +2408,32 @@ def hyde_search(query: str, limit: int = 10) -> list[dict]:
 
     # Search with hypothetical embedding
     db = get_db()
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic,
-            e.distance
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-        ORDER BY e.distance
-    """, (serialize_embedding(hypo_embedding), limit))
+    if session:
+        cursor = db.execute("""
+            SELECT
+                i.id, i.content, i.intent, i.confidence,
+                i.source_file, i.source_line, i.created_at,
+                s.session, s.name as topic,
+                e.distance
+            FROM idea_embeddings e
+            JOIN ideas i ON i.id = e.idea_id
+            LEFT JOIN spans s ON s.id = i.span_id
+            WHERE e.embedding MATCH ? AND k = ? AND s.session = ?
+            ORDER BY e.distance
+        """, (serialize_embedding(hypo_embedding), limit, session))
+    else:
+        cursor = db.execute("""
+            SELECT
+                i.id, i.content, i.intent, i.confidence,
+                i.source_file, i.source_line, i.created_at,
+                s.session, s.name as topic,
+                e.distance
+            FROM idea_embeddings e
+            JOIN ideas i ON i.id = e.idea_id
+            LEFT JOIN spans s ON s.id = i.span_id
+            WHERE e.embedding MATCH ? AND k = ?
+            ORDER BY e.distance
+        """, (serialize_embedding(hypo_embedding), limit))
 
     results = [dict(row) for row in cursor]
     db.close()
@@ -3726,6 +3761,98 @@ def extract_session_from_path(file_path: str) -> str:
         return project_dir.lstrip('-')
 
     return Path(file_path).stem
+
+
+def cwd_to_session(cwd: str) -> str | None:
+    """Convert a working directory path to a session name.
+
+    The session name matches how Claude encodes project paths:
+    /Users/tom/rad/control-v1.1 -> rad-control-v1-1
+
+    Args:
+        cwd: Current working directory path
+
+    Returns:
+        Session name if it can be derived, None otherwise
+    """
+    import re
+    from pathlib import Path
+
+    # Normalize and expand the path
+    cwd = str(Path(cwd).expanduser().resolve())
+
+    # Strip home directory prefix
+    home = str(Path.home())
+    if cwd.startswith(home):
+        # Get the relative path from home
+        relative = cwd[len(home):].lstrip('/')
+    else:
+        # Not under home directory - use full path
+        relative = cwd.lstrip('/')
+
+    if not relative:
+        return None
+
+    # Convert path separators and dots to dashes (matching Claude's encoding)
+    # /Users/tom/rad/control-v1.1 -> rad-control-v1-1
+    # Note: Claude replaces / with - and . with -
+    session = relative.replace('/', '-').replace('.', '-')
+
+    # Clean up multiple dashes
+    session = re.sub(r'-+', '-', session)
+    session = session.strip('-')
+
+    return session if session else None
+
+
+def get_session_for_cwd(cwd: str) -> str | None:
+    """Get the session name for a working directory, matching against known sessions.
+
+    First tries exact match, then tries fuzzy matching for slight variations
+    in how paths might be encoded.
+
+    Args:
+        cwd: Current working directory path
+
+    Returns:
+        Matched session name if found, None otherwise
+    """
+    derived = cwd_to_session(cwd)
+    if not derived:
+        return None
+
+    # Get all known sessions
+    sessions = list_sessions()
+    session_names = [s["session"] for s in sessions]
+
+    # Try exact match first
+    if derived in session_names:
+        return derived
+
+    # Try case-insensitive match
+    derived_lower = derived.lower()
+    for name in session_names:
+        if name.lower() == derived_lower:
+            return name
+
+    # Try suffix match (in case home dir encoding differs)
+    # e.g., derived might be "projects-myapp" but session is "myapp"
+    for name in session_names:
+        if derived.endswith(name) or name.endswith(derived):
+            return name
+
+    # Try matching the last N segments
+    derived_parts = derived.split('-')
+    for name in session_names:
+        name_parts = name.split('-')
+        # Check if last 2+ parts match
+        if len(derived_parts) >= 2 and len(name_parts) >= 2:
+            if derived_parts[-2:] == name_parts[-2:]:
+                return name
+            if derived_parts[-1] == name_parts[-1] and len(name_parts) == 1:
+                return name
+
+    return None
 
 
 # =============================================================================

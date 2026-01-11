@@ -79,6 +79,20 @@ Examples:
 - `/memgraph what did we decide about the API design`
 - `/memgraph LoRa range testing results`
 
+### Project scoping
+
+By default, searches are scoped to the **current project**. This means `/memgraph` in your project directory only returns results from conversations in that project.
+
+To search across **all projects**:
+```bash
+uv run python ~/.claude/skills/memgraph/src/cli.py search "<query>" --global
+```
+
+To explicitly scope to a project:
+```bash
+uv run python ~/.claude/skills/memgraph/src/cli.py search "<query>" --cwd /path/to/project
+```
+
 ### Check database stats
 
 ```bash

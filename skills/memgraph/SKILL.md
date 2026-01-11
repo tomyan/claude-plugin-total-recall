@@ -32,38 +32,43 @@ When the user invokes `/remember <query>`:
 
 ### Step 1: Search
 
-Run the memgraph CLI (handles bootstrap automatically):
+Run the memgraph CLI (handles bootstrap automatically). Pass `--cwd` to scope search to the current project:
 ```bash
 SKILL_DIR="$HOME/.claude/skills/memgraph"
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10
+uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --cwd "$(pwd)"
 ```
 
 This returns ideas with:
 - `content`: The extracted idea
 - `intent`: Type (decision, conclusion, question, problem, solution, todo, context)
 - `topic`: The topic span this idea belongs to
-- `session`: Which conversation session
+- `session`: Which conversation session (project)
 - `source_file`: Original transcript path
 - `source_line`: Line number
 - `distance`: Semantic similarity (lower = more similar)
 
 ### Step 2: Choose Search Strategy
 
-Based on the query, choose the best search strategy:
+Based on the query, choose the best search strategy. **Always pass `--cwd "$(pwd)"`** to scope to current project:
 
 **Hybrid Search** - For queries with specific terms:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" hybrid "<query>" -n 10
+uv run python "$SKILL_DIR/src/cli.py" hybrid "<query>" -n 10 --cwd "$(pwd)"
 ```
 
 **HyDE Search** - For vague/conceptual queries:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" hyde "<query>" -n 10
+uv run python "$SKILL_DIR/src/cli.py" hyde "<query>" -n 10 --cwd "$(pwd)"
 ```
 
 **Filtered Search** - For queries with intent:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" -i decision -n 10
+uv run python "$SKILL_DIR/src/cli.py" search "<query>" -i decision -n 10 --cwd "$(pwd)"
+```
+
+**Global Search** - To search across ALL projects (not just current):
+```bash
+uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --global
 ```
 
 ### Step 3: Present Results
