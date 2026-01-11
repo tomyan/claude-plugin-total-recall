@@ -12,7 +12,10 @@ if [ -f "$LOCK_FILE" ]; then
 fi
 
 # Find the current transcript (most recently modified, not subagent)
-TRANSCRIPT=$(find "$HOME/.claude/projects" -name "*.jsonl" -type f ! -path "*/subagents/*" -mmin -10 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+# Use stat to get modification time, sort to find newest (macOS compatible)
+TRANSCRIPT=$(find "$HOME/.claude/projects" -name "*.jsonl" -type f ! -path "*/subagents/*" 2>/dev/null | while read f; do
+    echo "$(stat -f '%m' "$f" 2>/dev/null) $f"
+done | sort -rn | head -1 | cut -d' ' -f2-)
 
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     cd "$RUNTIME_DIR" 2>/dev/null || exit 0
