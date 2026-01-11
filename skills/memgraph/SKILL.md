@@ -3,10 +3,14 @@ context: fork
 name: memgraph
 description: Search past conversations for relevant context
 hooks:
+  UserPromptSubmit:
+    - hooks:
+        - type: command
+          command: bash ~/.claude/skills/memgraph/hooks/index-continuous.sh
   Stop:
     - hooks:
         - type: command
-          command: bash ~/.claude/skills/memgraph/hooks/index-on-stop.sh
+          command: bash ~/.claude/skills/memgraph/hooks/index-continuous.sh
 ---
 
 # Memory Retrieval Skill
