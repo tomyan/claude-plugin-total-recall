@@ -5,7 +5,8 @@ A skill that indexes your Claude Code conversations for semantic search, allowin
 ## Prerequisites
 
 - **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **OPENAI_API_KEY** - Environment variable set with your OpenAI API key (used for embeddings)
+- **Claude Code** - Authenticated and in PATH (used for LLM tasks like topic naming, HyDE search)
+- **OPENAI_TOKEN_MEMORY_EMBEDDINGS** - Environment variable with OpenAI API key (used only for embeddings)
 
 ## Installation
 
@@ -111,7 +112,8 @@ uv run python ~/.claude/skills/memgraph/src/cli.py topics
 2. **Semantic chunking**: Conversations are split into topic spans based on semantic shifts
 3. **Idea extraction**: Each message is analyzed and classified by intent (decision, question, problem, solution, etc.)
 4. **Vector embeddings**: Ideas are embedded using OpenAI's text-embedding-3-small for semantic search
-5. **Entity extraction**: Key entities (files, technologies, concepts) are tracked and linked
+5. **LLM tasks**: Topic naming, HyDE search, and filtering use Claude CLI (`claude -p`) for non-interactive queries
+6. **Entity extraction**: Key entities (files, technologies, concepts) are tracked and linked
 
 ## Data location
 
@@ -133,7 +135,7 @@ uv run python ~/.claude/skills/memgraph/src/cli.py topics
 
 1. Run `/memory-backfill` to index existing history
 2. Check `uv run python ~/.claude/skills/memgraph/src/cli.py stats` to see what's indexed
-3. Verify `OPENAI_API_KEY` is set
+3. Verify `OPENAI_TOKEN_MEMORY_EMBEDDINGS` is set
 
 ### Bootstrap issues
 

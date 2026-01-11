@@ -2,7 +2,7 @@
 """
 Memory database for Claude memory graph skill.
 Uses SQLite + sqlite-vec for vector similarity search.
-Uses OpenAI for embeddings.
+Uses OpenAI for embeddings, Claude CLI for LLM tasks.
 """
 
 import json
@@ -10,6 +10,7 @@ import logging
 import os
 import sqlite3
 import struct
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -61,6 +62,69 @@ class MemgraphError(Exception):
             "error_code": self.error_code,
             "details": self.details,
         }
+
+
+# =============================================================================
+# Claude CLI Integration
+# =============================================================================
+
+def claude_complete(prompt: str, system: str = None, max_tokens: int = 1024) -> str:
+    """Call Claude CLI non-interactively for LLM tasks.
+
+    Uses `claude -p` which doesn't create session transcripts.
+
+    Args:
+        prompt: The user prompt
+        system: Optional system prompt
+        max_tokens: Maximum tokens in response
+
+    Returns:
+        The response text
+
+    Raises:
+        MemgraphError: If Claude CLI fails
+    """
+    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    if system:
+        cmd.extend(["--system-prompt", system])
+    cmd.extend(["--max-tokens", str(max_tokens)])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60  # 60 second timeout
+        )
+
+        if result.returncode != 0:
+            error_msg = result.stderr or "Unknown error"
+            logger.warning(f"Claude CLI failed: {error_msg}")
+            raise MemgraphError(
+                f"Claude CLI failed: {error_msg}",
+                "claude_cli_error",
+                {"stderr": result.stderr, "returncode": result.returncode}
+            )
+
+        # Parse JSON output
+        try:
+            response = json.loads(result.stdout)
+            # The JSON output has a "result" field with the actual response
+            return response.get("result", "")
+        except json.JSONDecodeError:
+            # If not JSON, return raw stdout (fallback)
+            return result.stdout.strip()
+
+    except subprocess.TimeoutExpired:
+        raise MemgraphError(
+            "Claude CLI timed out after 60 seconds",
+            "claude_cli_timeout"
+        )
+    except FileNotFoundError:
+        raise MemgraphError(
+            "Claude CLI not found. Ensure 'claude' is in PATH.",
+            "claude_cli_not_found"
+        )
 
 
 def get_db() -> sqlite3.Connection:
@@ -950,16 +1014,7 @@ def auto_categorize_topics(dry_run: bool = True) -> dict:
     if not unassigned:
         return {"message": "No unassigned topics", "changes": []}
 
-    # Use LLM to categorize each topic
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
-    if not api_key:
-        return {"error": "OPENAI_TOKEN_MEMORY_EMBEDDINGS not set"}
-
-    try:
-        client = OpenAI(api_key=api_key)
-    except Exception as e:
-        return {"error": f"Failed to initialize OpenAI client: {e}"}
-
+    # Use Claude CLI to categorize each topic
     project_list = "\n".join(f"- {p['name']}: {p['description'] or 'No description'}"
                              for p in projects.values())
 
@@ -979,13 +1034,7 @@ Sample content: {content_sample}
 Reply with ONLY the project name that best matches, or "NONE" if no good match."""
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=50,
-                temperature=0
-            )
-            suggested = response.choices[0].message.content.strip()
+            suggested = claude_complete(prompt, max_tokens=50).strip()
 
             # Find matching project
             matched_project = None
@@ -2238,8 +2287,7 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
     for i, cluster_id in enumerate(assignments):
         clusters[cluster_id].append(ideas[i])
 
-    # Use LLM to suggest names for each cluster
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    # Use Claude CLI to suggest names for each cluster
     cluster_info = []
 
     for cluster_id, cluster_ideas in clusters.items():
@@ -2250,25 +2298,15 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
         sample_content = "\n".join(f"- {idea['content'][:150]}" for idea in cluster_ideas[:10])
 
         suggested_name = None
-        if api_key:
-            try:
-                client = OpenAI(api_key=api_key)
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{
-                        "role": "user",
-                        "content": f"""These ideas were clustered together. Suggest a concise topic name (3-6 words) that captures their common theme:
+        try:
+            prompt = f"""These ideas were clustered together. Suggest a concise topic name (3-6 words) that captures their common theme:
 
 {sample_content}
 
 Reply with ONLY the topic name, nothing else."""
-                    }],
-                    max_tokens=30,
-                    temperature=0
-                )
-                suggested_name = response.choices[0].message.content.strip()
-            except Exception as e:
-                logger.warning(f"Failed to generate cluster name: {e}")
+            suggested_name = claude_complete(prompt, max_tokens=30).strip()
+        except Exception as e:
+            logger.warning(f"Failed to generate cluster name: {e}")
 
         cluster_info.append({
             "cluster_id": cluster_id,
@@ -2559,13 +2597,8 @@ def suggest_topic_name(topic_id: int) -> Optional[str]:
     if not ideas:
         return None
 
-    # Use LLM to generate name
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
-    if not api_key or not OpenAI:
-        return None
-
+    # Use Claude CLI to generate name
     try:
-        client = OpenAI(api_key=api_key)
         prompt = f"""Based on these conversation excerpts, suggest a concise topic name (2-5 words):
 
 Current name: {topic['name']}
@@ -2576,13 +2609,7 @@ Sample content:
 
 Reply with ONLY the suggested topic name, nothing else."""
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=20,
-            temperature=0
-        )
-        name = response.choices[0].message.content.strip()
+        name = claude_complete(prompt, max_tokens=20).strip()
         # Clean the output - strip markdown and quotes
         import re
         name = re.sub(r'^\*\*(.+)\*\*$', r'\1', name)  # Remove bold
@@ -3376,28 +3403,13 @@ def generate_hypothetical_doc(query: str) -> str:
     Returns:
         A hypothetical answer document
     """
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
-    if not api_key:
-        return _generate_hypothetical_doc_heuristic(query)
-
     try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are helping with document retrieval. Given a question,
+        system_prompt = """You are helping with document retrieval. Given a question,
 write a brief hypothetical answer that might appear in documentation or conversation logs.
 Write in a direct, factual style as if you were recording a decision or explaining a solution.
 Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably"."""
-                },
-                {"role": "user", "content": query}
-            ],
-            max_tokens=150,
-            temperature=0.3,
-        )
-        hypothetical = response.choices[0].message.content.strip()
+
+        hypothetical = claude_complete(query, system=system_prompt, max_tokens=150).strip()
         logger.debug(f"HyDE generated: {hypothetical[:100]}...")
         return hypothetical
 
@@ -4556,15 +4568,6 @@ def llm_filter_ideas(
     Returns:
         Dict with filtering results
     """
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
-    if not api_key:
-        return {"error": "OPENAI_TOKEN_MEMORY_EMBEDDINGS not set"}
-
-    try:
-        client = OpenAI(api_key=api_key)
-    except Exception as e:
-        return {"error": f"Failed to initialize OpenAI client: {e}"}
-
     db = get_db()
 
     # Get ideas to review
@@ -4626,13 +4629,7 @@ Reply with ONLY a JSON array of indices that should be REMOVED, e.g. [0, 3, 5]
 If none should be removed, reply: []"""
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-                temperature=0
-            )
-            response_text = response.choices[0].message.content.strip()
+            response_text = claude_complete(prompt, max_tokens=200).strip()
 
             # Parse response - handle various formats
             import re
