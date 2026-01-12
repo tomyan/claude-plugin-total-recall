@@ -81,7 +81,8 @@ def run_search_command(
     recent: str = None,
     auto_analyze: bool = True,
     include_forgotten: bool = False,
-    show_originals: bool = False
+    show_originals: bool = False,
+    show_decomposition: bool = False
 ) -> dict:
     """Run search command with error handling.
 
@@ -90,6 +91,7 @@ def run_search_command(
                      filters from natural language (unless explicitly provided)
         include_forgotten: If True, include forgotten ideas in results
         show_originals: If True, show original ideas that were consolidated
+        show_decomposition: If True, show how query was decomposed
     """
     try:
         import memory_db
@@ -104,6 +106,10 @@ def run_search_command(
             if not intent:
                 intent = detected.get("intent_filter")
 
+        # Check if query should be decomposed
+        decomp = memory_db.decompose_query(query)
+        use_decomposed = decomp["type"] != "simple" or show_decomposition
+
         if since or until or recent:
             # Use temporal search when date filters provided
             results = memory_db.search_ideas_temporal(
@@ -114,6 +120,15 @@ def run_search_command(
             # Apply intent filter if specified
             if intent:
                 results = [r for r in results if r.get('intent') == intent]
+        elif use_decomposed:
+            # Use decomposed search for complex queries
+            decomp_result = memory_db.decomposed_search(
+                query, limit=limit, session=session,
+                show_decomposition=show_decomposition
+            )
+            results = decomp_result["results"]
+            if decomp_result.get("decomposition"):
+                detected["decomposition"] = decomp_result["decomposition"]
         else:
             results = memory_db.search_ideas(
                 query, limit=limit, session=session, intent=intent,
@@ -199,7 +214,8 @@ def run_command(args):
                 until=args.until,
                 recent=recent,
                 include_forgotten=getattr(args, 'include_forgotten', False),
-                show_originals=getattr(args, 'show_originals', False)
+                show_originals=getattr(args, 'show_originals', False),
+                show_decomposition=getattr(args, 'decompose', False)
             )
             if result["success"]:
                 data = result["data"]
@@ -1029,6 +1045,8 @@ def main():
                           help="Include forgotten ideas in results")
     search_p.add_argument("--show-originals", action="store_true",
                           help="Show original ideas that were consolidated")
+    search_p.add_argument("--decompose", action="store_true",
+                          help="Show how query was decomposed (for complex queries)")
 
     # hybrid
     hybrid_p = subparsers.add_parser("hybrid", help="Hybrid vector+keyword search")

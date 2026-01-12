@@ -115,12 +115,12 @@ Each extraction is a separate commit:
 
 ### 3.2 Query Decomposition (thin slices)
 
-- [ ] **3.2a** Detect "X and Y" pattern, run two searches, merge results
-- [ ] **3.2b** Detect "decisions about X" pattern, apply intent filter
-- [ ] **3.2c** Detect "how X relates to Y" pattern, find connecting ideas
-- [ ] **3.2d** Add `--decompose` flag to show query interpretation
+- [x] **3.2a** Detect "X and Y" pattern, run two searches, merge results
+- [x] **3.2b** Detect "decisions about X" pattern, apply intent filter
+- [x] **3.2c** Detect "how X relates to Y" pattern, find connecting ideas
+- [x] **3.2d** Add `--decompose` flag to show query interpretation
 
-**Done when:** Complex queries automatically decomposed.
+**Done when:** Complex queries automatically decomposed. ✓
 
 ### 3.3 Relevance Verification (thin slices)
 

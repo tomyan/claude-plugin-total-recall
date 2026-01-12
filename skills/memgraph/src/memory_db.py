@@ -3017,6 +3017,178 @@ def analyze_query(query: str) -> dict:
     return result
 
 
+def decompose_query(query: str) -> dict:
+    """Decompose a complex query into sub-queries.
+
+    Detects patterns like:
+    - "X and Y" -> two separate searches merged
+    - "decisions about X" -> intent filter + search term
+    - "how X relates to Y" -> find connecting ideas
+
+    Args:
+        query: The search query
+
+    Returns:
+        Dict with decomposition info:
+        - type: "simple", "conjunction", "intent_scoped", "relation"
+        - sub_queries: List of simpler queries
+        - intent: Optional intent filter
+        - entities: Related entities
+    """
+    import re
+    query_lower = query.lower().strip()
+
+    result = {
+        "type": "simple",
+        "original": query,
+        "sub_queries": [query],
+        "intent": None,
+        "entities": [],
+    }
+
+    # Detect "decisions/questions/todos about X" pattern
+    intent_about_match = re.match(
+        r"(decisions?|questions?|todos?|conclusions?|problems?|solutions?)\s+(about|regarding|on|for)\s+(.+)",
+        query_lower
+    )
+    if intent_about_match:
+        intent_word = intent_about_match.group(1).rstrip("s")  # Singularize
+        topic = intent_about_match.group(3)
+        result["type"] = "intent_scoped"
+        result["intent"] = intent_word
+        result["sub_queries"] = [topic]
+        result["entities"] = [topic]
+        return result
+
+    # Detect "how X relates to Y" or "relationship between X and Y" pattern
+    relation_match = re.match(
+        r"(?:how\s+)?(.+?)\s+(?:relates?\s+to|(?:and|,)\s*its?\s+(?:relationship|connection)\s+(?:to|with))\s+(.+)",
+        query_lower
+    )
+    if not relation_match:
+        relation_match = re.match(
+            r"(?:relationship|connection)\s+between\s+(.+?)\s+and\s+(.+)",
+            query_lower
+        )
+    if relation_match:
+        entity1 = relation_match.group(1).strip()
+        entity2 = relation_match.group(2).strip()
+        result["type"] = "relation"
+        result["sub_queries"] = [entity1, entity2]
+        result["entities"] = [entity1, entity2]
+        return result
+
+    # Detect "X and Y" pattern (but not common phrases)
+    # Skip if it's "X and Y" where Y is less than 3 words (likely a phrase)
+    and_match = re.match(r"(.+?)\s+and\s+(.+)", query_lower)
+    if and_match:
+        left = and_match.group(1).strip()
+        right = and_match.group(2).strip()
+        # Only split if both parts are substantial (3+ words or entities)
+        left_words = len(left.split())
+        right_words = len(right.split())
+        if left_words >= 2 and right_words >= 2:
+            result["type"] = "conjunction"
+            result["sub_queries"] = [left, right]
+            result["entities"] = [left, right]
+            return result
+
+    return result
+
+
+def decomposed_search(
+    query: str,
+    limit: int = 10,
+    session: Optional[str] = None,
+    show_decomposition: bool = False
+) -> dict:
+    """Search with automatic query decomposition.
+
+    Handles complex queries by decomposing them and merging results.
+
+    Args:
+        query: Search query
+        limit: Max results per sub-query
+        session: Optional session filter
+        show_decomposition: If True, include decomposition details
+
+    Returns:
+        Dict with results and optional decomposition info
+    """
+    decomp = decompose_query(query)
+
+    result = {
+        "results": [],
+        "decomposition": decomp if show_decomposition else None,
+    }
+
+    if decomp["type"] == "simple":
+        # Standard search
+        results = search_ideas(query, limit=limit, session=session)
+        result["results"] = results
+
+    elif decomp["type"] == "intent_scoped":
+        # Search with intent filter
+        topic = decomp["sub_queries"][0]
+        intent = decomp["intent"]
+        results = search_ideas(topic, limit=limit, session=session, intent=intent)
+        result["results"] = results
+
+    elif decomp["type"] == "conjunction":
+        # Run searches for each part and merge with RRF
+        all_results = {}
+        for i, sub_query in enumerate(decomp["sub_queries"]):
+            sub_results = search_ideas(sub_query, limit=limit, session=session)
+            for j, r in enumerate(sub_results):
+                idea_id = r["id"]
+                if idea_id not in all_results:
+                    all_results[idea_id] = {"idea": r, "ranks": []}
+                all_results[idea_id]["ranks"].append((i, j + 1))
+
+        # RRF scoring
+        k = 60
+        scored = []
+        for idea_id, data in all_results.items():
+            score = sum(1 / (k + rank) for _, rank in data["ranks"])
+            # Bonus for appearing in multiple sub-queries
+            if len(data["ranks"]) > 1:
+                score *= 1.5
+            scored.append((score, data["idea"]))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        result["results"] = [item[1] for item in scored[:limit]]
+
+    elif decomp["type"] == "relation":
+        # Find ideas that connect the two entities
+        entity1, entity2 = decomp["sub_queries"]
+
+        # Search for both entities
+        results1 = search_ideas(entity1, limit=limit * 2, session=session)
+        results2 = search_ideas(entity2, limit=limit * 2, session=session)
+
+        # Find overlapping results (appear in both)
+        ids1 = {r["id"] for r in results1}
+        ids2 = {r["id"] for r in results2}
+        shared_ids = ids1 & ids2
+
+        # Prioritize shared results
+        shared = [r for r in results1 if r["id"] in shared_ids]
+        unique = [r for r in results1 + results2 if r["id"] not in shared_ids]
+
+        # Deduplicate unique
+        seen = set(r["id"] for r in shared)
+        for r in unique:
+            if r["id"] not in seen:
+                shared.append(r)
+                seen.add(r["id"])
+            if len(shared) >= limit:
+                break
+
+        result["results"] = shared[:limit]
+
+    return result
+
+
 # =============================================================================
 # Index State
 # =============================================================================
