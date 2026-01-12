@@ -262,52 +262,145 @@ class TestEmbeddingRelations:
 class TestSemanticTopicShift:
     """Test semantic topic shift detection."""
 
-    @pytest.mark.skip(reason="Test uses old API (last_embedding) - needs rewrite for span-based detection")
-    def test_detect_semantic_shift(self, monkeypatch):
-        """Detect topic shift using embedding distance."""
-        # Mock embeddings to show topic shift - use very different vectors
+    @pytest.fixture
+    def setup_span_db(self, tmp_path, monkeypatch):
+        """Set up a database with initialized schema."""
+        import memory_db
+
+        db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("memory_db.DB_PATH", db_path)
+
+        # Initialize database schema
+        memory_db.init_db()
+
+        return db_path
+
+    def test_detect_semantic_shift(self, setup_span_db, monkeypatch):
+        """Detect topic shift using embedding distance against span embedding."""
+        import memory_db
+        from indexer import detect_topic_shift_semantic
+
+        # Mock embeddings - database topics vs auth topics are orthogonal (similarity = 0)
         def mock_embedding(text, use_cache=True):
             if "database" in text.lower():
-                # Database topics point in one direction
                 return [1.0] * 768 + [0.0] * 768
-            elif "authentication" in text.lower():
-                # Auth topics point in opposite direction
+            elif "authentication" in text.lower() or "auth" in text.lower():
                 return [0.0] * 768 + [1.0] * 768
             else:
                 return [0.5] * 1536
 
-        monkeypatch.setattr("indexer.get_embedding", mock_embedding)
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
 
-        from indexer import detect_topic_shift_semantic
+        # Create a span with a "database" topic embedding
+        span_id = memory_db.create_span("test-session", "Database setup", start_line=1)
 
-        # Previous topic was database
+        # Store span embedding (database-related)
+        db = memory_db.get_db()
+        span_embedding = mock_embedding("database")
+        db.execute(
+            "INSERT INTO span_embeddings (span_id, embedding) VALUES (?, ?)",
+            (span_id, memory_db.serialize_embedding(span_embedding))
+        )
+        db.commit()
+        db.close()
+
         context = {
-            "last_embedding": mock_embedding("database"),
+            "span_id": span_id,
             "threshold": 0.5,
+            "divergence_history": [],
         }
 
-        # New topic is authentication - should detect shift (similarity ~0)
+        # Authentication topic is orthogonal to database (similarity = 0)
+        # This triggers a "strong shift" immediately because 0 < (0.5 - 0.15) = 0.35
         is_shift = detect_topic_shift_semantic(
             "Let's set up user authentication",
             context
         )
         assert is_shift is True
 
-    def test_no_shift_on_similar_topic(self, monkeypatch):
+    def test_gradual_shift_requires_multiple_messages(self, setup_span_db, monkeypatch):
+        """Gradual topic drift requires multiple divergent messages."""
+        import memory_db
+        import math
+        from indexer import detect_topic_shift_semantic
+
+        # Mock embeddings with controlled similarity
+        # For similarity ~0.4 (below 0.5 threshold but above 0.35 strong threshold):
+        # Use [0.4, sqrt(1-0.16)] = [0.4, 0.9165] normalized, repeated
+        def mock_embedding(text, use_cache=True):
+            if "database" in text.lower():
+                # Unit vector pointing in x direction
+                vec = [1.0, 0.0]
+            elif "slightly" in text.lower():
+                # Vector with cosine similarity ~0.4 to database vector
+                vec = [0.4, math.sqrt(1 - 0.16)]  # [0.4, 0.9165]
+            else:
+                vec = [0.5, 0.5]
+            # Repeat to make 1536-dim vector
+            return vec * 768
+
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
+
+        span_id = memory_db.create_span("test-session", "Database setup", start_line=1)
+
+        db = memory_db.get_db()
+        span_embedding = mock_embedding("database")
+        db.execute(
+            "INSERT INTO span_embeddings (span_id, embedding) VALUES (?, ?)",
+            (span_id, memory_db.serialize_embedding(span_embedding))
+        )
+        db.commit()
+        db.close()
+
+        context = {
+            "span_id": span_id,
+            "threshold": 0.5,
+            "divergence_history": [],
+        }
+
+        # First moderately divergent message (similarity ~0.4) - not yet a shift
+        is_shift = detect_topic_shift_semantic(
+            "slightly different topic here",
+            context
+        )
+        assert is_shift is False
+
+        # Second divergent message - now triggers gradual shift (2+ consecutive)
+        is_shift = detect_topic_shift_semantic(
+            "slightly off topic again",
+            context
+        )
+        assert is_shift is True
+
+    def test_no_shift_on_similar_topic(self, setup_span_db, monkeypatch):
         """No topic shift detected when topics are similar."""
+        import memory_db
+        from indexer import detect_topic_shift_semantic
+
         def mock_embedding(text, use_cache=True):
             # All database-related topics use similar vectors
-            if "database" in text.lower() or "postgres" in text.lower():
+            if "database" in text.lower() or "postgres" in text.lower() or "sql" in text.lower():
                 return [1.0] * 768 + [0.0] * 768
             return [0.5] * 1536
 
-        monkeypatch.setattr("indexer.get_embedding", mock_embedding)
+        monkeypatch.setattr("memory_db.get_embedding", mock_embedding)
 
-        from indexer import detect_topic_shift_semantic
+        # Create a span with a "database" topic embedding
+        span_id = memory_db.create_span("test-session", "Database setup", start_line=1)
+
+        db = memory_db.get_db()
+        span_embedding = mock_embedding("database")
+        db.execute(
+            "INSERT INTO span_embeddings (span_id, embedding) VALUES (?, ?)",
+            (span_id, memory_db.serialize_embedding(span_embedding))
+        )
+        db.commit()
+        db.close()
 
         context = {
-            "last_embedding": mock_embedding("database setup"),
+            "span_id": span_id,
             "threshold": 0.5,
+            "divergence_history": [],
         }
 
         # Still talking about database - no shift (similarity = 1.0)
@@ -317,11 +410,11 @@ class TestSemanticTopicShift:
         )
         assert is_shift is False
 
-    def test_shift_detection_without_context(self, monkeypatch):
-        """No shift detected without previous context."""
+    def test_shift_detection_without_span_id(self, monkeypatch):
+        """No shift detected without span_id in context."""
         from indexer import detect_topic_shift_semantic
 
-        # No previous embedding
+        # No span_id in context
         context = {}
 
         is_shift = detect_topic_shift_semantic("Some new topic", context)
@@ -630,7 +723,6 @@ class TestSubtopicHierarchy:
         depths = [s["depth"] for s in spans]
         assert any(d > 0 for d in depths), f"Expected at least one nested span, got depths: {depths}"
 
-    @pytest.mark.skip(reason="Database locking issue in test - needs isolation fix")
     def test_return_to_parent_pops_stack(self, tmp_path, monkeypatch):
         """Return to parent closes sub-topic span."""
         import memory_db

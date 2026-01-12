@@ -2746,44 +2746,49 @@ def close_span(span_id: int, end_line: int, summary: str, end_time: Optional[str
         end_time: ISO timestamp when span ended (from last message)
     """
     db = get_db()
+    topic_id = None
+    session = None
 
-    # Update span with end_line, summary, and end_time
-    db.execute("""
-        UPDATE spans SET end_line = ?, summary = ?, end_time = ? WHERE id = ?
-    """, (end_line, summary, end_time, span_id))
-
-    # Get span for embedding and topic update
-    cursor = db.execute("SELECT name, summary, topic_id, session FROM spans WHERE id = ?", (span_id,))
-    row = cursor.fetchone()
-    topic_id = row['topic_id']
-    session = row['session']
-
-    # Update topic last_seen if this is later
-    if end_time and topic_id:
+    try:
+        # Update span with end_line, summary, and end_time
         db.execute("""
-            UPDATE topics
-            SET last_seen = ?
-            WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)
-        """, (end_time, topic_id, end_time))
+            UPDATE spans SET end_line = ?, summary = ?, end_time = ? WHERE id = ?
+        """, (end_line, summary, end_time, span_id))
 
-    # Embed and store
-    embed_text = f"{row['name']}: {row['summary']}"
-    embedding = get_embedding(embed_text)
-    db.execute("""
-        INSERT OR REPLACE INTO span_embeddings (span_id, embedding)
-        VALUES (?, ?)
-    """, (span_id, serialize_embedding(embedding)))
+        # Get span for embedding and topic update
+        cursor = db.execute("SELECT name, summary, topic_id, session FROM spans WHERE id = ?", (span_id,))
+        row = cursor.fetchone()
+        topic_id = row['topic_id']
+        session = row['session']
 
-    # Update FTS
-    db.execute("""
-        INSERT INTO spans_fts (rowid, name, summary)
-        VALUES (?, ?, ?)
-    """, (span_id, row['name'], row['summary']))
+        # Update topic last_seen if this is later
+        if end_time and topic_id:
+            db.execute("""
+                UPDATE topics
+                SET last_seen = ?
+                WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)
+            """, (end_time, topic_id, end_time))
 
-    db.commit()
-    db.close()
+        # Embed and store - delete first for sqlite-vec compatibility
+        embed_text = f"{row['name']}: {row['summary']}"
+        embedding = get_embedding(embed_text)
+        db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
+        db.execute("""
+            INSERT INTO span_embeddings (span_id, embedding)
+            VALUES (?, ?)
+        """, (span_id, serialize_embedding(embedding)))
 
-    # Auto-link topic to similar topics in other sessions
+        # Update FTS - use INSERT OR REPLACE for safety
+        db.execute("""
+            INSERT OR REPLACE INTO spans_fts (rowid, name, summary)
+            VALUES (?, ?, ?)
+        """, (span_id, row['name'], row['summary']))
+
+        db.commit()
+    finally:
+        db.close()
+
+    # Auto-link topic to similar topics in other sessions (after db is closed)
     if topic_id:
         try:
             links = auto_link_topic(topic_id, session, min_similarity=0.8)
@@ -2807,57 +2812,61 @@ def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
         True if embedding was updated
     """
     db = get_db()
+    span = None
 
-    # Get span info
-    cursor = db.execute(
-        "SELECT name, summary, topic_id, session FROM spans WHERE id = ?",
-        (span_id,)
-    )
-    span = cursor.fetchone()
-    if not span:
+    try:
+        # Get span info
+        cursor = db.execute(
+            "SELECT name, summary, topic_id, session FROM spans WHERE id = ?",
+            (span_id,)
+        )
+        span = cursor.fetchone()
+        if not span:
+            return False
+
+        # Build embedding text from span name + summary + sample ideas
+        parts = [span['name']]
+        if span['summary']:
+            parts.append(span['summary'])
+
+        if include_ideas:
+            # Get a sample of ideas (first few + most recent)
+            cursor = db.execute("""
+                SELECT content FROM ideas
+                WHERE span_id = ?
+                ORDER BY id ASC
+                LIMIT 3
+            """, (span_id,))
+            first_ideas = [r['content'][:200] for r in cursor]
+
+            cursor = db.execute("""
+                SELECT content FROM ideas
+                WHERE span_id = ?
+                ORDER BY id DESC
+                LIMIT 3
+            """, (span_id,))
+            recent_ideas = [r['content'][:200] for r in cursor]
+
+            # Combine unique ideas
+            all_ideas = first_ideas + [i for i in recent_ideas if i not in first_ideas]
+            if all_ideas:
+                parts.append("Key points: " + "; ".join(all_ideas[:5]))
+
+        embed_text = " | ".join(parts)[:2000]  # Limit length
+        embedding = get_embedding(embed_text)
+
+        # Delete first for sqlite-vec compatibility
+        db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
+        db.execute("""
+            INSERT INTO span_embeddings (span_id, embedding)
+            VALUES (?, ?)
+        """, (span_id, serialize_embedding(embedding)))
+        db.commit()
+    finally:
         db.close()
-        return False
 
-    # Build embedding text from span name + summary + sample ideas
-    parts = [span['name']]
-    if span['summary']:
-        parts.append(span['summary'])
-
-    if include_ideas:
-        # Get a sample of ideas (first few + most recent)
-        cursor = db.execute("""
-            SELECT content FROM ideas
-            WHERE span_id = ?
-            ORDER BY id ASC
-            LIMIT 3
-        """, (span_id,))
-        first_ideas = [r['content'][:200] for r in cursor]
-
-        cursor = db.execute("""
-            SELECT content FROM ideas
-            WHERE span_id = ?
-            ORDER BY id DESC
-            LIMIT 3
-        """, (span_id,))
-        recent_ideas = [r['content'][:200] for r in cursor]
-
-        # Combine unique ideas
-        all_ideas = first_ideas + [i for i in recent_ideas if i not in first_ideas]
-        if all_ideas:
-            parts.append("Key points: " + "; ".join(all_ideas[:5]))
-
-    embed_text = " | ".join(parts)[:2000]  # Limit length
-    embedding = get_embedding(embed_text)
-
-    db.execute("""
-        INSERT OR REPLACE INTO span_embeddings (span_id, embedding)
-        VALUES (?, ?)
-    """, (span_id, serialize_embedding(embedding)))
-    db.commit()
-    db.close()
-
-    # Try to auto-link if we have a topic
-    if span['topic_id']:
+    # Try to auto-link if we have a topic (after db is closed)
+    if span and span['topic_id']:
         try:
             links = auto_link_topic(span['topic_id'], span['session'], min_similarity=0.8)
             if links:
