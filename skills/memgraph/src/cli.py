@@ -1035,6 +1035,57 @@ def run_command(args):
             elif result['dry_run']:
                 print(f"\nDry run - use --execute to consolidate")
 
+        elif args.command == "reflect":
+            result = memory_db.generate_session_reflection(
+                session=resolve_session(args),
+                days=args.days
+            )
+            if result.get("error"):
+                print(f"Error: {result['error']}", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"\nSession Reflection ({result['days']} days, {result['ideas_count']} ideas)")
+            print("=" * 60)
+            if result.get("by_intent"):
+                print("Activity by intent:", ", ".join(f"{k}:{v}" for k, v in result["by_intent"].items()))
+            print()
+            print(result["reflection"])
+
+            if args.store:
+                idea_id = memory_db.store_reflection(result["reflection"], session=resolve_session(args))
+                print(f"\nStored as reflection idea #{idea_id}")
+                result["stored"] = True
+                result["idea_id"] = idea_id
+
+        elif args.command == "reflect-topic":
+            result = memory_db.reflect_on_topic(args.topic_id)
+            if result.get("error"):
+                print(f"Error: {result['error']}", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"\nTopic Reflection: {result['topic_name']}")
+            print("=" * 60)
+            print(f"Period: {result.get('first_seen', '?')[:10]} to {result.get('last_seen', '?')[:10]}")
+            print(f"Ideas: {result['ideas_count']}")
+            print()
+            print(result["reflection"])
+
+        elif args.command == "insights":
+            results = memory_db.get_reflections(
+                session=resolve_session(args),
+                limit=args.limit
+            )
+            if not results:
+                print("No reflections found")
+            else:
+                print(f"\nReflections ({len(results)}):\n")
+                for r in results:
+                    time_str = (r.get("created_at") or "")[:10]
+                    session_str = r.get("session") or "global"
+                    print(f"[{r['id']:5}] [{time_str}] {session_str}")
+                    print(f"  {r['content'][:200]}...")
+                    print()
+
         elif args.command == "topic-activity":
             result = memory_db.get_topic_activity(
                 topic_id=args.topic_id,
@@ -1407,6 +1458,23 @@ def main():
     consolidate_p.add_argument("--min-ideas", type=int, default=5, help="Min ideas for consolidation")
     consolidate_p.add_argument("--max-age", type=int, default=30, help="Max age in days for ideas")
     consolidate_p.add_argument("--execute", action="store_true", help="Actually consolidate (default is dry-run)")
+
+    # Reflection commands
+    reflect_p = subparsers.add_parser("reflect", help="Generate reflection on recent activity")
+    reflect_p.add_argument("-s", "--session", help="Session to reflect on")
+    reflect_p.add_argument("-d", "--days", type=int, default=7, help="Days to look back")
+    reflect_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    reflect_p.add_argument("-g", "--global", dest="global_search", action="store_true", help="Reflect on all sessions")
+    reflect_p.add_argument("--store", action="store_true", help="Store reflection as a special idea")
+
+    reflect_topic_p = subparsers.add_parser("reflect-topic", help="Generate reflection on a topic's evolution")
+    reflect_topic_p.add_argument("topic_id", type=int, help="Topic ID to reflect on")
+
+    insights_p = subparsers.add_parser("insights", help="Show stored reflections")
+    insights_p.add_argument("-s", "--session", help="Filter by session")
+    insights_p.add_argument("-n", "--limit", type=int, default=20, help="Max reflections")
+    insights_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    insights_p.add_argument("-g", "--global", dest="global_search", action="store_true", help="Show all reflections")
 
     args = parser.parse_args()
 

@@ -161,22 +161,22 @@ Each extraction is a separate commit:
 
 ### 5.1 Session Reflection (thin slices)
 
-- [ ] **5.1a** Add `reflect` command generating session summary (LLM)
-- [ ] **5.1b** Store reflection as special idea (intent='reflection')
-- [ ] **5.1c** Add `--days N` flag to reflect on recent activity
-- [ ] **5.1d** Add `insights` command showing stored reflections
-- [ ] **5.1e** Include reflections in search results
+- [x] **5.1a** Add `reflect` command generating session summary (LLM)
+- [x] **5.1b** Store reflection as special idea (intent='reflection')
+- [x] **5.1c** Add `--days N` flag to reflect on recent activity
+- [x] **5.1d** Add `insights` command showing stored reflections
+- [x] **5.1e** Include reflections in search results (searchable as ideas)
 
-**Done when:** Can generate and retrieve session insights.
+**Done when:** Can generate and retrieve session insights. ✓
 
 ### 5.2 Topic Reflection (thin slices)
 
-- [ ] **5.2a** Add `reflect-topic <topic_id>` command
-- [ ] **5.2b** Generate "how understanding evolved" summary
-- [ ] **5.2c** Identify key turning points in topic
-- [ ] **5.2d** Store as topic-linked reflection
+- [x] **5.2a** Add `reflect-topic <topic_id>` command
+- [x] **5.2b** Generate "how understanding evolved" summary
+- [x] **5.2c** Identify key turning points in topic
+- [ ] **5.2d** Store as topic-linked reflection (optional)
 
-**Done when:** Can reflect on individual topic evolution.
+**Done when:** Can reflect on individual topic evolution. ✓
 
 ---
 
@@ -205,12 +205,11 @@ Each extraction is a separate commit:
 - [x] 3.2a-d - Query decomposition complete
 - [x] 3.3a-d - Relevance verification complete
 - [x] 3.4a-e - Multi-hop reasoning complete
+- [x] 4.1a-d - Embedding provider abstraction complete
+- [x] 5.1a-e - Session reflection complete
+- [x] 5.2a-c - Topic reflection complete
 
-### In Progress
-- Phase 4 - Embedding Abstraction
-
-### Up Next
-- Phase 5 - Reflection
+### Complete!
 
 ---
 

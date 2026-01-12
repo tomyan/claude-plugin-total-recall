@@ -5257,6 +5257,282 @@ def get_session_for_cwd(cwd: str) -> str | None:
 
 
 # =============================================================================
+# Reflection Operations
+# =============================================================================
+
+def generate_session_reflection(
+    session: Optional[str] = None,
+    days: int = 7
+) -> dict:
+    """Generate a reflection on recent session activity.
+
+    Uses LLM to summarize key insights, decisions, and patterns.
+
+    Args:
+        session: Session to reflect on (or recent activity if None)
+        days: How many days to look back
+
+    Returns:
+        Dict with reflection text and metadata
+    """
+    from datetime import datetime, timedelta
+
+    # Get recent ideas
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+
+    db = get_db()
+
+    sql = """
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.message_time, i.created_at,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE COALESCE(i.message_time, i.created_at) >= ?
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+    """
+    params = [since]
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+
+    sql += " ORDER BY COALESCE(i.message_time, i.created_at)"
+    cursor = db.execute(sql, params)
+    ideas = [dict(row) for row in cursor]
+    db.close()
+
+    if not ideas:
+        return {
+            "session": session,
+            "days": days,
+            "ideas_count": 0,
+            "reflection": "No activity found in the specified period.",
+            "stored": False,
+        }
+
+    # Group by intent for the prompt
+    by_intent = {}
+    for idea in ideas:
+        intent = idea.get("intent") or "context"
+        if intent not in by_intent:
+            by_intent[intent] = []
+        by_intent[intent].append(idea["content"][:150])
+
+    # Build prompt
+    summary_parts = []
+    for intent, contents in by_intent.items():
+        summary_parts.append(f"\n{intent.upper()} ({len(contents)} items):")
+        for c in contents[:5]:
+            summary_parts.append(f"  - {c}")
+        if len(contents) > 5:
+            summary_parts.append(f"  ... and {len(contents) - 5} more")
+
+    prompt = f"""Reflect on the following session activity from the past {days} days.
+Identify key themes, important decisions, outstanding questions, and patterns.
+Be concise (2-4 paragraphs).
+
+Activity summary:
+{''.join(summary_parts)}
+
+Reflection:"""
+
+    try:
+        reflection_text = claude_complete(prompt)
+    except Exception as e:
+        return {
+            "session": session,
+            "days": days,
+            "ideas_count": len(ideas),
+            "error": f"LLM reflection failed: {e}",
+            "stored": False,
+        }
+
+    return {
+        "session": session,
+        "days": days,
+        "ideas_count": len(ideas),
+        "by_intent": {k: len(v) for k, v in by_intent.items()},
+        "reflection": reflection_text,
+        "stored": False,
+    }
+
+
+def store_reflection(
+    reflection_text: str,
+    session: Optional[str] = None,
+    topic_id: Optional[int] = None
+) -> int:
+    """Store a reflection as a special idea.
+
+    Args:
+        reflection_text: The reflection content
+        session: Session the reflection is about
+        topic_id: Optional topic the reflection is about
+
+    Returns:
+        ID of the stored reflection idea
+    """
+    db = get_db()
+
+    # Find or create a span for reflections
+    span_id = None
+    if session:
+        cursor = db.execute("""
+            SELECT id FROM spans WHERE session = ?
+            ORDER BY created_at DESC LIMIT 1
+        """, (session,))
+        row = cursor.fetchone()
+        if row:
+            span_id = row["id"]
+
+    # Store as special reflection idea
+    cursor = db.execute("""
+        INSERT INTO ideas (span_id, content, intent, confidence)
+        VALUES (?, ?, 'reflection', 0.9)
+    """, (span_id, reflection_text))
+    idea_id = cursor.lastrowid
+
+    # Generate and store embedding
+    embedding = get_embedding(reflection_text)
+    db.execute(
+        "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
+        (idea_id, serialize_embedding(embedding))
+    )
+
+    db.commit()
+    db.close()
+
+    return idea_id
+
+
+def get_reflections(
+    session: Optional[str] = None,
+    limit: int = 20
+) -> list[dict]:
+    """Get stored reflections.
+
+    Args:
+        session: Optional session filter
+        limit: Maximum reflections to return
+
+    Returns:
+        List of reflection idea dicts
+    """
+    db = get_db()
+
+    sql = """
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.created_at, i.message_time,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.intent = 'reflection'
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+    """
+    params = []
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+
+    sql += " ORDER BY COALESCE(i.message_time, i.created_at) DESC LIMIT ?"
+    params.append(limit)
+
+    cursor = db.execute(sql, params)
+    results = [dict(row) for row in cursor]
+    db.close()
+
+    return results
+
+
+def reflect_on_topic(topic_id: int) -> dict:
+    """Generate a reflection on a specific topic's evolution.
+
+    Args:
+        topic_id: Topic to reflect on
+
+    Returns:
+        Dict with reflection on the topic
+    """
+    db = get_db()
+
+    # Get topic info
+    cursor = db.execute("""
+        SELECT id, name, summary, first_seen, last_seen
+        FROM topics WHERE id = ?
+    """, (topic_id,))
+    topic_row = cursor.fetchone()
+
+    if not topic_row:
+        db.close()
+        return {"error": f"Topic {topic_id} not found"}
+
+    topic = dict(topic_row)
+
+    # Get ideas for this topic
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.message_time, i.created_at
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        WHERE s.topic_id = ?
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+        ORDER BY COALESCE(i.message_time, i.created_at)
+    """, (topic_id,))
+    ideas = [dict(row) for row in cursor]
+    db.close()
+
+    if not ideas:
+        return {
+            "topic_id": topic_id,
+            "topic_name": topic["name"],
+            "ideas_count": 0,
+            "reflection": "No ideas found for this topic.",
+        }
+
+    # Build a timeline for the prompt
+    timeline = []
+    for idea in ideas[:30]:  # First 30 for summary
+        time_str = (idea.get("message_time") or idea.get("created_at") or "")[:10]
+        timeline.append(f"[{time_str}] [{idea['intent']:10}] {idea['content'][:100]}")
+
+    prompt = f"""Reflect on how understanding of the topic "{topic['name']}" evolved over time.
+Identify:
+1. Key turning points or breakthroughs
+2. How thinking changed
+3. Remaining questions or gaps
+4. Overall arc of the topic
+
+Topic timeline ({len(ideas)} ideas total):
+{chr(10).join(timeline)}
+
+Reflection (2-4 paragraphs):"""
+
+    try:
+        reflection_text = claude_complete(prompt)
+    except Exception as e:
+        return {
+            "topic_id": topic_id,
+            "topic_name": topic["name"],
+            "ideas_count": len(ideas),
+            "error": f"LLM reflection failed: {e}",
+        }
+
+    return {
+        "topic_id": topic_id,
+        "topic_name": topic["name"],
+        "first_seen": topic.get("first_seen"),
+        "last_seen": topic.get("last_seen"),
+        "ideas_count": len(ideas),
+        "reflection": reflection_text,
+    }
+
+
+# =============================================================================
 # CLI Interface
 # =============================================================================
 
