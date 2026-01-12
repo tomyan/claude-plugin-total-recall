@@ -55,7 +55,7 @@ from embeddings.cache import (  # noqa: E402
 _embedding_cache = get_cache()
 
 # Import embedding functions from embeddings module
-from embeddings.openai import get_embedding, get_embeddings_batch  # noqa: E402
+from embeddings.openai import get_embedding, get_embeddings_batch, _reset_provider  # noqa: E402
 
 # Import search functions from search module
 from search.vector import (  # noqa: E402

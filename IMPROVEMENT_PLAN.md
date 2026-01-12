@@ -147,13 +147,13 @@ Each extraction is a separate commit:
 
 ### 4.1 Provider Interface (thin slices)
 
-- [ ] **4.1a** Create `EmbeddingProvider` abstract base class
-- [ ] **4.1b** Refactor OpenAI code to `OpenAIEmbeddings(EmbeddingProvider)`
-- [ ] **4.1c** Add provider selection to config (default: openai)
-- [ ] **4.1d** Add `LocalEmbeddings` stub (raises NotImplementedError)
+- [x] **4.1a** Create `EmbeddingProvider` abstract base class
+- [x] **4.1b** Refactor OpenAI code to `OpenAIEmbeddings(EmbeddingProvider)`
+- [x] **4.1c** Add provider selection to config (default: openai)
+- [x] **4.1d** Add `LocalEmbeddings` stub (raises NotImplementedError)
 - [ ] **4.1e** Implement `LocalEmbeddings` with sentence-transformers
 
-**Done when:** Can switch embedding providers via config.
+**Done when:** Can switch embedding providers via config. (partial - local not yet implemented)
 
 ---
 

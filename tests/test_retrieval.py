@@ -25,9 +25,17 @@ class TestHyDE:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     @pytest.fixture
@@ -99,9 +107,17 @@ class TestGraphExpansion:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     def test_expand_with_relations(self, mock_db, mock_embeddings):
@@ -165,9 +181,17 @@ class TestTemporalFiltering:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     def test_filter_by_session(self, mock_db, mock_embeddings):
@@ -319,6 +343,7 @@ class TestBatchEmbedding:
         from embeddings import openai as openai_module
 
         memory_db.clear_embedding_cache()
+        memory_db._reset_provider()  # Reset provider to allow mocking
         monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
 
         fake_embeddings = [[0.1] * 1536, [0.2] * 1536, [0.3] * 1536]
@@ -342,6 +367,7 @@ class TestBatchEmbedding:
         from embeddings import openai as openai_module
 
         memory_db.clear_embedding_cache()
+        memory_db._reset_provider()  # Reset provider to allow mocking
         monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
 
         # Pre-cache one text
@@ -378,6 +404,7 @@ class TestBatchEmbedding:
         from embeddings import openai as openai_module
 
         memory_db.clear_embedding_cache()
+        memory_db._reset_provider()  # Reset provider to allow mocking
         monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
 
         # Pre-cache all texts
@@ -831,9 +858,17 @@ class TestExportImport:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     def test_export_data_basic(self, mock_db, mock_embeddings):
@@ -975,9 +1010,17 @@ class TestGetContext:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     def test_get_context_not_found(self, mock_db):
@@ -1060,9 +1103,17 @@ class TestTemporalSearch:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     def test_search_ideas_temporal(self, mock_db, mock_embeddings):
@@ -1111,9 +1162,17 @@ class TestListSessions:
     @pytest.fixture
     def mock_embeddings(self, monkeypatch):
         """Mock OpenAI embeddings."""
+        import memory_db
+        memory_db._reset_provider()  # Reset provider to allow mocking
+
         fake_embedding = [0.1] * 1536
         mock_get = MagicMock(return_value=fake_embedding)
+        # Mock at all import locations
         monkeypatch.setattr("memory_db.get_embedding", mock_get)
+        monkeypatch.setattr("embeddings.openai.get_embedding", mock_get)
+        monkeypatch.setattr("search.vector.get_embedding", mock_get)
+        monkeypatch.setattr("search.hybrid.get_embedding", mock_get)
+        monkeypatch.setattr("search.hyde.get_embedding", mock_get)
         return mock_get
 
     def test_list_sessions_empty(self, mock_db):
