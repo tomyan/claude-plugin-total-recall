@@ -34,11 +34,11 @@ Each extraction is a separate commit:
 
 ### 1.2 Configuration (incremental)
 
-- [ ] **1.2a** Create `config.py` with dataclass, hardcoded defaults only
-- [ ] **1.2b** Replace ONE hardcoded threshold (topic_shift_threshold) with config
-- [ ] **1.2c** Add config file loading (TOML)
-- [ ] **1.2d** Add env var override for one value (prove pattern)
-- [ ] **1.2e** Migrate remaining thresholds to config (batch)
+- [x] **1.2a** Create `config.py` with dataclass, hardcoded defaults only
+- [x] **1.2b** Replace ONE hardcoded threshold (topic_shift_threshold) with config
+- [x] **1.2c** Add config file loading (TOML)
+- [x] **1.2d** Add env var override for one value (prove pattern)
+- [x] **1.2e** Migrate remaining thresholds to config (batch)
 
 **Done when:** `memgraph.toml` can override any threshold, env vars work.
 
@@ -198,10 +198,10 @@ Each extraction is a separate commit:
 - [x] Remove LLM fallbacks (HyDE, suggest_topic_name, etc.)
 
 ### In Progress
-- None (Phase 1.1 complete!)
+- None (Phase 1.2 complete!)
 
 ### Up Next
-- 1.2a - Create config.py with dataclass, hardcoded defaults only
+- 2.1a - Add access_count column to ideas table
 
 ---
 

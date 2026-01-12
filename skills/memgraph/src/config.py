@@ -1,17 +1,170 @@
 """Configuration and constants for memgraph."""
 
 import logging
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
-# Database location
-DB_PATH = Path.home() / ".claude-plugin-memgraph" / "memory.db"
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    import tomli as tomllib  # Fallback for older Python
 
-# Embedding settings
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
+
+@dataclass
+class MemgraphConfig:
+    """Configuration for memgraph.
+
+    All thresholds and tuneable parameters in one place.
+    """
+    # Database
+    db_path: Path = field(default_factory=lambda: Path.home() / ".claude-plugin-memgraph" / "memory.db")
+
+    # Embedding settings
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 1536
+
+    # Topic linking thresholds
+    topic_similarity_threshold: float = 0.8  # For auto-linking topics
+    duplicate_topic_threshold: float = 0.85  # For finding duplicate topics
+
+    # Topic shift detection
+    topic_shift_threshold: float = 0.55  # Below = topic divergence
+
+    # Clustering
+    coherence_threshold: float = 0.7  # For cluster quality
+    cluster_merge_threshold: float = 0.85  # For merging similar clusters
+
+    # Default confidence
+    default_confidence: float = 0.5
+
+    # Logging
+    log_path: Path = field(default_factory=lambda: Path.home() / ".claude-plugin-memgraph" / "memgraph.log")
+
+
+def _find_config_file() -> Optional[Path]:
+    """Find memgraph.toml config file.
+
+    Searches in order:
+    1. MEMGRAPH_CONFIG env var path
+    2. Current working directory
+    3. ~/.config/memgraph/
+    4. ~/.claude-plugin-memgraph/
+    """
+    # Check env var first
+    env_path = os.environ.get("MEMGRAPH_CONFIG")
+    if env_path:
+        path = Path(env_path)
+        if path.exists():
+            return path
+
+    # Search paths
+    search_paths = [
+        Path.cwd() / "memgraph.toml",
+        Path.home() / ".config" / "memgraph" / "memgraph.toml",
+        Path.home() / ".claude-plugin-memgraph" / "memgraph.toml",
+    ]
+
+    for path in search_paths:
+        if path.exists():
+            return path
+
+    return None
+
+
+def _load_config_from_toml(path: Path) -> MemgraphConfig:
+    """Load config from TOML file."""
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+
+    # Start with defaults
+    config = MemgraphConfig()
+
+    # Override with TOML values
+    if "database" in data:
+        if "path" in data["database"]:
+            config.db_path = Path(data["database"]["path"])
+
+    if "embedding" in data:
+        if "model" in data["embedding"]:
+            config.embedding_model = data["embedding"]["model"]
+        if "dim" in data["embedding"]:
+            config.embedding_dim = data["embedding"]["dim"]
+
+    if "thresholds" in data:
+        t = data["thresholds"]
+        if "topic_similarity" in t:
+            config.topic_similarity_threshold = t["topic_similarity"]
+        if "duplicate_topic" in t:
+            config.duplicate_topic_threshold = t["duplicate_topic"]
+        if "topic_shift" in t:
+            config.topic_shift_threshold = t["topic_shift"]
+        if "coherence" in t:
+            config.coherence_threshold = t["coherence"]
+        if "cluster_merge" in t:
+            config.cluster_merge_threshold = t["cluster_merge"]
+        if "default_confidence" in t:
+            config.default_confidence = t["default_confidence"]
+
+    if "logging" in data:
+        if "path" in data["logging"]:
+            config.log_path = Path(data["logging"]["path"])
+
+    return config
+
+
+def _apply_env_overrides(config: MemgraphConfig) -> MemgraphConfig:
+    """Apply environment variable overrides to config.
+
+    Env vars:
+        MEMGRAPH_DB_PATH: Override database path
+        MEMGRAPH_TOPIC_SHIFT_THRESHOLD: Override topic shift threshold
+    """
+    # Database path
+    if db_path := os.environ.get("MEMGRAPH_DB_PATH"):
+        config.db_path = Path(db_path)
+
+    # Topic shift threshold
+    if threshold := os.environ.get("MEMGRAPH_TOPIC_SHIFT_THRESHOLD"):
+        try:
+            config.topic_shift_threshold = float(threshold)
+        except ValueError:
+            pass  # Ignore invalid values
+
+    return config
+
+
+def _init_config() -> MemgraphConfig:
+    """Initialize config, loading from TOML if available, then applying env overrides."""
+    config_file = _find_config_file()
+    if config_file:
+        config = _load_config_from_toml(config_file)
+    else:
+        config = MemgraphConfig()
+
+    # Env vars override TOML and defaults
+    config = _apply_env_overrides(config)
+
+    return config
+
+
+# Global config instance
+_config = _init_config()
+
+
+def get_config() -> MemgraphConfig:
+    """Get the current configuration."""
+    return _config
+
+
+# Legacy module-level constants for backward compatibility
+DB_PATH = _config.db_path
+EMBEDDING_MODEL = _config.embedding_model
+EMBEDDING_DIM = _config.embedding_dim
+LOG_PATH = _config.log_path
 
 # Logging setup
-LOG_PATH = Path.home() / ".claude-plugin-memgraph" / "memgraph.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(

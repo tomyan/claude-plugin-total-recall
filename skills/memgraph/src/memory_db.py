@@ -606,7 +606,7 @@ def merge_topics(source_topic_id: int, target_topic_id: int) -> dict:
 def find_related_topics(
     topic_id: int,
     exclude_sessions: list[str] = None,
-    min_similarity: float = 0.8,
+    min_similarity: float = None,  # Uses config.topic_similarity_threshold if None
     limit: int = 5
 ) -> list[dict]:
     """Find topics semantically similar to the given topic.
@@ -620,6 +620,11 @@ def find_related_topics(
     Returns:
         List of dicts with topic info and similarity score
     """
+    # Use config default if not specified
+    if min_similarity is None:
+        from config import get_config
+        min_similarity = get_config().topic_similarity_threshold
+
     db = get_db()
 
     # Get the topic's embedding (average of its span embeddings)
@@ -790,17 +795,22 @@ def check_time_overlap(
     return start1 <= end2 and start2 <= end1
 
 
-def auto_link_topic(topic_id: int, current_session: str, min_similarity: float = 0.8) -> list[dict]:
+def auto_link_topic(topic_id: int, current_session: str, min_similarity: float = None) -> list[dict]:
     """Automatically link a topic to similar topics in other sessions.
 
     Args:
         topic_id: Topic to link
         current_session: Current session to exclude
-        min_similarity: Minimum similarity for linking
+        min_similarity: Minimum similarity for linking (uses config default if None)
 
     Returns:
         List of created links
     """
+    # Use config default if not specified
+    if min_similarity is None:
+        from config import get_config
+        min_similarity = get_config().topic_similarity_threshold
+
     # Find related topics
     related = find_related_topics(
         topic_id,
@@ -1341,15 +1351,21 @@ def review_topics() -> dict:
     return issues
 
 
-def find_duplicate_topics(threshold: float = 0.85) -> list[dict]:
+def find_duplicate_topics(threshold: float = None) -> list[dict]:
     """Find topics that are semantically similar.
 
     Args:
-        threshold: Similarity threshold (0-1, higher = more similar)
+        threshold: Similarity threshold (0-1, higher = more similar).
+                   Uses config.duplicate_topic_threshold if None.
 
     Returns:
         List of duplicate pairs with similarity scores
     """
+    # Use config default if not specified
+    if threshold is None:
+        from config import get_config
+        threshold = get_config().duplicate_topic_threshold
+
     db = get_db()
 
     # Get topics with their embeddings (from their name + summary)
@@ -2261,7 +2277,7 @@ def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
 def detect_semantic_topic_shift(
     span_id: int,
     message: str,
-    threshold: float = 0.55,
+    threshold: float = None,  # Uses config.topic_shift_threshold if None
     divergence_history: list[float] = None
 ) -> tuple[bool, float, list[float]]:
     """Detect if a message represents a topic shift using semantic similarity.
@@ -2280,6 +2296,11 @@ def detect_semantic_topic_shift(
     """
     if divergence_history is None:
         divergence_history = []
+
+    # Use config default if threshold not specified
+    if threshold is None:
+        from config import get_config
+        threshold = get_config().topic_shift_threshold
 
     similarity = check_topic_similarity(span_id, message)
 
@@ -2319,7 +2340,7 @@ def store_idea(
     source_line: int,
     span_id: Optional[int] = None,
     intent: Optional[str] = None,
-    confidence: float = 0.5,
+    confidence: float = None,  # Uses config.default_confidence if None
     entities: Optional[list[tuple[str, str]]] = None,  # [(name, type), ...]
     message_time: Optional[str] = None  # ISO timestamp from transcript
 ) -> int:
@@ -2331,10 +2352,15 @@ def store_idea(
         source_line: Line number in transcript
         span_id: Optional span this idea belongs to
         intent: Type of idea (decision, question, etc.)
-        confidence: Confidence score 0-1
+        confidence: Confidence score 0-1 (uses config default if None)
         entities: Optional list of (name, type) entity tuples
         message_time: ISO timestamp when message occurred in conversation
     """
+    # Use config default if not specified
+    if confidence is None:
+        from config import get_config
+        confidence = get_config().default_confidence
+
     db = get_db()
     cursor = db.cursor()
 
