@@ -238,6 +238,10 @@ def run_command(args):
                 args.query, limit=args.limit, session=session,
                 since=since, until=until
             )
+            # Apply intent filter if specified
+            intent = getattr(args, 'intent', None)
+            if intent:
+                results = [r for r in results if r.get('intent') == intent]
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "hyde":
@@ -255,6 +259,10 @@ def run_command(args):
                 args.query, limit=args.limit, session=session,
                 since=since, until=until
             )
+            # Apply intent filter if specified
+            intent = getattr(args, 'intent', None)
+            if intent:
+                results = [r for r in results if r.get('intent') == intent]
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "expand":
@@ -458,6 +466,32 @@ def run_command(args):
         elif args.command == "questions":
             questions = memory_db.get_unanswered_questions(args.session)
             print(json.dumps(questions, indent=2, default=str))
+
+        elif args.command == "decisions":
+            # Shortcut for search --intent decision
+            session = resolve_session(args)
+            results = memory_db.search_ideas(
+                args.query or "",
+                limit=args.limit,
+                session=session,
+                intent="decision"
+            )
+            if session:
+                print(f"# Searching project: {session}", file=sys.stderr)
+            print(json.dumps(results, indent=2, default=str))
+
+        elif args.command == "todos":
+            # Shortcut for search --intent todo
+            session = resolve_session(args)
+            results = memory_db.search_ideas(
+                args.query or "",
+                limit=args.limit,
+                session=session,
+                intent="todo"
+            )
+            if session:
+                print(f"# Searching project: {session}", file=sys.stderr)
+            print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "get":
             result = memory_db.get_idea_with_relations(args.id)
@@ -1001,6 +1035,7 @@ def main():
     hybrid_p.add_argument("query", help="Search query")
     hybrid_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
     hybrid_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
+    hybrid_p.add_argument("-i", "--intent", help="Filter by intent")
     hybrid_p.add_argument("--since", help="Only ideas after this date (ISO format)")
     hybrid_p.add_argument("--until", help="Only ideas before this date (ISO format)")
     hybrid_p.add_argument("--recent", help="Relative time filter (e.g. 1d, 1w, 1m, 3m, 1y)")
@@ -1014,6 +1049,7 @@ def main():
     hyde_p.add_argument("query", help="Search query")
     hyde_p.add_argument("-n", "--limit", type=int, default=10, help="Max results")
     hyde_p.add_argument("-s", "--session", help="Filter by session (auto-detected from --cwd if not specified)")
+    hyde_p.add_argument("-i", "--intent", help="Filter by intent")
     hyde_p.add_argument("--since", help="Only ideas after this date (ISO format)")
     hyde_p.add_argument("--until", help="Only ideas before this date (ISO format)")
     hyde_p.add_argument("--recent", help="Relative time filter (e.g. 1d, 1w, 1m, 3m, 1y)")
@@ -1093,6 +1129,24 @@ def main():
     # questions
     questions_p = subparsers.add_parser("questions", help="List unanswered questions")
     questions_p.add_argument("-s", "--session", help="Filter by session")
+
+    # decisions (shortcut for search --intent decision)
+    decisions_p = subparsers.add_parser("decisions", help="List decisions (shortcut for search --intent decision)")
+    decisions_p.add_argument("query", nargs="?", default="", help="Optional search query")
+    decisions_p.add_argument("-n", "--limit", type=int, default=20, help="Max results")
+    decisions_p.add_argument("-s", "--session", help="Filter by session")
+    decisions_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    decisions_p.add_argument("-g", "--global", dest="global_search", action="store_true",
+                             help="Search across all projects")
+
+    # todos (shortcut for search --intent todo)
+    todos_p = subparsers.add_parser("todos", help="List todo items (shortcut for search --intent todo)")
+    todos_p.add_argument("query", nargs="?", default="", help="Optional search query")
+    todos_p.add_argument("-n", "--limit", type=int, default=20, help="Max results")
+    todos_p.add_argument("-s", "--session", help="Filter by session")
+    todos_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    todos_p.add_argument("-g", "--global", dest="global_search", action="store_true",
+                         help="Search across all projects")
 
     # get (retrieve idea with relations)
     get_p = subparsers.add_parser("get", help="Get idea by ID with relations")

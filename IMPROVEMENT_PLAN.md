@@ -106,12 +106,12 @@ Each extraction is a separate commit:
 
 ### 3.1 Intent Filtering (already partially exists)
 
-- [ ] **3.1a** Verify `--intent` flag works on all search commands
-- [ ] **3.1b** Add `decisions` shortcut command (`search --intent decision`)
-- [ ] **3.1c** Add `questions` shortcut showing unanswered questions
-- [ ] **3.1d** Add `todos` shortcut showing todo items
+- [x] **3.1a** Verify `--intent` flag works on all search commands
+- [x] **3.1b** Add `decisions` shortcut command (`search --intent decision`)
+- [x] **3.1c** Add `questions` shortcut showing unanswered questions
+- [x] **3.1d** Add `todos` shortcut showing todo items
 
-**Done when:** Quick access to filtered search by intent.
+**Done when:** Quick access to filtered search by intent. ✓
 
 ### 3.2 Query Decomposition (thin slices)
 
