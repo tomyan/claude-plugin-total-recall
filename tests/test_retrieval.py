@@ -33,8 +33,9 @@ class TestHyDE:
     @pytest.fixture
     def mock_hyde_generation(self, monkeypatch):
         """Mock LLM for HyDE document generation."""
+        import search.hyde as hyde_module
         mock_gen = MagicMock(return_value="The authentication system uses JWT tokens with refresh rotation for secure session management.")
-        monkeypatch.setattr("memory_db.generate_hypothetical_doc", mock_gen)
+        monkeypatch.setattr(hyde_module, "generate_hypothetical_doc", mock_gen)
         return mock_gen
 
     def test_hyde_search_generates_hypothetical(self, mock_db, mock_embeddings, mock_hyde_generation):
@@ -58,10 +59,11 @@ class TestHyDE:
 
     def test_hyde_uses_llm_when_available(self, mock_db, mock_embeddings, monkeypatch):
         """HyDE generation uses Claude CLI when available."""
+        import search.hyde as hyde_module
         import memory_db
 
         mock_claude = MagicMock(return_value="JWT auth with refresh tokens")
-        monkeypatch.setattr("memory_db.claude_complete", mock_claude)
+        monkeypatch.setattr(hyde_module, "claude_complete", mock_claude)
 
         result = memory_db.generate_hypothetical_doc("how does auth work?")
 
@@ -70,10 +72,11 @@ class TestHyDE:
 
     def test_hyde_raises_on_llm_error(self, monkeypatch):
         """HyDE generation raises MemgraphError on LLM failure."""
+        import search.hyde as hyde_module
         import memory_db
 
         mock_claude = MagicMock(side_effect=Exception("Claude CLI error"))
-        monkeypatch.setattr("memory_db.claude_complete", mock_claude)
+        monkeypatch.setattr(hyde_module, "claude_complete", mock_claude)
 
         with pytest.raises(memory_db.MemgraphError) as exc_info:
             memory_db.generate_hypothetical_doc("how does auth work?")

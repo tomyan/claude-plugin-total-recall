@@ -19,16 +19,16 @@ Each extraction is a separate commit:
 
 - [x] **1.1a** Extract `errors.py` - MemgraphError class (~20 lines)
 - [x] **1.1b** Extract `llm/claude.py` - claude_complete function (~80 lines)
-- [ ] **1.1c** Extract `config.py` - Just constants: DB_PATH, EMBEDDING_MODEL, EMBEDDING_DIM
-- [ ] **1.1d** Extract `embeddings/cache.py` - Cache functions only (save/load/clear/stats)
-- [ ] **1.1e** Extract `embeddings/openai.py` - get_embedding, get_embeddings_batch
-- [ ] **1.1f** Extract `embeddings/serialize.py` - serialize/deserialize_embedding
-- [ ] **1.1g** Extract `db/connection.py` - get_db only (not init_db yet)
-- [ ] **1.1h** Extract `db/schema.py` - init_db and schema creation
-- [ ] **1.1i** Extract `db/migrations.py` - _migrate_schema, _migrate_spans_to_topics
-- [ ] **1.1j** Extract `search/vector.py` - search_ideas, find_similar_ideas
-- [ ] **1.1k** Extract `search/hybrid.py` - hybrid_search
-- [ ] **1.1l** Extract `search/hyde.py` - generate_hypothetical_doc, hyde_search
+- [x] **1.1c** Extract `config.py` - Just constants: DB_PATH, EMBEDDING_MODEL, EMBEDDING_DIM
+- [x] **1.1d** Extract `embeddings/cache.py` - Cache functions only (save/load/clear/stats)
+- [x] **1.1e** Extract `embeddings/openai.py` - get_embedding, get_embeddings_batch
+- [x] **1.1f** Extract `embeddings/serialize.py` - serialize/deserialize_embedding
+- [x] **1.1g** Extract `db/connection.py` - get_db only (not init_db yet)
+- [x] **1.1h** Extract `db/schema.py` - init_db and schema creation
+- [x] **1.1i** Extract `db/migrations.py` - migrate_schema, migrate_spans_to_topics
+- [x] **1.1j** Extract `search/vector.py` - search_ideas, find_similar_ideas
+- [x] **1.1k** Extract `search/hybrid.py` - hybrid_search
+- [x] **1.1l** Extract `search/hyde.py` - generate_hypothetical_doc, hyde_search
 
 **Done when:** Each module works independently, memory_db.py imports and re-exports for backward compatibility, all 164 tests pass.
 
@@ -185,13 +185,23 @@ Each extraction is a separate commit:
 ### Completed
 - [x] 1.1a - errors.py extracted
 - [x] 1.1b - llm/claude.py extracted
+- [x] 1.1c - config.py with constants
+- [x] 1.1d - embeddings/cache.py extracted
+- [x] 1.1e - embeddings/openai.py extracted
+- [x] 1.1f - embeddings/serialize.py extracted
+- [x] 1.1g - db/connection.py extracted
+- [x] 1.1h - db/schema.py extracted
+- [x] 1.1i - db/migrations.py extracted
+- [x] 1.1j - search/vector.py extracted
+- [x] 1.1k - search/hybrid.py extracted
+- [x] 1.1l - search/hyde.py extracted
 - [x] Remove LLM fallbacks (HyDE, suggest_topic_name, etc.)
 
 ### In Progress
-- [ ] 1.1c - config.py with constants
+- None (Phase 1.1 complete!)
 
 ### Up Next
-- 1.1d - embeddings/cache.py
+- 1.2a - Create config.py with dataclass, hardcoded defaults only
 
 ---
 
