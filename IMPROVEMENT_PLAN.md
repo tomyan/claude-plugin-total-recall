@@ -58,10 +58,10 @@ Each extraction is a separate commit:
 
 ### 2.2 Working Memory (thin slices)
 
-- [ ] **2.2a** Create `working_memory` table (session, idea_id, activation, last_access)
-- [ ] **2.2b** Record activation when idea is retrieved (activation = 1.0)
-- [ ] **2.2c** Add `context` command showing currently active ideas
-- [ ] **2.2d** Apply time decay to activations on session start
+- [x] **2.2a** Create `working_memory` table (session, idea_id, activation, last_access)
+- [x] **2.2b** Record activation when idea is retrieved (activation = 1.0)
+- [x] **2.2c** Add working memory functions (activate_idea, get_active_ideas, decay_working_memory, boost_results_by_activation)
+- [ ] **2.2d** Integrate activation recording into search functions
 - [ ] **2.2e** Add `--boost-active` flag to search (re-rank by activation)
 - [ ] **2.2f** Make boost the default, add `--no-boost` to disable
 
@@ -198,10 +198,10 @@ Each extraction is a separate commit:
 - [x] Remove LLM fallbacks (HyDE, suggest_topic_name, etc.)
 
 ### In Progress
-- None (Phase 2.1 complete!)
+- 2.2d-f - Integrating working memory into search
 
 ### Up Next
-- 2.2a - Create working_memory table
+- 2.3 - Soft Forgetting
 
 ---
 

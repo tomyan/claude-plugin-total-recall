@@ -3130,6 +3130,151 @@ def get_stats() -> dict:
     return stats
 
 
+# =============================================================================
+# Working Memory Operations
+# =============================================================================
+
+def activate_idea(session: str, idea_id: int, activation: float = 1.0) -> None:
+    """Add or update an idea in working memory.
+
+    Args:
+        session: Current session
+        idea_id: ID of the idea to activate
+        activation: Activation level (0-1, default 1.0)
+    """
+    from datetime import datetime
+
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+
+    # Upsert into working_memory
+    db.execute("""
+        INSERT INTO working_memory (session, idea_id, activation, last_access)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(session, idea_id) DO UPDATE SET
+            activation = MAX(activation, excluded.activation),
+            last_access = excluded.last_access
+    """, (session, idea_id, activation, now))
+    db.commit()
+    db.close()
+
+
+def get_active_ideas(session: str, min_activation: float = 0.1, limit: int = 20) -> list[dict]:
+    """Get currently active ideas in working memory.
+
+    Args:
+        session: Current session
+        min_activation: Minimum activation threshold
+        limit: Maximum ideas to return
+
+    Returns:
+        List of idea dicts with activation levels
+    """
+    db = get_db()
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.session, s.name as topic,
+            wm.activation, wm.last_access
+        FROM working_memory wm
+        JOIN ideas i ON i.id = wm.idea_id
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE wm.session = ? AND wm.activation >= ?
+        ORDER BY wm.activation DESC
+        LIMIT ?
+    """, (session, min_activation, limit))
+
+    results = [dict(row) for row in cursor]
+    db.close()
+    return results
+
+
+def decay_working_memory(session: str, decay_rate: float = 0.9) -> int:
+    """Apply time decay to working memory activations.
+
+    Call this at session start or periodically to fade old activations.
+
+    Args:
+        session: Session to decay
+        decay_rate: Multiplier for decay (0-1, lower = faster decay)
+
+    Returns:
+        Number of records updated
+    """
+    db = get_db()
+
+    # Apply decay
+    cursor = db.execute("""
+        UPDATE working_memory
+        SET activation = activation * ?
+        WHERE session = ?
+    """, (decay_rate, session))
+    updated = cursor.rowcount
+
+    # Clean up very low activations
+    db.execute("""
+        DELETE FROM working_memory
+        WHERE session = ? AND activation < 0.01
+    """, (session,))
+
+    db.commit()
+    db.close()
+
+    return updated
+
+
+def boost_results_by_activation(
+    results: list[dict],
+    session: str,
+    boost_weight: float = 0.3
+) -> list[dict]:
+    """Re-rank search results by working memory activation.
+
+    Blends vector similarity ranking with working memory activation.
+
+    Args:
+        results: Search results (must have 'id' field)
+        session: Current session
+        boost_weight: How much to weight activation (0-1, 0=no boost, 1=activation only)
+
+    Returns:
+        Re-ranked results
+    """
+    if not results or boost_weight == 0:
+        return results
+
+    db = get_db()
+
+    # Get activations for result IDs
+    idea_ids = [r['id'] for r in results]
+    placeholders = ','.join('?' * len(idea_ids))
+    cursor = db.execute(f"""
+        SELECT idea_id, activation
+        FROM working_memory
+        WHERE session = ? AND idea_id IN ({placeholders})
+    """, [session] + idea_ids)
+
+    activations = {row['idea_id']: row['activation'] for row in cursor}
+    db.close()
+
+    # Calculate blended scores
+    # Original order is best similarity, so rank 0 = highest score
+    for i, r in enumerate(results):
+        original_score = 1.0 - (i / len(results))  # 1.0 to 0.0
+        activation = activations.get(r['id'], 0)
+        r['_boost_score'] = (1 - boost_weight) * original_score + boost_weight * activation
+
+    # Sort by blended score
+    results.sort(key=lambda r: r.get('_boost_score', 0), reverse=True)
+
+    # Clean up
+    for r in results:
+        r.pop('_boost_score', None)
+
+    return results
+
+
 def get_session_time_range(session: str) -> dict | None:
     """Get the time range (first/last idea) for a session.
 

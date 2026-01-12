@@ -121,6 +121,19 @@ SCHEMA_SQL = """
         last_indexed TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Working memory (recently activated ideas with decay)
+    CREATE TABLE IF NOT EXISTS working_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session TEXT NOT NULL,
+        idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+        activation REAL DEFAULT 1.0 CHECK(activation >= 0 AND activation <= 1),
+        last_access TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(session, idea_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_working_memory_session ON working_memory(session);
+    CREATE INDEX IF NOT EXISTS idx_working_memory_activation ON working_memory(activation);
+
     -- Vector embeddings for spans
     CREATE VIRTUAL TABLE IF NOT EXISTS span_embeddings USING vec0(
         span_id INTEGER PRIMARY KEY,
