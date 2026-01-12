@@ -17,6 +17,11 @@ hooks:
 
 Searches past conversations for relevant ideas, decisions, and context using semantic vector search.
 
+## Prerequisites
+
+- **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
+- **OPENAI_TOKEN_MEMORY_EMBEDDINGS** - Environment variable with OpenAI API key (used for embeddings)
+
 ## Invocation
 
 `/remember <query>`
@@ -263,6 +268,16 @@ uv run python "$SKILL_DIR/src/cli.py" create-project "My Project" -d "Descriptio
 **Assign a topic to a project:**
 ```bash
 uv run python "$SKILL_DIR/src/cli.py" assign-topic <topic_id> "My Project"
+```
+
+**Set a topic's parent (create topic hierarchy):**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" reparent-topic <topic_id> <parent_topic_id>
+```
+
+**Remove a topic from its parent:**
+```bash
+uv run python "$SKILL_DIR/src/cli.py" unparent-topic <topic_id>
 ```
 
 **View hierarchy tree:**

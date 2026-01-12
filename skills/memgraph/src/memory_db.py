@@ -68,15 +68,15 @@ class MemgraphError(Exception):
 # Claude CLI Integration
 # =============================================================================
 
-def claude_complete(prompt: str, system: str = None, max_tokens: int = 1024) -> str:
+def claude_complete(prompt: str, system: str = None) -> str:
     """Call Claude CLI non-interactively for LLM tasks.
 
-    Uses `claude -p` which doesn't create session transcripts.
+    Uses `claude -p` with `--no-session-persistence` to avoid creating
+    session transcripts that would pollute the index.
 
     Args:
         prompt: The user prompt
         system: Optional system prompt
-        max_tokens: Maximum tokens in response
 
     Returns:
         The response text
@@ -84,17 +84,21 @@ def claude_complete(prompt: str, system: str = None, max_tokens: int = 1024) -> 
     Raises:
         MemgraphError: If Claude CLI fails
     """
-    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence"]
     if system:
         cmd.extend(["--system-prompt", system])
-    cmd.extend(["--max-tokens", str(max_tokens)])
+
+    # Set MEMGRAPH_INTERNAL to prevent hooks from re-indexing during this call
+    env = os.environ.copy()
+    env["MEMGRAPH_INTERNAL"] = "1"
 
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=60  # 60 second timeout
+            timeout=60,  # 60 second timeout
+            env=env
         )
 
         if result.returncode != 0:
@@ -107,10 +111,20 @@ def claude_complete(prompt: str, system: str = None, max_tokens: int = 1024) -> 
             )
 
         # Parse JSON output
+        # Claude CLI --output-format json returns an array of event objects:
+        # [{"type":"system",...}, {"type":"assistant",...}, {"type":"result","result":"..."}]
         try:
             response = json.loads(result.stdout)
-            # The JSON output has a "result" field with the actual response
-            return response.get("result", "")
+            # Find the result event in the array
+            if isinstance(response, list):
+                for event in response:
+                    if isinstance(event, dict) and event.get("type") == "result":
+                        return event.get("result", "")
+                # No result event found
+                logger.warning("No result event in Claude CLI output")
+                return ""
+            # Fallback for unexpected format
+            return response.get("result", "") if isinstance(response, dict) else ""
         except json.JSONDecodeError:
             # If not JSON, return raw stdout (fallback)
             return result.stdout.strip()
@@ -864,6 +878,56 @@ def unparent_topic(topic_id: int) -> bool:
     return True
 
 
+def reparent_topic(topic_id: int, parent_id: int) -> bool:
+    """Set a topic's parent, creating a hierarchy.
+
+    Args:
+        topic_id: Topic to reparent
+        parent_id: New parent topic ID
+
+    Returns:
+        True if updated
+
+    Raises:
+        MemgraphError: If topic or parent not found, or would create cycle
+    """
+    db = get_db()
+
+    # Verify both topics exist
+    topic = db.execute("SELECT id FROM topics WHERE id = ?", (topic_id,)).fetchone()
+    parent = db.execute("SELECT id, parent_id FROM topics WHERE id = ?", (parent_id,)).fetchone()
+
+    if not topic:
+        db.close()
+        raise MemgraphError(f"Topic {topic_id} not found", "topic_not_found")
+    if not parent:
+        db.close()
+        raise MemgraphError(f"Parent topic {parent_id} not found", "topic_not_found")
+
+    # Check for cycles - walk up the parent chain
+    current = parent_id
+    visited = {topic_id}
+    while current:
+        if current in visited:
+            db.close()
+            raise MemgraphError(
+                f"Cannot reparent: would create cycle",
+                "cycle_detected",
+                {"topic_id": topic_id, "parent_id": parent_id}
+            )
+        visited.add(current)
+        row = db.execute("SELECT parent_id FROM topics WHERE id = ?", (current,)).fetchone()
+        current = row["parent_id"] if row else None
+
+    db.execute(
+        "UPDATE topics SET parent_id = ? WHERE id = ?",
+        (parent_id, topic_id)
+    )
+    db.commit()
+    db.close()
+    return True
+
+
 def delete_topic(topic_id: int, delete_ideas: bool = False) -> dict:
     """Delete a topic and optionally its ideas.
 
@@ -1034,7 +1098,7 @@ Sample content: {content_sample}
 Reply with ONLY the project name that best matches, or "NONE" if no good match."""
 
         try:
-            suggested = claude_complete(prompt, max_tokens=50).strip()
+            suggested = claude_complete(prompt).strip()
 
             # Find matching project
             matched_project = None
@@ -2304,7 +2368,7 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
 {sample_content}
 
 Reply with ONLY the topic name, nothing else."""
-            suggested_name = claude_complete(prompt, max_tokens=30).strip()
+            suggested_name = claude_complete(prompt).strip()
         except Exception as e:
             logger.warning(f"Failed to generate cluster name: {e}")
 
@@ -2609,7 +2673,7 @@ Sample content:
 
 Reply with ONLY the suggested topic name, nothing else."""
 
-        name = claude_complete(prompt, max_tokens=20).strip()
+        name = claude_complete(prompt).strip()
         # Clean the output - strip markdown and quotes
         import re
         name = re.sub(r'^\*\*(.+)\*\*$', r'\1', name)  # Remove bold
@@ -3409,7 +3473,7 @@ write a brief hypothetical answer that might appear in documentation or conversa
 Write in a direct, factual style as if you were recording a decision or explaining a solution.
 Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably"."""
 
-        hypothetical = claude_complete(query, system=system_prompt, max_tokens=150).strip()
+        hypothetical = claude_complete(query, system=system_prompt).strip()
         logger.debug(f"HyDE generated: {hypothetical[:100]}...")
         return hypothetical
 
@@ -4629,7 +4693,7 @@ Reply with ONLY a JSON array of indices that should be REMOVED, e.g. [0, 3, 5]
 If none should be removed, reply: []"""
 
         try:
-            response_text = claude_complete(prompt, max_tokens=200).strip()
+            response_text = claude_complete(prompt).strip()
 
             # Parse response - handle various formats
             import re
@@ -5043,9 +5107,9 @@ def import_data(data: dict, replace: bool = False) -> dict:
 def extract_session_from_path(file_path: str) -> str:
     """Extract session name from Claude transcript path.
 
-    Paths look like: ~/.claude/projects/-Users-tom-rad-control-v1-1/xyz.jsonl
-    The project dir encodes the actual path with dashes: /Users/tom/rad-control-v1-1
-    Returns: 'rad-control-v1-1' (the project folder name)
+    Paths look like: ~/.claude/projects/-Users-alice-my-project/xyz.jsonl
+    The project dir encodes the actual path with dashes: /Users/alice/my-project
+    Returns: 'my-project' (the project folder name)
     """
     import re
     match = re.search(r'/\.claude/projects/([^/]+)/', file_path)

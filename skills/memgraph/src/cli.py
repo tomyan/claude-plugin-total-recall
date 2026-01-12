@@ -541,6 +541,10 @@ def run_command(args):
             memory_db.unparent_topic(args.topic_id)
             print(json.dumps({"success": True, "topic_id": args.topic_id, "parent_id": None}))
 
+        elif args.command == "reparent-topic":
+            memory_db.reparent_topic(args.topic_id, args.parent_id)
+            print(json.dumps({"success": True, "topic_id": args.topic_id, "parent_id": args.parent_id}))
+
         elif args.command == "delete-topic":
             result = memory_db.delete_topic(args.topic_id, delete_ideas=args.delete_ideas)
             print(f"Deleted topic {args.topic_id}")
@@ -1069,6 +1073,10 @@ def main():
 
     unparent_p = subparsers.add_parser("unparent-topic", help="Remove a topic from its parent (make it top-level)")
     unparent_p.add_argument("topic_id", type=int, help="Topic ID")
+
+    reparent_p = subparsers.add_parser("reparent-topic", help="Set a topic's parent (create hierarchy)")
+    reparent_p.add_argument("topic_id", type=int, help="Topic ID to reparent")
+    reparent_p.add_argument("parent_id", type=int, help="New parent topic ID")
 
     delete_topic_p = subparsers.add_parser("delete-topic", help="Delete a topic and optionally its ideas")
     delete_topic_p.add_argument("topic_id", type=int, help="Topic ID to delete")

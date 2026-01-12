@@ -1,0 +1,20 @@
+[project]
+name = "memgraph"
+version = "0.1.0"
+description = "Conversation memory skill for Claude Code - indexes past conversations for semantic search"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=2.15.0",
+    "sqlite-vec>=0.1.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["skills/memgraph/src"]

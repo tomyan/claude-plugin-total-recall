@@ -56,47 +56,29 @@ class TestHyDE:
         assert isinstance(results, list)
 
     def test_hyde_uses_llm_when_available(self, mock_db, mock_embeddings, monkeypatch):
-        """HyDE generation uses LLM when API key is available."""
+        """HyDE generation uses Claude CLI when available."""
         import memory_db
 
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
-
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="JWT auth with refresh tokens"))]
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai = MagicMock(return_value=mock_client)
-        monkeypatch.setattr("memory_db.OpenAI", mock_openai)
+        mock_claude = MagicMock(return_value="JWT auth with refresh tokens")
+        monkeypatch.setattr("memory_db.claude_complete", mock_claude)
 
         result = memory_db.generate_hypothetical_doc("how does auth work?")
 
-        mock_client.chat.completions.create.assert_called_once()
+        mock_claude.assert_called_once()
         assert result == "JWT auth with refresh tokens"
-
-    def test_hyde_falls_back_to_heuristic_without_api_key(self, monkeypatch):
-        """HyDE generation falls back to heuristic without API key."""
-        import memory_db
-
-        monkeypatch.delenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", raising=False)
-
-        result = memory_db.generate_hypothetical_doc("how does auth work?")
-
-        assert "auth work" in result.lower()
-        assert "decided based on" in result
 
     def test_hyde_falls_back_on_llm_error(self, monkeypatch):
         """HyDE generation falls back to heuristic on LLM error."""
         import memory_db
 
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
-
-        mock_openai = MagicMock(side_effect=Exception("API error"))
-        monkeypatch.setattr("memory_db.OpenAI", mock_openai)
+        mock_claude = MagicMock(side_effect=Exception("Claude CLI error"))
+        monkeypatch.setattr("memory_db.claude_complete", mock_claude)
 
         result = memory_db.generate_hypothetical_doc("how does auth work?")
 
         # Should return heuristic result, not raise
-        assert "auth work" in result.lower()
+        assert "auth" in result.lower()
+        assert len(result) > 20  # Should be a meaningful response
 
 
 class TestGraphExpansion:

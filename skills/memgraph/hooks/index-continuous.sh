@@ -6,6 +6,11 @@ SKILL_DIR="$HOME/.claude/skills/memgraph"
 RUNTIME_DIR="$HOME/.claude-plugin-memgraph"
 LOCK_FILE="$RUNTIME_DIR/index.lock"
 
+# Skip if called from memgraph itself (prevents unnecessary re-indexing)
+if [ -n "$MEMGRAPH_INTERNAL" ]; then
+    exit 0
+fi
+
 # Skip if already running (prevents overlapping runs)
 if [ -f "$LOCK_FILE" ]; then
     exit 0
