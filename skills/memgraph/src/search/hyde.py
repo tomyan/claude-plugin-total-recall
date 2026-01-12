@@ -108,7 +108,7 @@ def hyde_search(
 
     # Update access tracking for returned results
     if results:
-        _update_access_tracking([r['id'] for r in results], db)
+        _update_access_tracking([r['id'] for r in results], db, session=session)
 
     db.close()
     return results

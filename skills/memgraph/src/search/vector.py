@@ -8,12 +8,15 @@ from embeddings.openai import get_embedding
 from embeddings.serialize import serialize_embedding
 
 
-def _update_access_tracking(idea_ids: list[int], db=None) -> None:
+def _update_access_tracking(idea_ids: list[int], db=None, session: str = None) -> None:
     """Update access_count and last_accessed for retrieved ideas.
+
+    Also records activation in working memory if session is provided.
 
     Args:
         idea_ids: List of idea IDs that were accessed
         db: Optional database connection (will create one if not provided)
+        session: Optional session for working memory activation
     """
     if not idea_ids:
         return
@@ -31,6 +34,18 @@ def _update_access_tracking(idea_ids: list[int], db=None) -> None:
             last_accessed = ?
         WHERE id IN ({placeholders})
     """, [now] + idea_ids)
+
+    # Also record in working memory if session provided
+    if session:
+        for idea_id in idea_ids:
+            db.execute("""
+                INSERT INTO working_memory (session, idea_id, activation, last_access)
+                VALUES (?, ?, 1.0, ?)
+                ON CONFLICT(session, idea_id) DO UPDATE SET
+                    activation = MIN(1.0, activation + 0.2),
+                    last_access = excluded.last_access
+            """, (session, idea_id, now))
+
     db.commit()
 
     if close_db:
@@ -77,7 +92,7 @@ def search_ideas(
 
     # Update access tracking for returned results
     if results:
-        _update_access_tracking([r['id'] for r in results], db)
+        _update_access_tracking([r['id'] for r in results], db, session=session)
 
     db.close()
     return results
@@ -173,7 +188,9 @@ def find_similar_ideas(
 
     # Update access tracking for returned results
     if results:
-        _update_access_tracking([r['id'] for r in results], db)
+        # Use explicit session if provided, otherwise use source idea's session
+        track_session = session if session else source_session
+        _update_access_tracking([r['id'] for r in results], db, session=track_session)
 
     db.close()
     return results

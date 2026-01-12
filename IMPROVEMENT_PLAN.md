@@ -61,7 +61,7 @@ Each extraction is a separate commit:
 - [x] **2.2a** Create `working_memory` table (session, idea_id, activation, last_access)
 - [x] **2.2b** Record activation when idea is retrieved (activation = 1.0)
 - [x] **2.2c** Add working memory functions (activate_idea, get_active_ideas, decay_working_memory, boost_results_by_activation)
-- [ ] **2.2d** Integrate activation recording into search functions
+- [x] **2.2d** Integrate activation recording into search functions
 - [ ] **2.2e** Add `--boost-active` flag to search (re-rank by activation)
 - [ ] **2.2f** Make boost the default, add `--no-boost` to disable
 

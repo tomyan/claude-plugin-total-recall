@@ -103,7 +103,7 @@ def hybrid_search(
 
     # Update access tracking for returned results
     if final_results:
-        _update_access_tracking([r['id'] for r in final_results], db)
+        _update_access_tracking([r['id'] for r in final_results], db, session=session)
 
     db.close()
     return final_results
