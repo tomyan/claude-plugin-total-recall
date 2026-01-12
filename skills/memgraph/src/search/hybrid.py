@@ -5,6 +5,7 @@ from typing import Optional
 from db.connection import get_db
 from embeddings.openai import get_embedding
 from embeddings.serialize import serialize_embedding
+from search.vector import _update_access_tracking
 
 
 def hybrid_search(
@@ -96,7 +97,13 @@ def hybrid_search(
 
     cursor = db.execute(sql, params)
     results = {row['id']: dict(row) for row in cursor}
-    db.close()
 
-    # Return in ranked order, limited
-    return [results[id] for id in top_ids if id in results][:limit]
+    # Get final result list
+    final_results = [results[id] for id in top_ids if id in results][:limit]
+
+    # Update access tracking for returned results
+    if final_results:
+        _update_access_tracking([r['id'] for r in final_results], db)
+
+    db.close()
+    return final_results

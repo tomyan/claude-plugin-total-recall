@@ -8,6 +8,7 @@ from embeddings.openai import get_embedding
 from embeddings.serialize import serialize_embedding
 from errors import MemgraphError
 from llm.claude import claude_complete
+from search.vector import _update_access_tracking
 
 
 def generate_hypothetical_doc(query: str) -> str:
@@ -104,5 +105,10 @@ def hyde_search(
 
     cursor = db.execute(sql, params)
     results = [dict(row) for row in cursor]
+
+    # Update access tracking for returned results
+    if results:
+        _update_access_tracking([r['id'] for r in results], db)
+
     db.close()
     return results

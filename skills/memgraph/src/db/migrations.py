@@ -64,6 +64,17 @@ def migrate_schema(db):
         db.execute("ALTER TABLE ideas ADD COLUMN message_time TEXT")
         db.commit()
 
+    # Add access tracking columns for working memory / forgetting
+    if "access_count" not in idea_columns:
+        config.logger.info("Adding access_count column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN access_count INTEGER DEFAULT 0")
+        db.commit()
+
+    if "last_accessed" not in idea_columns:
+        config.logger.info("Adding last_accessed column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN last_accessed TEXT")
+        db.commit()
+
     # Create indexes that depend on migrated columns
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_spans_topic ON spans(topic_id)")

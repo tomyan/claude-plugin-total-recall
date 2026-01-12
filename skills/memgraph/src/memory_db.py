@@ -3087,6 +3087,36 @@ def get_stats() -> dict:
     """)
     stats["unanswered_questions"] = cursor.fetchone()['count']
 
+    # Access tracking statistics
+    cursor = db.execute("""
+        SELECT
+            SUM(COALESCE(access_count, 0)) as total_accesses,
+            AVG(COALESCE(access_count, 0)) as avg_accesses,
+            COUNT(CASE WHEN COALESCE(access_count, 0) = 0 THEN 1 END) as never_accessed,
+            COUNT(CASE WHEN COALESCE(access_count, 0) > 0 THEN 1 END) as accessed_at_least_once
+        FROM ideas
+    """)
+    row = cursor.fetchone()
+    stats["access_tracking"] = {
+        "total_accesses": row['total_accesses'] or 0,
+        "avg_accesses_per_idea": round(row['avg_accesses'] or 0, 2),
+        "never_accessed": row['never_accessed'] or 0,
+        "accessed_at_least_once": row['accessed_at_least_once'] or 0
+    }
+
+    # Most accessed ideas (top 5)
+    cursor = db.execute("""
+        SELECT id, content, access_count, last_accessed
+        FROM ideas
+        WHERE access_count > 0
+        ORDER BY access_count DESC
+        LIMIT 5
+    """)
+    stats["most_accessed_ideas"] = [
+        {"id": row['id'], "content": row['content'][:100], "access_count": row['access_count']}
+        for row in cursor
+    ]
+
     db.close()
 
     # Add cache stats

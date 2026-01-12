@@ -1,10 +1,40 @@
 """Vector search operations for memgraph."""
 
+from datetime import datetime
 from typing import Optional
 
 from db.connection import get_db
 from embeddings.openai import get_embedding
 from embeddings.serialize import serialize_embedding
+
+
+def _update_access_tracking(idea_ids: list[int], db=None) -> None:
+    """Update access_count and last_accessed for retrieved ideas.
+
+    Args:
+        idea_ids: List of idea IDs that were accessed
+        db: Optional database connection (will create one if not provided)
+    """
+    if not idea_ids:
+        return
+
+    close_db = False
+    if db is None:
+        db = get_db()
+        close_db = True
+
+    now = datetime.utcnow().isoformat()
+    placeholders = ','.join('?' * len(idea_ids))
+    db.execute(f"""
+        UPDATE ideas
+        SET access_count = access_count + 1,
+            last_accessed = ?
+        WHERE id IN ({placeholders})
+    """, [now] + idea_ids)
+    db.commit()
+
+    if close_db:
+        db.close()
 
 
 def search_ideas(
@@ -44,6 +74,10 @@ def search_ideas(
         results.append(dict(row))
         if len(results) >= limit:
             break
+
+    # Update access tracking for returned results
+    if results:
+        _update_access_tracking([r['id'] for r in results], db)
 
     db.close()
     return results
@@ -136,6 +170,10 @@ def find_similar_ideas(
         results.append(dict(row))
         if len(results) >= limit:
             break
+
+    # Update access tracking for returned results
+    if results:
+        _update_access_tracking([r['id'] for r in results], db)
 
     db.close()
     return results

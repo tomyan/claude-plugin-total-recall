@@ -48,11 +48,11 @@ Each extraction is a separate commit:
 
 ### 2.1 Access Tracking (foundation for working memory & forgetting)
 
-- [ ] **2.1a** Add `access_count` column to ideas table (migration)
-- [ ] **2.1b** Increment access_count when idea returned by search
-- [ ] **2.1c** Add `last_accessed` column to ideas table
-- [ ] **2.1d** Update last_accessed on search retrieval
-- [ ] **2.1e** Add `stats` output showing most/least accessed ideas
+- [x] **2.1a** Add `access_count` column to ideas table (migration)
+- [x] **2.1b** Increment access_count when idea returned by search
+- [x] **2.1c** Add `last_accessed` column to ideas table
+- [x] **2.1d** Update last_accessed on search retrieval
+- [x] **2.1e** Add `stats` output showing most/least accessed ideas
 
 **Done when:** Every search updates access tracking, visible in stats.
 
@@ -198,10 +198,10 @@ Each extraction is a separate commit:
 - [x] Remove LLM fallbacks (HyDE, suggest_topic_name, etc.)
 
 ### In Progress
-- None (Phase 1.2 complete!)
+- None (Phase 2.1 complete!)
 
 ### Up Next
-- 2.1a - Add access_count column to ideas table
+- 2.2a - Create working_memory table
 
 ---
 
