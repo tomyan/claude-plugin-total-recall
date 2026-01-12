@@ -150,6 +150,7 @@ class TestEmbeddingRelations:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -194,6 +195,7 @@ class TestEmbeddingRelations:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -226,6 +228,7 @@ class TestEmbeddingRelations:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -268,6 +271,7 @@ class TestSemanticTopicShift:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
 
         # Initialize database schema
@@ -505,6 +509,7 @@ class TestQuestionAnswered:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -608,6 +613,7 @@ class TestRelationAutoDetection:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -686,6 +692,7 @@ class TestSubtopicHierarchy:
         from indexer import index_transcript
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -729,6 +736,7 @@ class TestSubtopicHierarchy:
         from indexer import index_transcript
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 

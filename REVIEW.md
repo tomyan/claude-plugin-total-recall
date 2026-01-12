@@ -73,7 +73,7 @@ All ideas are encoded equally. Research shows memory encoding strength varies wi
 ### What's State-of-the-Art
 
 **HyDE (Hypothetical Document Embeddings)**
-Using LLM to generate a hypothetical answer before searching is a proven technique from recent research (Gao et al., 2022). Implementation correctly falls back to heuristics when LLM unavailable.
+Using LLM to generate a hypothetical answer before searching is a proven technique from recent research (Gao et al., 2022). Implementation requires working LLM - fails explicitly if Claude CLI unavailable so user knows to fix the issue.
 
 **Intent Classification Pipeline**
 The pattern-first, LLM-fallback approach is efficient. Most intents can be detected with regex; LLM is reserved for ambiguous cases.

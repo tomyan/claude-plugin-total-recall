@@ -66,6 +66,7 @@ class TestDatabaseErrors:
         readonly_path.chmod(0o444)
 
         db_path = readonly_path / "subdir" / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
 
         with pytest.raises(MemgraphError) as exc_info:
@@ -83,6 +84,7 @@ class TestDatabaseErrors:
         db_path = tmp_path / "corrupted.db"
         # Write invalid SQLite header to cause failure on query
         db_path.write_bytes(b"not a valid sqlite database" + b"\x00" * 100)
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
 
         # SQLite may not fail on connect, but will fail on execute
@@ -118,6 +120,7 @@ class TestIndexerErrors:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
 
         # Create transcript with some bad JSON
@@ -147,6 +150,7 @@ class TestCLIErrors:
 
         # Set up working database first
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -167,6 +171,7 @@ class TestCLIErrors:
         # Point to corrupted database
         db_path = tmp_path / "corrupted.db"
         db_path.write_text("invalid")
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
 
         from cli import run_stats_command

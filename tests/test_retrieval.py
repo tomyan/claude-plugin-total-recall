@@ -18,6 +18,7 @@ class TestHyDE:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -67,18 +68,18 @@ class TestHyDE:
         mock_claude.assert_called_once()
         assert result == "JWT auth with refresh tokens"
 
-    def test_hyde_falls_back_on_llm_error(self, monkeypatch):
-        """HyDE generation falls back to heuristic on LLM error."""
+    def test_hyde_raises_on_llm_error(self, monkeypatch):
+        """HyDE generation raises MemgraphError on LLM failure."""
         import memory_db
 
         mock_claude = MagicMock(side_effect=Exception("Claude CLI error"))
         monkeypatch.setattr("memory_db.claude_complete", mock_claude)
 
-        result = memory_db.generate_hypothetical_doc("how does auth work?")
+        with pytest.raises(memory_db.MemgraphError) as exc_info:
+            memory_db.generate_hypothetical_doc("how does auth work?")
 
-        # Should return heuristic result, not raise
-        assert "auth" in result.lower()
-        assert len(result) > 20  # Should be a meaningful response
+        assert exc_info.value.error_code == "hyde_generation_error"
+        assert "Claude CLI error" in str(exc_info.value)
 
 
 class TestGraphExpansion:
@@ -88,6 +89,7 @@ class TestGraphExpansion:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -153,6 +155,7 @@ class TestTemporalFiltering:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -260,10 +263,11 @@ class TestEmbeddingCache:
     def test_cache_persistence_save_load(self, tmp_path):
         """Cache can be saved to and loaded from disk."""
         import memory_db
+        from embeddings import cache as cache_module
 
         cache_file = tmp_path / "cache.json"
-        original_path = memory_db.CACHE_PATH
-        memory_db.CACHE_PATH = cache_file
+        original_path = cache_module.CACHE_PATH
+        cache_module.CACHE_PATH = cache_file
 
         try:
             # Add some entries
@@ -284,22 +288,23 @@ class TestEmbeddingCache:
             assert memory_db._embedding_cache["text1"][0] == 0.1
             assert memory_db._embedding_cache["text2"][0] == 0.2
         finally:
-            memory_db.CACHE_PATH = original_path
+            cache_module.CACHE_PATH = original_path
             memory_db.clear_embedding_cache()
 
     def test_cache_load_handles_missing_file(self, tmp_path):
         """Loading from missing file doesn't error."""
         import memory_db
+        from embeddings import cache as cache_module
 
         cache_file = tmp_path / "nonexistent.json"
-        original_path = memory_db.CACHE_PATH
-        memory_db.CACHE_PATH = cache_file
+        original_path = cache_module.CACHE_PATH
+        cache_module.CACHE_PATH = cache_file
 
         try:
             memory_db.clear_embedding_cache()
             memory_db.load_embedding_cache()  # Should not raise
         finally:
-            memory_db.CACHE_PATH = original_path
+            cache_module.CACHE_PATH = original_path
 
 
 class TestBatchEmbedding:
@@ -308,6 +313,7 @@ class TestBatchEmbedding:
     def test_batch_embedding_returns_list(self, monkeypatch):
         """Batch embedding returns a list of embeddings."""
         import memory_db
+        from embeddings import openai as openai_module
 
         memory_db.clear_embedding_cache()
         monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
@@ -318,7 +324,7 @@ class TestBatchEmbedding:
         mock_client = MagicMock()
         mock_client.embeddings.create.return_value = mock_response
         mock_openai = MagicMock(return_value=mock_client)
-        monkeypatch.setattr("memory_db.OpenAI", mock_openai)
+        monkeypatch.setattr(openai_module, "OpenAI", mock_openai)
 
         results = memory_db.get_embeddings_batch(["text1", "text2", "text3"])
 
@@ -330,6 +336,7 @@ class TestBatchEmbedding:
     def test_batch_uses_cache(self, monkeypatch):
         """Batch embedding uses cache for known texts."""
         import memory_db
+        from embeddings import openai as openai_module
 
         memory_db.clear_embedding_cache()
         monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
@@ -343,7 +350,7 @@ class TestBatchEmbedding:
         mock_client = MagicMock()
         mock_client.embeddings.create.return_value = mock_response
         mock_openai = MagicMock(return_value=mock_client)
-        monkeypatch.setattr("memory_db.OpenAI", mock_openai)
+        monkeypatch.setattr(openai_module, "OpenAI", mock_openai)
 
         results = memory_db.get_embeddings_batch(["text1", "cached_text", "text2"])
 
@@ -365,6 +372,7 @@ class TestBatchEmbedding:
     def test_batch_all_cached(self, monkeypatch):
         """Batch embedding returns early when all texts are cached."""
         import memory_db
+        from embeddings import openai as openai_module
 
         memory_db.clear_embedding_cache()
         monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
@@ -374,7 +382,7 @@ class TestBatchEmbedding:
         memory_db._embedding_cache["text2"] = [0.2] * 1536
 
         mock_openai = MagicMock()
-        monkeypatch.setattr("memory_db.OpenAI", mock_openai)
+        monkeypatch.setattr(openai_module, "OpenAI", mock_openai)
 
         results = memory_db.get_embeddings_batch(["text1", "text2"])
 
@@ -447,6 +455,7 @@ class TestStats:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -474,6 +483,7 @@ class TestStats:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -506,6 +516,7 @@ class TestRelationTraversal:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -544,6 +555,7 @@ class TestRelationTraversal:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -565,6 +577,7 @@ class TestRelationTraversal:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -576,6 +589,7 @@ class TestRelationTraversal:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -622,6 +636,7 @@ class TestSimilarIdeas:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -663,6 +678,7 @@ class TestSimilarIdeas:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -678,6 +694,7 @@ class TestGraphRevision:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
         monkeypatch.setattr("memory_db.get_embedding", lambda t, use_cache=True: [0.1] * 1536)
@@ -701,6 +718,7 @@ class TestGraphRevision:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
         monkeypatch.setattr("memory_db.get_embedding", lambda t, use_cache=True: [0.1] * 1536)
@@ -729,6 +747,7 @@ class TestGraphRevision:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
         monkeypatch.setattr("memory_db.get_embedding", lambda t, use_cache=True: [0.1] * 1536)
@@ -753,6 +772,7 @@ class TestGraphRevision:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
         monkeypatch.setattr("memory_db.get_embedding", lambda t, use_cache=True: [0.1] * 1536)
@@ -771,6 +791,7 @@ class TestGraphRevision:
         import memory_db
 
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         memory_db.init_db()
 
@@ -800,6 +821,7 @@ class TestExportImport:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -943,6 +965,7 @@ class TestGetContext:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -1027,6 +1050,7 @@ class TestTemporalSearch:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 
@@ -1077,6 +1101,7 @@ class TestListSessions:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         return db_path
 

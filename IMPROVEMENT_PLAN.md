@@ -1,802 +1,213 @@
 # Memgraph Improvement Plan
 
-Based on the expert review, this document outlines the implementation plan for all identified improvements using Test-Driven Development with adversarial review cycles.
+Based on the expert review, this document outlines the implementation plan using **elephant carpaccio** - the thinnest possible vertical slices that each deliver value independently.
 
-## Development Methodology
+## Principles
 
-Each improvement follows this cycle:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  1. RED: Write failing tests that specify desired behavior  │
-│     ↓                                                       │
-│  2. ADVERSARIAL REVIEW: Challenge test coverage & design    │
-│     ↓                                                       │
-│  3. GREEN: Implement minimum code to pass tests             │
-│     ↓                                                       │
-│  4. ADVERSARIAL REVIEW: Challenge implementation quality    │
-│     ↓                                                       │
-│  5. REFACTOR: Improve code without changing behavior        │
-│     ↓                                                       │
-│  6. ADVERSARIAL REVIEW: Any more refactors needed?          │
-│     ↓ (loop until clean)                                    │
-│  7. COMMIT & PUSH                                           │
-└─────────────────────────────────────────────────────────────┘
-```
+1. **Each slice is deployable** - Can be committed and used immediately
+2. **Each slice delivers value** - Even if small, it improves something
+3. **Each slice takes hours, not days** - If it takes longer, slice thinner
+4. **Tests pass after every slice** - Never break existing functionality
 
 ---
 
-## Phase 1: Code Organization (Foundation)
+## Phase 1: Code Organization
 
-### 1.1 Split memory_db.py into Modules
+### 1.1 Module Extraction (one at a time)
 
-**Goal:** Break 5,400-line monolith into focused modules for maintainability.
+Each extraction is a separate commit:
 
-**Target Structure:**
-```
-skills/memgraph/src/
-├── __init__.py
-├── cli.py              # CLI entry point (existing)
-├── indexer.py          # Indexing pipeline (existing)
-├── transcript.py       # Transcript parsing (existing)
-├── db/
-│   ├── __init__.py
-│   ├── connection.py   # Database connection, initialization
-│   ├── schema.py       # Table definitions, migrations
-│   ├── ideas.py        # Idea CRUD operations
-│   ├── spans.py        # Span CRUD operations
-│   ├── topics.py       # Topic CRUD operations
-│   ├── relations.py    # Relation operations
-│   └── entities.py     # Entity operations
-├── search/
-│   ├── __init__.py
-│   ├── vector.py       # Vector search (sqlite-vec)
-│   ├── keyword.py      # FTS5 keyword search
-│   ├── hybrid.py       # Hybrid search (RRF)
-│   ├── hyde.py         # HyDE search
-│   └── temporal.py     # Temporal search
-├── embeddings/
-│   ├── __init__.py
-│   ├── provider.py     # Abstract embedding provider
-│   ├── openai.py       # OpenAI implementation
-│   ├── cache.py        # Embedding cache
-│   └── local.py        # Future: local model support
-├── llm/
-│   ├── __init__.py
-│   ├── claude.py       # Claude CLI integration
-│   └── tasks.py        # Topic naming, summarization, etc.
-├── analysis/
-│   ├── __init__.py
-│   ├── intent.py       # Intent classification
-│   ├── entities.py     # Entity extraction
-│   └── topics.py       # Topic detection, shift detection
-└── config.py           # Centralized configuration
-```
+- [x] **1.1a** Extract `errors.py` - MemgraphError class (~20 lines)
+- [x] **1.1b** Extract `llm/claude.py` - claude_complete function (~80 lines)
+- [ ] **1.1c** Extract `config.py` - Just constants: DB_PATH, EMBEDDING_MODEL, EMBEDDING_DIM
+- [ ] **1.1d** Extract `embeddings/cache.py` - Cache functions only (save/load/clear/stats)
+- [ ] **1.1e** Extract `embeddings/openai.py` - get_embedding, get_embeddings_batch
+- [ ] **1.1f** Extract `embeddings/serialize.py` - serialize/deserialize_embedding
+- [ ] **1.1g** Extract `db/connection.py` - get_db only (not init_db yet)
+- [ ] **1.1h** Extract `db/schema.py` - init_db and schema creation
+- [ ] **1.1i** Extract `db/migrations.py` - _migrate_schema, _migrate_spans_to_topics
+- [ ] **1.1j** Extract `search/vector.py` - search_ideas, find_similar_ideas
+- [ ] **1.1k** Extract `search/hybrid.py` - hybrid_search
+- [ ] **1.1l** Extract `search/hyde.py` - generate_hypothetical_doc, hyde_search
 
-**TDD Approach:**
-```
-RED:
-  - Write tests importing from new module paths
-  - Tests should fail with ImportError initially
+**Done when:** Each module works independently, memory_db.py imports and re-exports for backward compatibility, all 164 tests pass.
 
-GREEN:
-  - Create module structure
-  - Move functions to appropriate modules
-  - Add re-exports to maintain backward compatibility
+### 1.2 Configuration (incremental)
 
-REFACTOR:
-  - Remove circular dependencies
-  - Ensure consistent error handling across modules
-  - Add module-level docstrings
-```
+- [ ] **1.2a** Create `config.py` with dataclass, hardcoded defaults only
+- [ ] **1.2b** Replace ONE hardcoded threshold (topic_shift_threshold) with config
+- [ ] **1.2c** Add config file loading (TOML)
+- [ ] **1.2d** Add env var override for one value (prove pattern)
+- [ ] **1.2e** Migrate remaining thresholds to config (batch)
 
-**Adversarial Review Questions:**
-- Are module boundaries clean? No circular imports?
-- Is backward compatibility maintained for existing callers?
-- Are public APIs clearly defined in `__init__.py`?
-- Is there a single source of truth for each concept?
+**Done when:** `memgraph.toml` can override any threshold, env vars work.
 
 ---
 
-### 1.2 Centralize Configuration
+## Phase 2: Cognitive Improvements
 
-**Goal:** Replace hardcoded thresholds with a configuration system.
+### 2.1 Access Tracking (foundation for working memory & forgetting)
 
-**Config Schema:**
-```python
-@dataclass
-class MemgraphConfig:
-    # Topic Detection
-    topic_shift_threshold: float = 0.55
-    topic_shift_strong_delta: float = 0.15
-    topic_shift_history_size: int = 3
-    topic_shift_min_divergent: int = 2
+- [ ] **2.1a** Add `access_count` column to ideas table (migration)
+- [ ] **2.1b** Increment access_count when idea returned by search
+- [ ] **2.1c** Add `last_accessed` column to ideas table
+- [ ] **2.1d** Update last_accessed on search retrieval
+- [ ] **2.1e** Add `stats` output showing most/least accessed ideas
 
-    # Relation Detection
-    relation_similarity_threshold: float = 0.75
-    relation_lookback_count: int = 10
+**Done when:** Every search updates access tracking, visible in stats.
 
-    # Cross-Session Linking
-    cross_session_link_threshold: float = 0.80
+### 2.2 Working Memory (thin slices)
 
-    # Embedding
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dimensions: int = 1536
-    embedding_cache_size: int = 10000
+- [ ] **2.2a** Create `working_memory` table (session, idea_id, activation, last_access)
+- [ ] **2.2b** Record activation when idea is retrieved (activation = 1.0)
+- [ ] **2.2c** Add `context` command showing currently active ideas
+- [ ] **2.2d** Apply time decay to activations on session start
+- [ ] **2.2e** Add `--boost-active` flag to search (re-rank by activation)
+- [ ] **2.2f** Make boost the default, add `--no-boost` to disable
 
-    # Search
-    hybrid_bm25_weight: float = 0.3
-    hybrid_vector_weight: float = 0.7
-    default_search_limit: int = 10
+**Done when:** Search results are influenced by recent activity.
 
-    # Consolidation (Phase 2)
-    consolidation_age_threshold_days: int = 30
-    consolidation_min_ideas: int = 3
+### 2.3 Soft Forgetting (thin slices)
 
-    # Forgetting (Phase 2)
-    decay_rate: float = 0.1
-    min_retention_days: int = 7
+- [ ] **2.3a** Add `forgotten` BOOLEAN column to ideas (default FALSE)
+- [ ] **2.3b** Exclude forgotten=TRUE from search results
+- [ ] **2.3c** Add `forget <idea_id>` command (sets forgotten=TRUE)
+- [ ] **2.3d** Add `unforget <idea_id>` command (sets forgotten=FALSE)
+- [ ] **2.3e** Add `--include-forgotten` flag to search
+- [ ] **2.3f** Add `forgotten` command listing forgotten ideas
 
-    # Working Memory (Phase 2)
-    working_memory_capacity: int = 50
-    working_memory_decay_rate: float = 0.1
-```
+**Done when:** Users can manually forget/unforget ideas.
 
-**TDD Approach:**
-```
-RED:
-  - Test loading config from file
-  - Test environment variable overrides
-  - Test default values
-  - Test validation (e.g., thresholds in 0-1 range)
+### 2.4 Auto-Forget Candidates (thin slices)
 
-GREEN:
-  - Implement config dataclass
-  - Add file loading (YAML or TOML)
-  - Add env var override support
+- [ ] **2.4a** Add `retention_score()` function (recency + access_count + importance)
+- [ ] **2.4b** Add `forgettable` command showing low-retention ideas (dry-run)
+- [ ] **2.4c** Add `--execute` flag to `forgettable` to actually forget
+- [ ] **2.4d** Add `--threshold` flag to control retention cutoff
+- [ ] **2.4e** Never auto-forget decisions/conclusions (importance override)
 
-REFACTOR:
-  - Replace all hardcoded values with config references
-  - Add config to function signatures where needed
-```
+**Done when:** `forgettable --execute` safely removes low-value ideas.
 
----
+### 2.5 Consolidation (thin slices)
 
-## Phase 2: Cognitive Improvements (Core Value)
+- [ ] **2.5a** Add `consolidated_into` column to ideas table
+- [ ] **2.5b** Add `is_consolidated` BOOLEAN column (marks summary ideas)
+- [ ] **2.5c** Add `consolidatable` command showing candidate groups (dry-run)
+- [ ] **2.5d** Add `should_preserve()` - protect decisions, conclusions, high-confidence
+- [ ] **2.5e** Add `consolidate <topic_id>` command (creates summary, links originals)
+- [ ] **2.5f** Exclude consolidated originals from search (show summary instead)
+- [ ] **2.5g** Add `--show-originals` flag to see pre-consolidation ideas
 
-### 2.1 Working Memory
-
-**Goal:** Track recently accessed ideas to provide context-aware retrieval.
-
-**Design:**
-```python
-class WorkingMemory:
-    """
-    Tracks activation levels of recently accessed ideas.
-
-    Cognitive model:
-    - Ideas are activated when retrieved or mentioned
-    - Activation decays over time
-    - High-activation ideas are boosted in search
-    - Provides "what we've been discussing" context
-    """
-
-    def __init__(self, capacity: int, decay_rate: float):
-        self.activations: dict[int, float] = {}
-        self.capacity = capacity
-        self.decay_rate = decay_rate
-        self.access_times: dict[int, datetime] = {}
-
-    def activate(self, idea_id: int, strength: float = 1.0) -> None:
-        """Boost activation when idea is accessed."""
-
-    def decay_all(self) -> None:
-        """Apply time-based decay to all activations."""
-
-    def get_active_context(self, limit: int = 10) -> list[int]:
-        """Get most active idea IDs for context."""
-
-    def boost_search_results(self, results: list[dict]) -> list[dict]:
-        """Re-rank search results by activation."""
-
-    def save_state(self) -> None:
-        """Persist to database for session continuity."""
-
-    def load_state(self, session: str) -> None:
-        """Restore from database."""
-```
-
-**Database Addition:**
-```sql
-CREATE TABLE working_memory (
-    session TEXT NOT NULL,
-    idea_id INTEGER REFERENCES ideas(id),
-    activation REAL NOT NULL,
-    last_access TEXT NOT NULL,
-    PRIMARY KEY (session, idea_id)
-);
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test activation increases on access
-  - Test decay reduces activation over time
-  - Test capacity limit evicts lowest activation
-  - Test search boost increases scores of active ideas
-  - Test persistence across sessions
-
-GREEN:
-  - Implement WorkingMemory class
-  - Add database table and persistence
-  - Integrate with search pipeline
-
-REFACTOR:
-  - Optimize decay calculation (batch updates)
-  - Add activation strength based on access type (search vs mention)
-```
-
-**Adversarial Review Questions:**
-- Does decay model match cognitive research?
-- Is persistence efficient (not too many DB writes)?
-- Does boost factor distort search quality?
-- How does this interact with temporal search?
-
----
-
-### 2.2 Memory Consolidation
-
-**Goal:** Periodically merge old, similar ideas into higher-level summaries.
-
-**Design:**
-```python
-class MemoryConsolidator:
-    """
-    Consolidates old memories into higher-level representations.
-
-    Cognitive model:
-    - Fresh memories: detailed, specific
-    - Old memories: abstracted, gist-based
-    - Important memories (decisions): preserved verbatim
-    - Context memories: consolidated into summaries
-    """
-
-    def consolidate_session(
-        self,
-        session: str,
-        age_threshold_days: int = 30,
-        min_ideas_to_consolidate: int = 3
-    ) -> ConsolidationResult:
-        """
-        Consolidate old ideas in a session.
-
-        Process:
-        1. Find ideas older than threshold
-        2. Group by topic
-        3. For each topic group:
-           a. Separate high-value (decisions, conclusions) from context
-           b. Preserve high-value verbatim
-           c. Summarize context ideas into consolidated idea
-           d. Mark originals as consolidated (not deleted)
-        4. Update embeddings for consolidated ideas
-        """
-
-    def should_preserve(self, idea: dict) -> bool:
-        """
-        Determine if idea should be preserved verbatim.
-
-        Preserve if:
-        - Intent is 'decision' or 'conclusion'
-        - Confidence > 0.8
-        - Has outgoing 'supersedes' relation (important evolution)
-        - Manually starred by user
-        """
-
-    def generate_consolidation_summary(
-        self,
-        ideas: list[dict],
-        topic_name: str
-    ) -> str:
-        """Use LLM to summarize multiple ideas into one."""
-```
-
-**Database Addition:**
-```sql
-ALTER TABLE ideas ADD COLUMN consolidated_into INTEGER REFERENCES ideas(id);
-ALTER TABLE ideas ADD COLUMN is_consolidated BOOLEAN DEFAULT FALSE;
-ALTER TABLE ideas ADD COLUMN preserve_verbatim BOOLEAN DEFAULT FALSE;
-
-CREATE INDEX idx_ideas_consolidated ON ideas(consolidated_into);
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test old context ideas get consolidated
-  - Test decisions are preserved verbatim
-  - Test consolidated summary contains key points
-  - Test original ideas marked but not deleted
-  - Test search still finds consolidated content
-  - Test consolidation is idempotent
-
-GREEN:
-  - Implement MemoryConsolidator
-  - Add CLI command: `consolidate --session X --age 30`
-  - Add automatic trigger option in hooks
-
-REFACTOR:
-  - Optimize batch processing for large sessions
-  - Add dry-run mode to preview consolidation
-```
-
-**Adversarial Review Questions:**
-- Is the preservation heuristic correct? Missing any important cases?
-- Does consolidation lose important nuance?
-- Can users undo consolidation?
-- How does consolidation affect relation graph?
-
----
-
-### 2.3 Automatic Forgetting
-
-**Goal:** Implement decay-based forgetting to keep index lean and improve retrieval.
-
-**Design:**
-```python
-class ForgettingMechanism:
-    """
-    Implements strategic forgetting based on memory research.
-
-    Factors affecting retention:
-    - Recency: newer memories decay slower
-    - Frequency: often-accessed memories are retained
-    - Importance: high-confidence decisions never forgotten
-    - Relevance: memories related to active work retained
-    """
-
-    def calculate_retention_score(self, idea: dict) -> float:
-        """
-        Calculate how strongly an idea should be retained.
-
-        Score = (
-            0.3 * recency_score +      # Based on created_at
-            0.3 * access_score +        # Based on retrieval count
-            0.2 * importance_score +    # Based on intent + confidence
-            0.2 * relevance_score       # Based on working memory activation
-        )
-        """
-
-    def identify_forgettable(
-        self,
-        session: str,
-        threshold: float = 0.2,
-        min_age_days: int = 7
-    ) -> list[int]:
-        """Find ideas below retention threshold."""
-
-    def forget(
-        self,
-        idea_ids: list[int],
-        mode: Literal["soft", "hard"] = "soft"
-    ) -> int:
-        """
-        Forget ideas.
-
-        Soft: Mark as forgotten, exclude from search, keep in DB
-        Hard: Delete from database entirely
-        """
-```
-
-**Database Addition:**
-```sql
-ALTER TABLE ideas ADD COLUMN access_count INTEGER DEFAULT 0;
-ALTER TABLE ideas ADD COLUMN last_accessed TEXT;
-ALTER TABLE ideas ADD COLUMN forgotten BOOLEAN DEFAULT FALSE;
-
-CREATE INDEX idx_ideas_forgotten ON ideas(forgotten);
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test recency affects retention score
-  - Test frequently accessed ideas retained
-  - Test decisions never auto-forgotten
-  - Test soft forget excludes from search
-  - Test hard forget removes from database
-  - Test working memory activation boosts retention
-
-GREEN:
-  - Implement ForgettingMechanism
-  - Add CLI command: `forget --session X --threshold 0.2`
-  - Track access_count on search retrieval
-
-REFACTOR:
-  - Batch retention calculation for efficiency
-  - Add visualization of retention scores
-```
+**Done when:** Old context ideas can be consolidated into summaries.
 
 ---
 
 ## Phase 3: Search Improvements
 
-### 3.1 Query Decomposition
+### 3.1 Intent Filtering (already partially exists)
 
-**Goal:** Parse complex queries into atomic sub-queries for better retrieval.
+- [ ] **3.1a** Verify `--intent` flag works on all search commands
+- [ ] **3.1b** Add `decisions` shortcut command (`search --intent decision`)
+- [ ] **3.1c** Add `questions` shortcut showing unanswered questions
+- [ ] **3.1d** Add `todos` shortcut showing todo items
 
-**Design:**
-```python
-class QueryDecomposer:
-    """
-    Decomposes complex queries into atomic sub-queries.
+**Done when:** Quick access to filtered search by intent.
 
-    Handles:
-    - Multiple topics: "auth and database" → ["auth", "database"]
-    - Relationships: "how X relates to Y" → search both, find connections
-    - Temporal comparisons: "before vs after" → two temporal searches
-    - Aggregations: "all decisions about X" → filtered search
-    """
+### 3.2 Query Decomposition (thin slices)
 
-    def decompose(self, query: str) -> DecomposedQuery:
-        """
-        Parse query into components.
+- [ ] **3.2a** Detect "X and Y" pattern, run two searches, merge results
+- [ ] **3.2b** Detect "decisions about X" pattern, apply intent filter
+- [ ] **3.2c** Detect "how X relates to Y" pattern, find connecting ideas
+- [ ] **3.2d** Add `--decompose` flag to show query interpretation
 
-        Returns:
-            DecomposedQuery(
-                sub_queries=["auth implementation", "database schema"],
-                relationship_type="relates_to",
-                temporal_constraint=None,
-                aggregation="all",
-                intent_filter="decision"
-            )
-        """
+**Done when:** Complex queries automatically decomposed.
 
-    def execute_decomposed(
-        self,
-        decomposed: DecomposedQuery,
-        limit: int = 10
-    ) -> list[dict]:
-        """
-        Execute sub-queries and combine results.
+### 3.3 Relevance Verification (thin slices)
 
-        For relationship queries:
-        1. Search for each sub-query
-        2. Find ideas that connect the result sets
-        3. Rank by connection strength
-        """
-```
+- [ ] **3.3a** Add `--verify` flag that uses LLM to score results 1-5
+- [ ] **3.3b** Filter out results scoring < 3
+- [ ] **3.3c** Show relevance score in output when `--verify` used
+- [ ] **3.3d** Add `--explain` flag for per-result relevance explanation
 
-**TDD Approach:**
-```
-RED:
-  - Test "X and Y" decomposes to two queries
-  - Test "how X relates to Y" finds connecting ideas
-  - Test "decisions about X" applies intent filter
-  - Test combined results are deduplicated
-  - Test ranking reflects all sub-query relevance
+**Done when:** `search --verify` improves precision.
 
-GREEN:
-  - Implement QueryDecomposer with pattern matching
-  - Add LLM fallback for complex queries
-  - Integrate with search CLI
+### 3.4 Multi-Hop Reasoning (thin slices)
 
-REFACTOR:
-  - Cache decomposition for repeated queries
-  - Optimize multi-query execution (parallel)
-```
+- [ ] **3.4a** Add `trace <idea_id>` command showing related ideas (1-hop)
+- [ ] **3.4b** Add `--backward` flag (what led to this idea)
+- [ ] **3.4c** Add `--forward` flag (what followed from this idea)
+- [ ] **3.4d** Add `--hops N` flag for multi-hop traversal
+- [ ] **3.4e** Add `path <from_id> <to_id>` command finding connection
 
----
-
-### 3.2 Relevance Verification
-
-**Goal:** Post-retrieval filtering to improve precision.
-
-**Design:**
-```python
-class RelevanceVerifier:
-    """
-    Uses LLM to verify search result relevance.
-
-    Applied after retrieval to filter out false positives
-    that have high embedding similarity but low semantic relevance.
-    """
-
-    def verify_batch(
-        self,
-        query: str,
-        results: list[dict],
-        threshold: float = 3.0  # 1-5 scale
-    ) -> list[dict]:
-        """
-        Score and filter results by relevance.
-
-        Uses batch LLM call for efficiency:
-        "Rate 1-5 how relevant each result is to the query."
-        """
-
-    def explain_relevance(
-        self,
-        query: str,
-        result: dict
-    ) -> str:
-        """Generate explanation of why result is relevant."""
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test irrelevant results filtered out
-  - Test relevant results retained
-  - Test scores are sensible (decisions about X score high for "decisions about X")
-  - Test batch processing is efficient
-  - Test graceful fallback when LLM unavailable
-
-GREEN:
-  - Implement RelevanceVerifier
-  - Add --verify flag to search commands
-  - Add relevance scores to result output
-
-REFACTOR:
-  - Optimize batch size for LLM calls
-  - Cache verification results for repeated searches
-```
-
----
-
-### 3.3 Multi-Hop Reasoning
-
-**Goal:** Follow relation chains to answer complex queries.
-
-**Design:**
-```python
-class ReasoningTracer:
-    """
-    Traces reasoning chains through the relation graph.
-
-    Enables queries like:
-    - "What led to decision X?" (trace back through builds_on)
-    - "What changed after Y?" (trace forward through supersedes)
-    - "How did we get from A to B?" (find path)
-    """
-
-    def trace_backward(
-        self,
-        idea_id: int,
-        relation_types: list[str] = ["builds_on", "answers"],
-        max_hops: int = 3
-    ) -> list[ReasoningStep]:
-        """Trace what led to this idea."""
-
-    def trace_forward(
-        self,
-        idea_id: int,
-        relation_types: list[str] = ["supersedes", "builds_on"],
-        max_hops: int = 3
-    ) -> list[ReasoningStep]:
-        """Trace what followed from this idea."""
-
-    def find_path(
-        self,
-        from_id: int,
-        to_id: int,
-        max_hops: int = 5
-    ) -> list[ReasoningStep]:
-        """Find connection path between two ideas."""
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test backward trace finds antecedents
-  - Test forward trace finds consequences
-  - Test path finding connects related ideas
-  - Test max_hops limits traversal depth
-  - Test cycles don't cause infinite loops
-
-GREEN:
-  - Implement graph traversal algorithms
-  - Add CLI commands: `trace --backward/--forward <idea_id>`
-  - Add path visualization
-
-REFACTOR:
-  - Optimize with BFS/DFS as appropriate
-  - Add pruning for low-relevance branches
-```
+**Done when:** Can trace reasoning chains through relations.
 
 ---
 
 ## Phase 4: Embedding Abstraction
 
-### 4.1 Provider Abstraction
+### 4.1 Provider Interface (thin slices)
 
-**Goal:** Support multiple embedding providers.
+- [ ] **4.1a** Create `EmbeddingProvider` abstract base class
+- [ ] **4.1b** Refactor OpenAI code to `OpenAIEmbeddings(EmbeddingProvider)`
+- [ ] **4.1c** Add provider selection to config (default: openai)
+- [ ] **4.1d** Add `LocalEmbeddings` stub (raises NotImplementedError)
+- [ ] **4.1e** Implement `LocalEmbeddings` with sentence-transformers
 
-**Design:**
-```python
-class EmbeddingProvider(ABC):
-    """Abstract base for embedding providers."""
-
-    @abstractmethod
-    def embed(self, text: str) -> list[float]:
-        """Generate embedding for text."""
-
-    @abstractmethod
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts."""
-
-    @property
-    @abstractmethod
-    def dimensions(self) -> int:
-        """Return embedding dimensions."""
-
-
-class OpenAIEmbeddings(EmbeddingProvider):
-    """OpenAI text-embedding-3-small provider."""
-
-class LocalEmbeddings(EmbeddingProvider):
-    """Local sentence-transformers provider."""
-
-class CohereEmbeddings(EmbeddingProvider):
-    """Cohere embed-v3 provider."""
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test provider interface contract
-  - Test OpenAI provider works as before
-  - Test local provider returns correct dimensions
-  - Test provider can be swapped via config
-
-GREEN:
-  - Implement abstract base class
-  - Refactor OpenAI code to implement interface
-  - Add local provider stub
-
-REFACTOR:
-  - Ensure cache works across providers
-  - Handle dimension mismatches gracefully
-```
+**Done when:** Can switch embedding providers via config.
 
 ---
 
-## Phase 5: Reflection Mechanism
+## Phase 5: Reflection
 
-### 5.1 Periodic Reflection
+### 5.1 Session Reflection (thin slices)
 
-**Goal:** Generate meta-insights from accumulated memories.
+- [ ] **5.1a** Add `reflect` command generating session summary (LLM)
+- [ ] **5.1b** Store reflection as special idea (intent='reflection')
+- [ ] **5.1c** Add `--days N` flag to reflect on recent activity
+- [ ] **5.1d** Add `insights` command showing stored reflections
+- [ ] **5.1e** Include reflections in search results
 
-**Design:**
-```python
-class ReflectionEngine:
-    """
-    Periodically synthesizes higher-level insights.
+**Done when:** Can generate and retrieve session insights.
 
-    Inspired by Generative Agents (Park et al., 2023):
-    "What did I learn? What patterns emerged?"
-    """
+### 5.2 Topic Reflection (thin slices)
 
-    def reflect_on_session(
-        self,
-        session: str,
-        time_window_days: int = 7
-    ) -> list[Insight]:
-        """
-        Generate insights from recent session activity.
+- [ ] **5.2a** Add `reflect-topic <topic_id>` command
+- [ ] **5.2b** Generate "how understanding evolved" summary
+- [ ] **5.2c** Identify key turning points in topic
+- [ ] **5.2d** Store as topic-linked reflection
 
-        Questions to answer:
-        - What were the main themes this week?
-        - What decisions were made and why?
-        - What problems remain unresolved?
-        - What patterns are emerging?
-        """
-
-    def reflect_on_topic(
-        self,
-        topic_id: int
-    ) -> TopicInsight:
-        """
-        Generate insight about a specific topic's evolution.
-
-        - How has understanding changed?
-        - What were the key turning points?
-        - What's the current state?
-        """
-```
-
-**TDD Approach:**
-```
-RED:
-  - Test reflection identifies main themes
-  - Test reflection summarizes decisions
-  - Test reflection finds unresolved questions
-  - Test insights are stored for retrieval
-
-GREEN:
-  - Implement ReflectionEngine
-  - Add CLI command: `reflect --session X --days 7`
-  - Store insights as special idea type
-
-REFACTOR:
-  - Add scheduled reflection (weekly)
-  - Add reflection quality scoring
-```
+**Done when:** Can reflect on individual topic evolution.
 
 ---
 
-## Implementation Order
+## Progress Tracking
 
-```
-Phase 1: Foundation (Week 1-2)
-├── 1.1 Split memory_db.py
-└── 1.2 Centralize configuration
+### Completed
+- [x] 1.1a - errors.py extracted
+- [x] 1.1b - llm/claude.py extracted
+- [x] Remove LLM fallbacks (HyDE, suggest_topic_name, etc.)
 
-Phase 2: Cognitive Core (Week 3-5)
-├── 2.1 Working Memory
-├── 2.2 Memory Consolidation
-└── 2.3 Automatic Forgetting
+### In Progress
+- [ ] 1.1c - config.py with constants
 
-Phase 3: Search Improvements (Week 6-7)
-├── 3.1 Query Decomposition
-├── 3.2 Relevance Verification
-└── 3.3 Multi-Hop Reasoning
-
-Phase 4: Flexibility (Week 8)
-└── 4.1 Embedding Abstraction
-
-Phase 5: Intelligence (Week 9-10)
-└── 5.1 Reflection Mechanism
-```
+### Up Next
+- 1.1d - embeddings/cache.py
 
 ---
 
 ## Success Criteria
 
-### Phase 1
-- [ ] No file > 1000 lines
-- [ ] All imports work from new paths
-- [ ] All existing tests pass
-- [ ] Config file supported
-
-### Phase 2
-- [ ] Working memory boosts recent context
-- [ ] Old memories consolidated without data loss
-- [ ] Forgetting reduces index size by 20%+
-- [ ] Search quality maintained or improved
-
-### Phase 3
-- [ ] Complex queries return better results
-- [ ] Precision improved by relevance verification
-- [ ] Reasoning chains visualized
-
-### Phase 4
-- [ ] Local embedding model works
-- [ ] Provider swappable via config
-
-### Phase 5
-- [ ] Weekly insights generated
-- [ ] Insights improve retrieval context
-
----
+Each slice must:
+1. Pass all 164 existing tests
+2. Be independently useful (even if small)
+3. Not require other slices to function
+4. Have clear "done" definition
 
 ## Risk Mitigation
 
 | Risk | Mitigation |
 |------|------------|
-| Breaking existing functionality | Comprehensive test coverage before refactoring |
-| Performance regression | Benchmark before/after each phase |
-| Data loss in consolidation | Soft delete, backup before major changes |
-| LLM costs | Rate limiting, caching, local fallbacks |
-| Complexity creep | Strict module boundaries, documentation |
-
----
-
-## Review Checkpoints
-
-After each phase:
-1. Run full test suite (must pass 100%)
-2. Run performance benchmarks
-3. Manual testing of key workflows
-4. Code review for maintainability
-5. Documentation update
-6. Version bump and release notes
+| Breaking changes | Import and re-export for backward compatibility |
+| Circular imports | Extract in dependency order (errors → config → db → search) |
+| Lost functionality | Run full test suite after every slice |
+| Scope creep | If slice takes > 2 hours, slice thinner |

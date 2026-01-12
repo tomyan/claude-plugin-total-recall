@@ -6,164 +6,34 @@ Uses OpenAI for embeddings, Claude CLI for LLM tasks.
 """
 
 import json
-import logging
 import os
 import sqlite3
 import struct
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
 import sqlite_vec
 from openai import OpenAI
 
-
-# Database location
-DB_PATH = Path.home() / ".claude-plugin-memgraph" / "memory.db"
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
-
-# Logging setup
-LOG_PATH = Path.home() / ".claude-plugin-memgraph" / "memgraph.log"
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-    ]
-)
-logger = logging.getLogger("memgraph")
+# Import config - constants and logger
+from config import DB_PATH, EMBEDDING_MODEL, EMBEDDING_DIM, LOG_PATH, logger  # noqa: E402
 
 
 # =============================================================================
 # Custom Exception
 # =============================================================================
 
-class MemgraphError(Exception):
-    """Custom exception for memgraph errors with structured info."""
-
-    def __init__(
-        self,
-        message: str,
-        error_code: str,
-        details: Optional[dict[str, Any]] = None
-    ):
-        super().__init__(message)
-        self.error_code = error_code
-        self.details = details or {}
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "error": str(self),
-            "error_code": self.error_code,
-            "details": self.details,
-        }
+from errors import MemgraphError  # noqa: E402 - imported here for backward compatibility
 
 
 # =============================================================================
 # Claude CLI Integration
 # =============================================================================
 
-def claude_complete(prompt: str, system: str = None) -> str:
-    """Call Claude CLI non-interactively for LLM tasks.
+from llm.claude import claude_complete  # noqa: E402 - imported here for backward compatibility
 
-    Uses `claude -p` with `--no-session-persistence` to avoid creating
-    session transcripts that would pollute the index.
-
-    Args:
-        prompt: The user prompt
-        system: Optional system prompt
-
-    Returns:
-        The response text
-
-    Raises:
-        MemgraphError: If Claude CLI fails
-    """
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence"]
-    if system:
-        cmd.extend(["--system-prompt", system])
-
-    # Set MEMGRAPH_INTERNAL to prevent hooks from re-indexing during this call
-    env = os.environ.copy()
-    env["MEMGRAPH_INTERNAL"] = "1"
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,  # 60 second timeout
-            env=env
-        )
-
-        if result.returncode != 0:
-            error_msg = result.stderr or "Unknown error"
-            logger.warning(f"Claude CLI failed: {error_msg}")
-            raise MemgraphError(
-                f"Claude CLI failed: {error_msg}",
-                "claude_cli_error",
-                {"stderr": result.stderr, "returncode": result.returncode}
-            )
-
-        # Parse JSON output
-        # Claude CLI --output-format json returns an array of event objects:
-        # [{"type":"system",...}, {"type":"assistant",...}, {"type":"result","result":"..."}]
-        try:
-            response = json.loads(result.stdout)
-            # Find the result event in the array
-            if isinstance(response, list):
-                for event in response:
-                    if isinstance(event, dict) and event.get("type") == "result":
-                        return event.get("result", "")
-                # No result event found
-                logger.warning("No result event in Claude CLI output")
-                return ""
-            # Fallback for unexpected format
-            return response.get("result", "") if isinstance(response, dict) else ""
-        except json.JSONDecodeError:
-            # If not JSON, return raw stdout (fallback)
-            return result.stdout.strip()
-
-    except subprocess.TimeoutExpired:
-        raise MemgraphError(
-            "Claude CLI timed out after 60 seconds",
-            "claude_cli_timeout"
-        )
-    except FileNotFoundError:
-        raise MemgraphError(
-            "Claude CLI not found. Ensure 'claude' is in PATH.",
-            "claude_cli_not_found"
-        )
-
-
-def get_db() -> sqlite3.Connection:
-    """Get database connection with sqlite-vec loaded."""
-    try:
-        db = sqlite3.connect(str(DB_PATH))
-        db.enable_load_extension(True)
-        sqlite_vec.load(db)
-        db.enable_load_extension(False)
-        db.row_factory = sqlite3.Row
-        return db
-    except sqlite3.DatabaseError as e:
-        logger.error(f"Database error: {e}")
-        raise MemgraphError(
-            f"Failed to open database at {DB_PATH}: {e}",
-            "database_error",
-            {"path": str(DB_PATH), "original_error": str(e)}
-        ) from e
-    except Exception as e:
-        logger.error(f"Unexpected error opening database: {e}")
-        raise MemgraphError(
-            f"Failed to open database: {e}",
-            "database_error",
-            {"original_error": str(e)}
-        ) from e
+# Import database connection from db module
+from db.connection import get_db  # noqa: E402
 
 
 def init_db():
@@ -573,193 +443,24 @@ def migrate_timestamps_from_transcripts() -> dict:
     }
 
 
-def serialize_embedding(embedding: list[float]) -> bytes:
-    """Serialize embedding to bytes for sqlite-vec."""
-    return struct.pack(f'{len(embedding)}f', *embedding)
+# Import serialization from embeddings module
+from embeddings.serialize import serialize_embedding, deserialize_embedding  # noqa: E402
 
 
-def deserialize_embedding(data: bytes, dim: int = 1536) -> list[float]:
-    """Deserialize embedding from bytes."""
-    return list(struct.unpack(f'{dim}f', data))
+# Import cache functions from embeddings module
+from embeddings.cache import (  # noqa: E402
+    CACHE_PATH,
+    clear_embedding_cache,
+    get_embedding_cache_stats,
+    save_embedding_cache,
+    load_embedding_cache,
+    get_cache,
+)
+# Re-export cache for backward compatibility (tests access this directly)
+_embedding_cache = get_cache()
 
-
-# LRU cache for embeddings to reduce API calls
-_embedding_cache: dict[str, list[float]] = {}
-_CACHE_MAX_SIZE = 1000
-CACHE_PATH = Path.home() / ".claude-plugin-memgraph" / "embedding_cache.json"
-
-
-def get_embedding(text: str, use_cache: bool = True) -> list[float]:
-    """Get embedding from OpenAI with caching.
-
-    Args:
-        text: Text to embed
-        use_cache: Whether to use cache (default True)
-
-    Returns:
-        Embedding vector (1536 floats)
-
-    Raises:
-        MemgraphError: If API key is missing or API call fails
-    """
-    # Check cache first
-    if use_cache and text in _embedding_cache:
-        return _embedding_cache[text]
-
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
-    if not api_key:
-        raise MemgraphError(
-            "OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set. "
-            "Set this to your OpenAI API key to enable memory search.",
-            "missing_api_key"
-        )
-
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text
-        )
-        embedding = response.data[0].embedding
-    except Exception as e:
-        logger.error(f"Embedding API call failed: {e}")
-        raise MemgraphError(
-            f"Failed to get embedding from OpenAI: {e}",
-            "embedding_failed",
-            {"model": EMBEDDING_MODEL, "original_error": str(e)}
-        ) from e
-
-    # Cache the result (with simple LRU eviction)
-    if use_cache:
-        if len(_embedding_cache) >= _CACHE_MAX_SIZE:
-            # Remove oldest entry (first key)
-            oldest_key = next(iter(_embedding_cache))
-            del _embedding_cache[oldest_key]
-        _embedding_cache[text] = embedding
-
-    return embedding
-
-
-def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
-    """Get embeddings for multiple texts in a single API call.
-
-    More efficient than calling get_embedding() for each text separately.
-
-    Args:
-        texts: List of texts to embed
-        use_cache: Whether to use cache (default True)
-
-    Returns:
-        List of embedding vectors, one per input text
-
-    Raises:
-        MemgraphError: If API key is missing or API call fails
-    """
-    if not texts:
-        return []
-
-    # Check cache and identify texts that need embedding
-    results: list[Optional[list[float]]] = [None] * len(texts)
-    texts_to_embed: list[tuple[int, str]] = []  # (index, text)
-
-    if use_cache:
-        for i, text in enumerate(texts):
-            if text in _embedding_cache:
-                results[i] = _embedding_cache[text]
-            else:
-                texts_to_embed.append((i, text))
-    else:
-        texts_to_embed = list(enumerate(texts))
-
-    # If everything was cached, return early
-    if not texts_to_embed:
-        return results  # type: ignore
-
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
-    if not api_key:
-        raise MemgraphError(
-            "OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set. "
-            "Set this to your OpenAI API key to enable memory search.",
-            "missing_api_key"
-        )
-
-    try:
-        client = OpenAI(api_key=api_key)
-        # Send all uncached texts in a single request
-        batch_texts = [t for _, t in texts_to_embed]
-        response = client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=batch_texts
-        )
-
-        # Map results back to original positions and cache them
-        for batch_idx, (orig_idx, text) in enumerate(texts_to_embed):
-            embedding = response.data[batch_idx].embedding
-            results[orig_idx] = embedding
-
-            # Cache the result
-            if use_cache:
-                if len(_embedding_cache) >= _CACHE_MAX_SIZE:
-                    oldest_key = next(iter(_embedding_cache))
-                    del _embedding_cache[oldest_key]
-                _embedding_cache[text] = embedding
-
-        logger.debug(f"Batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
-
-    except Exception as e:
-        logger.error(f"Batch embedding API call failed: {e}")
-        raise MemgraphError(
-            f"Failed to get embeddings from OpenAI: {e}",
-            "embedding_failed",
-            {"model": EMBEDDING_MODEL, "batch_size": len(texts_to_embed), "original_error": str(e)}
-        ) from e
-
-    return results  # type: ignore
-
-
-def clear_embedding_cache():
-    """Clear the embedding cache."""
-    global _embedding_cache
-    _embedding_cache = {}
-
-
-def get_embedding_cache_stats() -> dict:
-    """Get cache statistics."""
-    return {
-        "size": len(_embedding_cache),
-        "max_size": _CACHE_MAX_SIZE,
-    }
-
-
-def save_embedding_cache():
-    """Save embedding cache to disk."""
-    global _embedding_cache
-    try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_PATH, 'w') as f:
-            json.dump(_embedding_cache, f)
-        logger.info(f"Saved {len(_embedding_cache)} embeddings to cache")
-    except Exception as e:
-        logger.warning(f"Failed to save embedding cache: {e}")
-
-
-def load_embedding_cache():
-    """Load embedding cache from disk."""
-    global _embedding_cache
-    if not CACHE_PATH.exists():
-        return
-
-    try:
-        with open(CACHE_PATH, 'r') as f:
-            loaded = json.load(f)
-            _embedding_cache.update(loaded)
-        logger.info(f"Loaded {len(loaded)} embeddings from cache")
-    except Exception as e:
-        logger.warning(f"Failed to load embedding cache: {e}")
-
-
-# Auto-load cache on module import
-load_embedding_cache()
+# Import embedding functions from embeddings module
+from embeddings.openai import get_embedding, get_embeddings_batch  # noqa: E402
 
 
 # =============================================================================
@@ -1118,9 +819,15 @@ Reply with ONLY the project name that best matches, or "NONE" if no good match."
                 if not dry_run:
                     assign_topic_to_project(topic["id"], matched_project["id"])
 
+        except MemgraphError:
+            raise  # Re-raise MemgraphError as-is
         except Exception as e:
-            logger.warning(f"Failed to categorize topic {topic['id']}: {e}")
-            continue
+            logger.error(f"Failed to categorize topic {topic['id']}: {e}")
+            raise MemgraphError(
+                f"Failed to categorize topic: {e}",
+                "auto_categorize_error",
+                {"topic_id": topic["id"], "original_error": str(e)}
+            ) from e
 
     return {
         "reviewed": len(unassigned),
@@ -2361,7 +2068,6 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
         # Sample content for naming
         sample_content = "\n".join(f"- {idea['content'][:150]}" for idea in cluster_ideas[:10])
 
-        suggested_name = None
         try:
             prompt = f"""These ideas were clustered together. Suggest a concise topic name (3-6 words) that captures their common theme:
 
@@ -2369,8 +2075,15 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
 
 Reply with ONLY the topic name, nothing else."""
             suggested_name = claude_complete(prompt).strip()
+        except MemgraphError:
+            raise  # Re-raise MemgraphError as-is
         except Exception as e:
-            logger.warning(f"Failed to generate cluster name: {e}")
+            logger.error(f"Failed to generate cluster name: {e}")
+            raise MemgraphError(
+                f"Failed to generate cluster name: {e}",
+                "cluster_naming_error",
+                {"cluster_id": cluster_id, "original_error": str(e)}
+            ) from e
 
         cluster_info.append({
             "cluster_id": cluster_id,
@@ -2680,9 +2393,15 @@ Reply with ONLY the suggested topic name, nothing else."""
         name = re.sub(r'^\*(.+)\*$', r'\1', name)  # Remove italic
         name = name.strip('"\'')  # Remove quotes
         return name
+    except MemgraphError:
+        raise  # Re-raise MemgraphError as-is
     except Exception as e:
-        logger.warning(f"Failed to suggest topic name: {e}")
-        return None
+        logger.error(f"Failed to suggest topic name: {e}")
+        raise MemgraphError(
+            f"Failed to suggest topic name: {e}",
+            "topic_name_suggestion_error",
+            {"topic_id": topic_id, "original_error": str(e)}
+        ) from e
 
 
 # =============================================================================
@@ -3439,30 +3158,6 @@ def hybrid_search(
 # Advanced Retrieval
 # =============================================================================
 
-def _generate_hypothetical_doc_heuristic(query: str) -> str:
-    """Generate a hypothetical doc using simple heuristics (fallback).
-
-    Args:
-        query: The user's search query
-
-    Returns:
-        A hypothetical answer document
-    """
-    query_lower = query.lower().strip()
-
-    # Remove question words and rephrase as statement
-    for prefix in ["how ", "what ", "why ", "when ", "where ", "which ", "who "]:
-        if query_lower.startswith(prefix):
-            query_lower = query_lower[len(prefix):]
-            break
-
-    # Remove trailing question mark
-    query_lower = query_lower.rstrip("?")
-
-    # Create a hypothetical answer
-    return f"The answer involves {query_lower}. This was decided based on careful consideration of the requirements and constraints."
-
-
 def generate_hypothetical_doc(query: str) -> str:
     """Generate a hypothetical document that would answer the query.
 
@@ -3486,9 +3181,15 @@ Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably".""
         logger.debug(f"HyDE generated: {hypothetical[:100]}...")
         return hypothetical
 
+    except MemgraphError:
+        raise  # Re-raise MemgraphError as-is
     except Exception as e:
-        logger.warning(f"LLM HyDE generation failed, using heuristic: {e}")
-        return _generate_hypothetical_doc_heuristic(query)
+        logger.error(f"LLM HyDE generation failed: {e}")
+        raise MemgraphError(
+            f"HyDE generation failed: {e}",
+            "hyde_generation_error",
+            {"query": query, "original_error": str(e)}
+        ) from e
 
 
 def hyde_search(
@@ -4720,9 +4421,17 @@ If none should be removed, reply: []"""
                             "reason": "llm_low_value",
                         })
 
+        except MemgraphError:
+            db.close()
+            raise  # Re-raise MemgraphError as-is
         except Exception as e:
-            logger.warning(f"LLM filter batch failed: {e}")
-            continue
+            db.close()
+            logger.error(f"LLM filter batch failed: {e}")
+            raise MemgraphError(
+                f"LLM filter failed: {e}",
+                "llm_filter_error",
+                {"batch_start": i, "original_error": str(e)}
+            ) from e
 
     result = {
         "total_reviewed": total_reviewed,

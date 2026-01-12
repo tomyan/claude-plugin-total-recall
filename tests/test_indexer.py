@@ -220,6 +220,7 @@ class TestIndexerIntegration:
     def mock_db(self, tmp_path, monkeypatch):
         """Mock database path."""
         db_path = tmp_path / "memory.db"
+        monkeypatch.setattr("config.DB_PATH", db_path)
         monkeypatch.setattr("memory_db.DB_PATH", db_path)
         monkeypatch.setattr("indexer.DB_PATH", db_path)
         return db_path
