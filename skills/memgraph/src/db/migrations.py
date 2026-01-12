@@ -81,6 +81,17 @@ def migrate_schema(db):
         db.execute("ALTER TABLE ideas ADD COLUMN forgotten BOOLEAN DEFAULT FALSE")
         db.commit()
 
+    # Add consolidation columns
+    if "consolidated_into" not in idea_columns:
+        config.logger.info("Adding consolidated_into column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN consolidated_into INTEGER REFERENCES ideas(id)")
+        db.commit()
+
+    if "is_consolidated" not in idea_columns:
+        config.logger.info("Adding is_consolidated column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN is_consolidated BOOLEAN DEFAULT FALSE")
+        db.commit()
+
     # Create indexes that depend on migrated columns
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_spans_topic ON spans(topic_id)")

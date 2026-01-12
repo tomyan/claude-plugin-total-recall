@@ -80,7 +80,8 @@ def run_search_command(
     until: str = None,
     recent: str = None,
     auto_analyze: bool = True,
-    include_forgotten: bool = False
+    include_forgotten: bool = False,
+    show_originals: bool = False
 ) -> dict:
     """Run search command with error handling.
 
@@ -88,6 +89,7 @@ def run_search_command(
         auto_analyze: If True, uses analyze_query() to detect temporal/intent
                      filters from natural language (unless explicitly provided)
         include_forgotten: If True, include forgotten ideas in results
+        show_originals: If True, show original ideas that were consolidated
     """
     try:
         import memory_db
@@ -115,7 +117,8 @@ def run_search_command(
         else:
             results = memory_db.search_ideas(
                 query, limit=limit, session=session, intent=intent,
-                include_forgotten=include_forgotten
+                include_forgotten=include_forgotten,
+                show_originals=show_originals
             )
 
         # Add metadata about detected filters
@@ -195,7 +198,8 @@ def run_command(args):
                 since=since,
                 until=args.until,
                 recent=recent,
-                include_forgotten=getattr(args, 'include_forgotten', False)
+                include_forgotten=getattr(args, 'include_forgotten', False),
+                show_originals=getattr(args, 'show_originals', False)
             )
             if result["success"]:
                 data = result["data"]
@@ -885,6 +889,42 @@ def run_command(args):
             else:
                 print(f"\nDry run - use --execute to actually forget")
 
+        elif args.command == "consolidatable":
+            candidates = memory_db.get_consolidation_candidates(
+                session=args.session,
+                min_ideas=args.min_ideas,
+                max_age_days=args.max_age
+            )
+            if not candidates:
+                print("No topics ready for consolidation")
+            else:
+                print(f"Topics ready for consolidation ({len(candidates)}):\n")
+                for c in candidates:
+                    print(f"  Topic {c['topic_id']:4}: {c['topic_name'][:40]:40} ({c['candidate_count']} ideas)")
+                print(f"\nRun: consolidate <topic_id> to consolidate a topic")
+
+        elif args.command == "consolidate":
+            result = memory_db.consolidate_topic(
+                topic_id=args.topic_id,
+                min_ideas=args.min_ideas,
+                max_age_days=args.max_age,
+                dry_run=not args.execute
+            )
+            print(f"Topic: {result.get('topic_name', result['topic_id'])}")
+            print(f"Consolidatable ideas: {result['candidates']}")
+            if result.get('samples'):
+                print(f"\nSample ideas to consolidate:")
+                for s in result['samples']:
+                    print(f"  [{s['id']:5}] [{s['intent']:10}] {s['content'][:60]}...")
+            if result.get('error'):
+                print(f"\nError: {result['error']}")
+            elif not result['dry_run'] and result.get('summary_id'):
+                print(f"\nConsolidated {result['consolidated']} ideas")
+                print(f"Summary idea ID: {result['summary_id']}")
+                print(f"Summary: {result.get('summary', '')[:150]}...")
+            elif result['dry_run']:
+                print(f"\nDry run - use --execute to consolidate")
+
         elif args.command == "topic-activity":
             result = memory_db.get_topic_activity(
                 topic_id=args.topic_id,
@@ -953,6 +993,8 @@ def main():
                           help="Search across all projects (default: current project only)")
     search_p.add_argument("--include-forgotten", action="store_true",
                           help="Include forgotten ideas in results")
+    search_p.add_argument("--show-originals", action="store_true",
+                          help="Show original ideas that were consolidated")
 
     # hybrid
     hybrid_p = subparsers.add_parser("hybrid", help="Hybrid vector+keyword search")
@@ -1203,6 +1245,18 @@ def main():
     forgettable_p.add_argument("-n", "--limit", type=int, default=100, help="Max ideas to show")
     forgettable_p.add_argument("-s", "--session", help="Filter by session")
     forgettable_p.add_argument("--execute", action="store_true", help="Actually forget (default is dry-run)")
+
+    # Consolidation commands
+    consolidatable_p = subparsers.add_parser("consolidatable", help="Show topics ready for consolidation")
+    consolidatable_p.add_argument("-s", "--session", help="Filter by session")
+    consolidatable_p.add_argument("--min-ideas", type=int, default=5, help="Min ideas for consolidation")
+    consolidatable_p.add_argument("--max-age", type=int, default=30, help="Max age in days for ideas")
+
+    consolidate_p = subparsers.add_parser("consolidate", help="Consolidate old context ideas in a topic")
+    consolidate_p.add_argument("topic_id", type=int, help="Topic ID to consolidate")
+    consolidate_p.add_argument("--min-ideas", type=int, default=5, help="Min ideas for consolidation")
+    consolidate_p.add_argument("--max-age", type=int, default=30, help="Max age in days for ideas")
+    consolidate_p.add_argument("--execute", action="store_true", help="Actually consolidate (default is dry-run)")
 
     args = parser.parse_args()
 

@@ -3518,6 +3518,247 @@ def auto_forget_ideas(
     return result
 
 
+# =============================================================================
+# Consolidation Operations
+# =============================================================================
+
+def should_preserve(idea: dict) -> bool:
+    """Check if an idea should be preserved (not consolidated).
+
+    Decisions, conclusions, and high-confidence ideas are protected.
+
+    Args:
+        idea: Dict with intent and confidence fields
+
+    Returns:
+        True if idea should be preserved individually
+    """
+    intent = idea.get("intent") or "context"
+    confidence = idea.get("confidence") or 0.5
+
+    # Protected intents
+    if intent in ("decision", "conclusion"):
+        return True
+
+    # High-confidence ideas are important
+    if confidence >= 0.9:
+        return True
+
+    return False
+
+
+def get_consolidatable_ideas(
+    topic_id: int,
+    min_ideas: int = 5,
+    max_age_days: int = 30
+) -> list[dict]:
+    """Find ideas in a topic that are candidates for consolidation.
+
+    Returns context ideas that are older than max_age_days and not already
+    consolidated. Protected ideas (decisions, conclusions) are excluded.
+
+    Args:
+        topic_id: Topic to check
+        min_ideas: Minimum ideas needed for consolidation
+        max_age_days: Only consider ideas older than this
+
+    Returns:
+        List of consolidatable ideas
+    """
+    from datetime import datetime, timedelta
+
+    cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
+
+    db = get_db()
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.created_at, i.message_time,
+            s.session, s.name as topic, t.id as topic_id
+        FROM ideas i
+        JOIN spans s ON s.id = i.span_id
+        JOIN topics t ON t.id = s.topic_id
+        WHERE t.id = ?
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+            AND (i.consolidated_into IS NULL)
+            AND (i.is_consolidated = FALSE OR i.is_consolidated IS NULL)
+            AND i.intent NOT IN ('decision', 'conclusion')
+            AND COALESCE(i.message_time, i.created_at) < ?
+        ORDER BY COALESCE(i.message_time, i.created_at)
+    """, (topic_id, cutoff))
+    ideas = [dict(row) for row in cursor]
+    db.close()
+
+    # Filter out high-confidence ideas
+    ideas = [i for i in ideas if not should_preserve(i)]
+
+    if len(ideas) < min_ideas:
+        return []
+
+    return ideas
+
+
+def consolidate_topic(
+    topic_id: int,
+    min_ideas: int = 5,
+    max_age_days: int = 30,
+    dry_run: bool = True
+) -> dict:
+    """Consolidate old context ideas in a topic into a summary.
+
+    Creates a new summary idea and links original ideas to it.
+    Protected ideas (decisions, conclusions) are preserved.
+
+    Args:
+        topic_id: Topic to consolidate
+        min_ideas: Minimum ideas for consolidation
+        max_age_days: Only consolidate ideas older than this
+        dry_run: If True, return preview without changes
+
+    Returns:
+        Dict with consolidation summary
+    """
+    candidates = get_consolidatable_ideas(topic_id, min_ideas, max_age_days)
+
+    if not candidates:
+        return {
+            "topic_id": topic_id,
+            "candidates": 0,
+            "message": "Not enough consolidatable ideas",
+            "dry_run": dry_run,
+        }
+
+    # Get topic name
+    db = get_db()
+    cursor = db.execute("SELECT name, summary FROM topics WHERE id = ?", (topic_id,))
+    topic_row = cursor.fetchone()
+    topic_name = topic_row["name"] if topic_row else f"Topic {topic_id}"
+
+    result = {
+        "topic_id": topic_id,
+        "topic_name": topic_name,
+        "candidates": len(candidates),
+        "samples": [
+            {"id": c["id"], "content": c["content"][:80], "intent": c["intent"]}
+            for c in candidates[:5]
+        ],
+        "dry_run": dry_run,
+        "consolidated": 0,
+        "summary_id": None,
+    }
+
+    if dry_run:
+        db.close()
+        return result
+
+    # Generate summary using LLM
+    content_sample = "\n".join([
+        f"- [{c['intent']}] {c['content'][:200]}"
+        for c in candidates[:20]  # Use first 20 for summary
+    ])
+
+    summary_prompt = f"""Summarize these conversation context points from the topic "{topic_name}" into a single concise paragraph.
+Focus on key facts, decisions context, and important details. Skip trivial acknowledgments.
+
+Context points:
+{content_sample}
+
+Write a 2-4 sentence summary that captures the essential information:"""
+
+    try:
+        summary_text = claude_complete(summary_prompt)
+    except Exception as e:
+        db.close()
+        return {**result, "error": f"LLM summary failed: {e}"}
+
+    # Get a span for the summary (use first candidate's span)
+    span_id = None
+    if candidates:
+        cursor = db.execute("SELECT span_id FROM ideas WHERE id = ?", (candidates[0]["id"],))
+        span_row = cursor.fetchone()
+        if span_row:
+            span_id = span_row["span_id"]
+
+    # Create summary idea
+    cursor = db.execute("""
+        INSERT INTO ideas (span_id, content, intent, confidence, is_consolidated)
+        VALUES (?, ?, 'context', 0.8, TRUE)
+    """, (span_id, f"[Consolidated summary] {summary_text}"))
+    summary_id = cursor.lastrowid
+
+    # Link original ideas to summary
+    for idea in candidates:
+        db.execute(
+            "UPDATE ideas SET consolidated_into = ? WHERE id = ?",
+            (summary_id, idea["id"])
+        )
+
+    db.commit()
+    db.close()
+
+    result["consolidated"] = len(candidates)
+    result["summary_id"] = summary_id
+    result["summary"] = summary_text[:200]
+
+    return result
+
+
+def get_consolidation_candidates(
+    session: Optional[str] = None,
+    min_ideas: int = 5,
+    max_age_days: int = 30
+) -> list[dict]:
+    """Find topics that have ideas ready for consolidation.
+
+    Args:
+        session: Optional session filter
+        min_ideas: Minimum ideas for consolidation
+        max_age_days: Only consider ideas older than this
+
+    Returns:
+        List of topics with consolidation candidates
+    """
+    from datetime import datetime, timedelta
+
+    cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
+
+    db = get_db()
+
+    # Get topics with old, unconsolidated context ideas
+    sql = """
+        SELECT
+            t.id as topic_id, t.name as topic_name,
+            COUNT(*) as candidate_count
+        FROM topics t
+        JOIN spans s ON s.topic_id = t.id
+        JOIN ideas i ON i.span_id = s.id
+        WHERE (i.forgotten = FALSE OR i.forgotten IS NULL)
+            AND (i.consolidated_into IS NULL)
+            AND (i.is_consolidated = FALSE OR i.is_consolidated IS NULL)
+            AND i.intent NOT IN ('decision', 'conclusion')
+            AND i.confidence < 0.9
+            AND COALESCE(i.message_time, i.created_at) < ?
+    """
+    params = [cutoff]
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+
+    sql += f"""
+        GROUP BY t.id
+        HAVING COUNT(*) >= ?
+        ORDER BY COUNT(*) DESC
+    """
+    params.append(min_ideas)
+
+    cursor = db.execute(sql, params)
+    results = [dict(row) for row in cursor]
+    db.close()
+
+    return results
+
+
 def get_session_time_range(session: str) -> dict | None:
     """Get the time range (first/last idea) for a session.
 

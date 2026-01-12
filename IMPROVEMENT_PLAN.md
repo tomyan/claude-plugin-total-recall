@@ -90,15 +90,15 @@ Each extraction is a separate commit:
 
 ### 2.5 Consolidation (thin slices)
 
-- [ ] **2.5a** Add `consolidated_into` column to ideas table
-- [ ] **2.5b** Add `is_consolidated` BOOLEAN column (marks summary ideas)
-- [ ] **2.5c** Add `consolidatable` command showing candidate groups (dry-run)
-- [ ] **2.5d** Add `should_preserve()` - protect decisions, conclusions, high-confidence
-- [ ] **2.5e** Add `consolidate <topic_id>` command (creates summary, links originals)
-- [ ] **2.5f** Exclude consolidated originals from search (show summary instead)
-- [ ] **2.5g** Add `--show-originals` flag to see pre-consolidation ideas
+- [x] **2.5a** Add `consolidated_into` column to ideas table
+- [x] **2.5b** Add `is_consolidated` BOOLEAN column (marks summary ideas)
+- [x] **2.5c** Add `consolidatable` command showing candidate groups (dry-run)
+- [x] **2.5d** Add `should_preserve()` - protect decisions, conclusions, high-confidence
+- [x] **2.5e** Add `consolidate <topic_id>` command (creates summary, links originals)
+- [x] **2.5f** Exclude consolidated originals from search (show summary instead)
+- [x] **2.5g** Add `--show-originals` flag to see pre-consolidation ideas
 
-**Done when:** Old context ideas can be consolidated into summaries.
+**Done when:** Old context ideas can be consolidated into summaries. ✓
 
 ---
 
@@ -200,12 +200,13 @@ Each extraction is a separate commit:
 - [x] 2.2a-d - Working memory foundation complete
 - [x] 2.3a-f - Soft forgetting complete
 - [x] 2.4a-e - Auto-forget candidates complete
+- [x] 2.5a-g - Consolidation complete
 
 ### In Progress
-- 2.5 - Consolidation
+- Phase 3 - Search Improvements
 
 ### Up Next
-- 3.1 - Intent Filtering
+- Phase 4 - Embedding Abstraction
 
 ---
 
