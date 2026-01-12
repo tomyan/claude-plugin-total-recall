@@ -82,7 +82,9 @@ def run_search_command(
     auto_analyze: bool = True,
     include_forgotten: bool = False,
     show_originals: bool = False,
-    show_decomposition: bool = False
+    show_decomposition: bool = False,
+    verify: bool = False,
+    explain: bool = False
 ) -> dict:
     """Run search command with error handling.
 
@@ -92,6 +94,8 @@ def run_search_command(
         include_forgotten: If True, include forgotten ideas in results
         show_originals: If True, show original ideas that were consolidated
         show_decomposition: If True, show how query was decomposed
+        verify: If True, use LLM to verify result relevance
+        explain: If True, include LLM explanation for relevance
     """
     try:
         import memory_db
@@ -135,6 +139,13 @@ def run_search_command(
                 include_forgotten=include_forgotten,
                 show_originals=show_originals
             )
+
+        # Apply LLM relevance verification if requested
+        if verify or explain:
+            results = memory_db.verify_relevance(
+                query, results, threshold=3, explain=explain
+            )
+            detected["verified"] = True
 
         # Add metadata about detected filters
         return safe_result({
@@ -215,7 +226,9 @@ def run_command(args):
                 recent=recent,
                 include_forgotten=getattr(args, 'include_forgotten', False),
                 show_originals=getattr(args, 'show_originals', False),
-                show_decomposition=getattr(args, 'decompose', False)
+                show_decomposition=getattr(args, 'decompose', False),
+                verify=getattr(args, 'verify', False),
+                explain=getattr(args, 'explain', False)
             )
             if result["success"]:
                 data = result["data"]
@@ -525,6 +538,53 @@ def run_command(args):
                 session=args.session
             )
             print(json.dumps(results, indent=2, default=str))
+
+        elif args.command == "trace":
+            direction = "both"
+            if args.backward and not args.forward:
+                direction = "backward"
+            elif args.forward and not args.backward:
+                direction = "forward"
+            result = memory_db.trace_idea(
+                args.id,
+                direction=direction,
+                hops=args.hops,
+                limit=args.limit
+            )
+            if "error" in result:
+                print(json.dumps(result), file=sys.stderr)
+                sys.exit(1)
+
+            # Pretty print trace
+            idea = result["idea"]
+            print(f"\nIdea {idea['id']}: {idea['content'][:80]}...")
+            print(f"  Intent: {idea['intent']} | Topic: {idea.get('topic', 'N/A')}")
+
+            for hop_num, hop_ideas in result["hops"].items():
+                print(f"\n{'─' * 60}")
+                print(f"Hop {hop_num}: {len(hop_ideas)} connected ideas")
+                for h in hop_ideas:
+                    arrow = "→" if h["direction"] == "forward" else "←"
+                    print(f"  {arrow} [{h['id']:5}] [{h['relation']:12}] {h['content'][:60]}...")
+
+        elif args.command == "path":
+            result = memory_db.find_path(
+                args.from_id,
+                args.to_id,
+                max_hops=args.max_hops
+            )
+            if "error" in result:
+                print(json.dumps(result), file=sys.stderr)
+                sys.exit(1)
+
+            # Pretty print path
+            print(f"\nPath found ({result['hops']} hops):\n")
+            for i, idea in enumerate(result["path"]):
+                if i > 0:
+                    print("    ↓")
+                print(f"  [{idea['id']:5}] {idea.get('content', '?')[:70]}...")
+                if idea.get("intent"):
+                    print(f"           Intent: {idea['intent']} | Topic: {idea.get('topic', 'N/A')}")
 
         elif args.command == "prune":
             result = memory_db.prune_old_ideas(
@@ -1047,6 +1107,10 @@ def main():
                           help="Show original ideas that were consolidated")
     search_p.add_argument("--decompose", action="store_true",
                           help="Show how query was decomposed (for complex queries)")
+    search_p.add_argument("--verify", action="store_true",
+                          help="Use LLM to verify and score result relevance")
+    search_p.add_argument("--explain", action="store_true",
+                          help="Include LLM explanation for relevance scores (implies --verify)")
 
     # hybrid
     hybrid_p = subparsers.add_parser("hybrid", help="Hybrid vector+keyword search")
@@ -1179,6 +1243,20 @@ def main():
                           help="Only same session")
     similar_p.add_argument("--other-sessions", dest="same_session", action="store_false",
                           help="Only other sessions")
+
+    # trace (follow relation chains)
+    trace_p = subparsers.add_parser("trace", help="Trace relation chains from an idea")
+    trace_p.add_argument("id", type=int, help="Starting idea ID")
+    trace_p.add_argument("-n", "--limit", type=int, default=10, help="Max ideas per hop")
+    trace_p.add_argument("--hops", type=int, default=1, help="Number of hops to follow (1-3)")
+    trace_p.add_argument("--backward", action="store_true", help="Only follow incoming relations")
+    trace_p.add_argument("--forward", action="store_true", help="Only follow outgoing relations")
+
+    # path (find connection between ideas)
+    path_p = subparsers.add_parser("path", help="Find path between two ideas")
+    path_p.add_argument("from_id", type=int, help="Starting idea ID")
+    path_p.add_argument("to_id", type=int, help="Target idea ID")
+    path_p.add_argument("--max-hops", type=int, default=4, help="Maximum hops to search (1-6)")
 
     # prune (remove old ideas)
     prune_p = subparsers.add_parser("prune", help="Remove old ideas from database")

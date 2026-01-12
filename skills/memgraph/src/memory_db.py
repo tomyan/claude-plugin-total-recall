@@ -2719,6 +2719,198 @@ def get_idea_with_relations(idea_id: int) -> dict:
     return result
 
 
+def trace_idea(
+    idea_id: int,
+    direction: str = "both",
+    hops: int = 1,
+    limit: int = 20
+) -> dict:
+    """Trace relations from an idea across multiple hops.
+
+    Args:
+        idea_id: Starting idea ID
+        direction: "forward" (outgoing), "backward" (incoming), or "both"
+        hops: Number of relation hops to follow (1-3)
+        limit: Max ideas per hop
+
+    Returns:
+        Dict with idea, and connected ideas organized by hop level
+    """
+    hops = min(max(hops, 1), 3)  # Clamp to 1-3
+
+    db = get_db()
+
+    # Get starting idea
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.id = ?
+    """, (idea_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        db.close()
+        return {"error": f"Idea {idea_id} not found"}
+
+    result = {
+        "idea": dict(row),
+        "hops": {},
+        "direction": direction,
+    }
+
+    visited = {idea_id}
+    current_ids = [idea_id]
+
+    for hop in range(1, hops + 1):
+        hop_results = []
+        next_ids = []
+
+        for current_id in current_ids:
+            # Get relations based on direction
+            if direction in ("forward", "both"):
+                cursor = db.execute("""
+                    SELECT r.relation_type, r.to_id as related_id, i.content, i.intent,
+                           s.session, s.name as topic
+                    FROM relations r
+                    JOIN ideas i ON i.id = r.to_id
+                    LEFT JOIN spans s ON s.id = i.span_id
+                    WHERE r.from_id = ?
+                        AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                """, (current_id,))
+                for rel in cursor:
+                    if rel["related_id"] not in visited:
+                        hop_results.append({
+                            "id": rel["related_id"],
+                            "content": rel["content"],
+                            "intent": rel["intent"],
+                            "topic": rel["topic"],
+                            "relation": rel["relation_type"],
+                            "direction": "forward",
+                            "from_id": current_id,
+                        })
+                        next_ids.append(rel["related_id"])
+                        visited.add(rel["related_id"])
+
+            if direction in ("backward", "both"):
+                cursor = db.execute("""
+                    SELECT r.relation_type, r.from_id as related_id, i.content, i.intent,
+                           s.session, s.name as topic
+                    FROM relations r
+                    JOIN ideas i ON i.id = r.from_id
+                    LEFT JOIN spans s ON s.id = i.span_id
+                    WHERE r.to_id = ?
+                        AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                """, (current_id,))
+                for rel in cursor:
+                    if rel["related_id"] not in visited:
+                        hop_results.append({
+                            "id": rel["related_id"],
+                            "content": rel["content"],
+                            "intent": rel["intent"],
+                            "topic": rel["topic"],
+                            "relation": rel["relation_type"],
+                            "direction": "backward",
+                            "from_id": current_id,
+                        })
+                        next_ids.append(rel["related_id"])
+                        visited.add(rel["related_id"])
+
+        if hop_results:
+            result["hops"][str(hop)] = hop_results[:limit]
+        current_ids = next_ids[:limit]
+
+        if not current_ids:
+            break
+
+    db.close()
+    return result
+
+
+def find_path(
+    from_id: int,
+    to_id: int,
+    max_hops: int = 4
+) -> dict:
+    """Find a path of relations between two ideas.
+
+    Uses BFS to find the shortest path.
+
+    Args:
+        from_id: Starting idea ID
+        to_id: Target idea ID
+        max_hops: Maximum hops to search
+
+    Returns:
+        Dict with path (list of ideas) or error if no path found
+    """
+    max_hops = min(max(max_hops, 1), 6)  # Clamp to 1-6
+
+    db = get_db()
+
+    # Verify both ideas exist
+    cursor = db.execute("SELECT id FROM ideas WHERE id IN (?, ?)", (from_id, to_id))
+    found = [row["id"] for row in cursor]
+    if from_id not in found:
+        db.close()
+        return {"error": f"Idea {from_id} not found"}
+    if to_id not in found:
+        db.close()
+        return {"error": f"Idea {to_id} not found"}
+
+    # BFS
+    queue = [(from_id, [from_id])]
+    visited = {from_id}
+
+    while queue:
+        current_id, path = queue.pop(0)
+
+        if len(path) > max_hops + 1:
+            break
+
+        if current_id == to_id:
+            # Found path - get idea details
+            placeholders = ",".join("?" * len(path))
+            cursor = db.execute(f"""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.id IN ({placeholders})
+            """, path)
+            ideas_by_id = {row["id"]: dict(row) for row in cursor}
+
+            db.close()
+            return {
+                "path": [ideas_by_id.get(id, {"id": id}) for id in path],
+                "hops": len(path) - 1,
+            }
+
+        # Get neighbors (both directions)
+        cursor = db.execute("""
+            SELECT to_id as neighbor, relation_type FROM relations WHERE from_id = ?
+            UNION
+            SELECT from_id as neighbor, relation_type FROM relations WHERE to_id = ?
+        """, (current_id, current_id))
+
+        for row in cursor:
+            neighbor = row["neighbor"]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, path + [neighbor]))
+
+    db.close()
+    return {
+        "error": f"No path found between {from_id} and {to_id} within {max_hops} hops",
+        "from_id": from_id,
+        "to_id": to_id,
+    }
+
+
 def search_ideas_temporal(
     query: str,
     limit: int = 10,
@@ -3187,6 +3379,84 @@ def decomposed_search(
         result["results"] = shared[:limit]
 
     return result
+
+
+def verify_relevance(
+    query: str,
+    results: list[dict],
+    threshold: int = 3,
+    explain: bool = False
+) -> list[dict]:
+    """Verify search result relevance using LLM.
+
+    Scores each result 1-5 and optionally provides explanations.
+
+    Args:
+        query: Original search query
+        results: List of search result dicts
+        threshold: Minimum score to include (1-5)
+        explain: If True, include explanation for each result
+
+    Returns:
+        Filtered results with relevance_score and optional explanation
+    """
+    if not results:
+        return []
+
+    # Build prompt for batch verification
+    results_text = "\n".join([
+        f"[{i+1}] {r.get('content', '')[:200]}"
+        for i, r in enumerate(results[:20])  # Max 20 results
+    ])
+
+    prompt = f"""Rate the relevance of each search result to the query. Score 1-5 where:
+1 = Completely irrelevant
+2 = Tangentially related
+3 = Somewhat relevant
+4 = Quite relevant
+5 = Highly relevant
+
+Query: "{query}"
+
+Results:
+{results_text}
+
+Respond with ONLY a JSON object like:
+{{"1": {{"score": 4, "reason": "brief reason"}}, "2": {{"score": 2, "reason": "brief reason"}}, ...}}
+"""
+
+    if not explain:
+        prompt = prompt.replace(', "reason": "brief reason"', '').replace(', "reason": "brief reason"', '')
+        prompt = prompt.replace('"reason": "brief reason"', '')
+
+    try:
+        response = claude_complete(prompt)
+        # Parse JSON from response
+        import re
+        json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
+        if json_match:
+            scores = json.loads(json_match.group())
+        else:
+            # Fallback: include all results
+            return results
+    except Exception as e:
+        logger.warning(f"Relevance verification failed: {e}")
+        return results
+
+    # Apply scores and filter
+    verified = []
+    for i, result in enumerate(results[:20]):
+        key = str(i + 1)
+        if key in scores:
+            score_data = scores[key]
+            score = score_data.get("score", 3) if isinstance(score_data, dict) else score_data
+            if score >= threshold:
+                result["relevance_score"] = score
+                if explain and isinstance(score_data, dict):
+                    result["relevance_reason"] = score_data.get("reason", "")
+                verified.append(result)
+
+    return verified
 
 
 # =============================================================================

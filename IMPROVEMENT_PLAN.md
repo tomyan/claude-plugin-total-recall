@@ -124,22 +124,22 @@ Each extraction is a separate commit:
 
 ### 3.3 Relevance Verification (thin slices)
 
-- [ ] **3.3a** Add `--verify` flag that uses LLM to score results 1-5
-- [ ] **3.3b** Filter out results scoring < 3
-- [ ] **3.3c** Show relevance score in output when `--verify` used
-- [ ] **3.3d** Add `--explain` flag for per-result relevance explanation
+- [x] **3.3a** Add `--verify` flag that uses LLM to score results 1-5
+- [x] **3.3b** Filter out results scoring < 3
+- [x] **3.3c** Show relevance score in output when `--verify` used
+- [x] **3.3d** Add `--explain` flag for per-result relevance explanation
 
-**Done when:** `search --verify` improves precision.
+**Done when:** `search --verify` improves precision. ✓
 
 ### 3.4 Multi-Hop Reasoning (thin slices)
 
-- [ ] **3.4a** Add `trace <idea_id>` command showing related ideas (1-hop)
-- [ ] **3.4b** Add `--backward` flag (what led to this idea)
-- [ ] **3.4c** Add `--forward` flag (what followed from this idea)
-- [ ] **3.4d** Add `--hops N` flag for multi-hop traversal
-- [ ] **3.4e** Add `path <from_id> <to_id>` command finding connection
+- [x] **3.4a** Add `trace <idea_id>` command showing related ideas (1-hop)
+- [x] **3.4b** Add `--backward` flag (what led to this idea)
+- [x] **3.4c** Add `--forward` flag (what followed from this idea)
+- [x] **3.4d** Add `--hops N` flag for multi-hop traversal
+- [x] **3.4e** Add `path <from_id> <to_id>` command finding connection
 
-**Done when:** Can trace reasoning chains through relations.
+**Done when:** Can trace reasoning chains through relations. ✓
 
 ---
 
@@ -201,12 +201,16 @@ Each extraction is a separate commit:
 - [x] 2.3a-f - Soft forgetting complete
 - [x] 2.4a-e - Auto-forget candidates complete
 - [x] 2.5a-g - Consolidation complete
+- [x] 3.1a-d - Intent filtering shortcuts complete
+- [x] 3.2a-d - Query decomposition complete
+- [x] 3.3a-d - Relevance verification complete
+- [x] 3.4a-e - Multi-hop reasoning complete
 
 ### In Progress
-- Phase 3 - Search Improvements
+- Phase 4 - Embedding Abstraction
 
 ### Up Next
-- Phase 4 - Embedding Abstraction
+- Phase 5 - Reflection
 
 ---
 
