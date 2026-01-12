@@ -2170,10 +2170,11 @@ def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
             parts.append(span['summary'])
 
         if include_ideas:
-            # Get a sample of ideas (first few + most recent)
+            # Get a sample of ideas (first few + most recent, exclude forgotten)
             cursor = db.execute("""
                 SELECT content FROM ideas
                 WHERE span_id = ?
+                    AND (forgotten = FALSE OR forgotten IS NULL)
                 ORDER BY id ASC
                 LIMIT 3
             """, (span_id,))
@@ -2182,6 +2183,7 @@ def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
             cursor = db.execute("""
                 SELECT content FROM ideas
                 WHERE span_id = ?
+                    AND (forgotten = FALSE OR forgotten IS NULL)
                 ORDER BY id DESC
                 LIMIT 3
             """, (span_id,))
@@ -2723,7 +2725,8 @@ def search_ideas_temporal(
     since: Optional[str] = None,
     until: Optional[str] = None,
     relative: Optional[str] = None,
-    session: Optional[str] = None
+    session: Optional[str] = None,
+    include_forgotten: bool = False
 ) -> list[dict]:
     """Search ideas with temporal filtering.
 
@@ -2734,6 +2737,7 @@ def search_ideas_temporal(
         until: ISO datetime string for end of range
         relative: Duration string like "1d", "1w", "1m" (overrides since/until)
         session: Filter to specific session
+        include_forgotten: If True, include forgotten ideas
 
     Returns:
         List of matching idea dicts with message_time
@@ -2746,7 +2750,8 @@ def search_ideas_temporal(
     query_embedding = get_embedding(query)
 
     # Build query with temporal filter - use message_time with fallback to created_at
-    sql = """
+    forgotten_filter = "" if include_forgotten else "AND (i.forgotten = FALSE OR i.forgotten IS NULL)"
+    sql = f"""
         SELECT
             i.id, i.content, i.intent, i.confidence,
             i.source_file, i.source_line, i.created_at,
@@ -2757,6 +2762,7 @@ def search_ideas_temporal(
         JOIN ideas i ON i.id = e.idea_id
         LEFT JOIN spans s ON s.id = i.span_id
         WHERE e.embedding MATCH ? AND k = ?
+            {forgotten_filter}
     """
     params = [serialize_embedding(query_embedding), limit * 2]
 
@@ -3272,6 +3278,77 @@ def boost_results_by_activation(
     for r in results:
         r.pop('_boost_score', None)
 
+    return results
+
+
+# =============================================================================
+# Soft Forgetting Operations
+# =============================================================================
+
+def forget_idea(idea_id: int) -> bool:
+    """Mark an idea as forgotten (soft delete).
+
+    Forgotten ideas are excluded from search results but not deleted.
+
+    Args:
+        idea_id: ID of the idea to forget
+
+    Returns:
+        True if idea was found and updated
+    """
+    db = get_db()
+    cursor = db.execute("""
+        UPDATE ideas SET forgotten = TRUE WHERE id = ?
+    """, (idea_id,))
+    updated = cursor.rowcount > 0
+    db.commit()
+    db.close()
+    return updated
+
+
+def unforget_idea(idea_id: int) -> bool:
+    """Restore a forgotten idea.
+
+    Args:
+        idea_id: ID of the idea to restore
+
+    Returns:
+        True if idea was found and updated
+    """
+    db = get_db()
+    cursor = db.execute("""
+        UPDATE ideas SET forgotten = FALSE WHERE id = ?
+    """, (idea_id,))
+    updated = cursor.rowcount > 0
+    db.commit()
+    db.close()
+    return updated
+
+
+def get_forgotten_ideas(limit: int = 50) -> list[dict]:
+    """List all forgotten ideas.
+
+    Args:
+        limit: Maximum ideas to return
+
+    Returns:
+        List of forgotten idea dicts
+    """
+    db = get_db()
+    cursor = db.execute("""
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            i.access_count, i.last_accessed,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE i.forgotten = TRUE
+        ORDER BY i.created_at DESC
+        LIMIT ?
+    """, (limit,))
+    results = [dict(row) for row in cursor]
+    db.close()
     return results
 
 

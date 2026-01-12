@@ -75,7 +75,7 @@ def hyde_search(
     # Search with hypothetical embedding
     db = get_db()
 
-    # Build query with filters
+    # Build query with filters (exclude forgotten)
     sql = """
         SELECT
             i.id, i.content, i.intent, i.confidence,
@@ -87,6 +87,7 @@ def hyde_search(
         JOIN ideas i ON i.id = e.idea_id
         LEFT JOIN spans s ON s.id = i.span_id
         WHERE e.embedding MATCH ? AND k = ?
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
     """
     params = [serialize_embedding(hypo_embedding), limit * 2]  # Get more for filtering
 

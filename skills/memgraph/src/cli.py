@@ -79,13 +79,15 @@ def run_search_command(
     since: str = None,
     until: str = None,
     recent: str = None,
-    auto_analyze: bool = True
+    auto_analyze: bool = True,
+    include_forgotten: bool = False
 ) -> dict:
     """Run search command with error handling.
 
     Args:
         auto_analyze: If True, uses analyze_query() to detect temporal/intent
                      filters from natural language (unless explicitly provided)
+        include_forgotten: If True, include forgotten ideas in results
     """
     try:
         import memory_db
@@ -104,13 +106,17 @@ def run_search_command(
             # Use temporal search when date filters provided
             results = memory_db.search_ideas_temporal(
                 query, limit=limit, since=since, until=until,
-                relative=recent, session=session
+                relative=recent, session=session,
+                include_forgotten=include_forgotten
             )
             # Apply intent filter if specified
             if intent:
                 results = [r for r in results if r.get('intent') == intent]
         else:
-            results = memory_db.search_ideas(query, limit=limit, session=session, intent=intent)
+            results = memory_db.search_ideas(
+                query, limit=limit, session=session, intent=intent,
+                include_forgotten=include_forgotten
+            )
 
         # Add metadata about detected filters
         return safe_result({
@@ -188,7 +194,8 @@ def run_command(args):
                 intent=args.intent,
                 since=since,
                 until=args.until,
-                recent=recent
+                recent=recent,
+                include_forgotten=getattr(args, 'include_forgotten', False)
             )
             if result["success"]:
                 data = result["data"]
@@ -839,6 +846,26 @@ def run_command(args):
             for intent, count in sorted(result['by_intent'].items(), key=lambda x: -x[1]):
                 print(f"  {intent}: {count}")
 
+        elif args.command == "forget":
+            success = memory_db.forget_idea(args.id)
+            if success:
+                print(json.dumps({"success": True, "id": args.id, "status": "forgotten"}))
+            else:
+                print(json.dumps({"success": False, "error": f"Idea {args.id} not found"}), file=sys.stderr)
+                sys.exit(1)
+
+        elif args.command == "unforget":
+            success = memory_db.unforget_idea(args.id)
+            if success:
+                print(json.dumps({"success": True, "id": args.id, "status": "restored"}))
+            else:
+                print(json.dumps({"success": False, "error": f"Idea {args.id} not found"}), file=sys.stderr)
+                sys.exit(1)
+
+        elif args.command == "forgotten":
+            results = memory_db.get_forgotten_ideas(limit=args.limit)
+            print(json.dumps(results, indent=2, default=str))
+
         elif args.command == "topic-activity":
             result = memory_db.get_topic_activity(
                 topic_id=args.topic_id,
@@ -905,6 +932,8 @@ def main():
     search_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
     search_p.add_argument("-g", "--global", dest="global_search", action="store_true",
                           help="Search across all projects (default: current project only)")
+    search_p.add_argument("--include-forgotten", action="store_true",
+                          help="Include forgotten ideas in results")
 
     # hybrid
     hybrid_p = subparsers.add_parser("hybrid", help="Hybrid vector+keyword search")
@@ -1137,6 +1166,16 @@ def main():
     topic_activity_p.add_argument("topic_id", type=int, help="Topic ID")
     topic_activity_p.add_argument("--by", choices=["day", "week", "month"], default="week", help="Aggregation period")
     topic_activity_p.add_argument("--days", "-d", type=int, default=90, help="Days to look back")
+
+    # Soft forgetting commands
+    forget_p = subparsers.add_parser("forget", help="Mark an idea as forgotten (soft delete)")
+    forget_p.add_argument("id", type=int, help="Idea ID to forget")
+
+    unforget_p = subparsers.add_parser("unforget", help="Restore a forgotten idea")
+    unforget_p.add_argument("id", type=int, help="Idea ID to restore")
+
+    forgotten_p = subparsers.add_parser("forgotten", help="List all forgotten ideas")
+    forgotten_p.add_argument("-n", "--limit", type=int, default=50, help="Max results")
 
     args = parser.parse_args()
 

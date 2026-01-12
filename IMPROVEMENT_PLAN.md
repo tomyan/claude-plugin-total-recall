@@ -69,14 +69,14 @@ Each extraction is a separate commit:
 
 ### 2.3 Soft Forgetting (thin slices)
 
-- [ ] **2.3a** Add `forgotten` BOOLEAN column to ideas (default FALSE)
-- [ ] **2.3b** Exclude forgotten=TRUE from search results
-- [ ] **2.3c** Add `forget <idea_id>` command (sets forgotten=TRUE)
-- [ ] **2.3d** Add `unforget <idea_id>` command (sets forgotten=FALSE)
-- [ ] **2.3e** Add `--include-forgotten` flag to search
-- [ ] **2.3f** Add `forgotten` command listing forgotten ideas
+- [x] **2.3a** Add `forgotten` BOOLEAN column to ideas (default FALSE)
+- [x] **2.3b** Exclude forgotten=TRUE from search results
+- [x] **2.3c** Add `forget <idea_id>` command (sets forgotten=TRUE)
+- [x] **2.3d** Add `unforget <idea_id>` command (sets forgotten=FALSE)
+- [x] **2.3e** Add `--include-forgotten` flag to search
+- [x] **2.3f** Add `forgotten` command listing forgotten ideas
 
-**Done when:** Users can manually forget/unforget ideas.
+**Done when:** Users can manually forget/unforget ideas. ✓
 
 ### 2.4 Auto-Forget Candidates (thin slices)
 
@@ -196,12 +196,15 @@ Each extraction is a separate commit:
 - [x] 1.1k - search/hybrid.py extracted
 - [x] 1.1l - search/hyde.py extracted
 - [x] Remove LLM fallbacks (HyDE, suggest_topic_name, etc.)
+- [x] 2.1a-e - Access tracking complete
+- [x] 2.2a-d - Working memory foundation complete
+- [x] 2.3a-f - Soft forgetting complete
 
 ### In Progress
-- 2.2d-f - Integrating working memory into search
+- 2.4 - Auto-Forget Candidates
 
 ### Up Next
-- 2.3 - Soft Forgetting
+- 2.5 - Consolidation
 
 ---
 

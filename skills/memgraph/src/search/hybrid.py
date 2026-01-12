@@ -71,7 +71,7 @@ def hybrid_search(
         db.close()
         return []
 
-    # Fetch full records with filters
+    # Fetch full records with filters (exclude forgotten)
     placeholders = ','.join('?' * len(top_ids))
     sql = f"""
         SELECT
@@ -82,6 +82,7 @@ def hybrid_search(
         FROM ideas i
         LEFT JOIN spans s ON s.id = i.span_id
         WHERE i.id IN ({placeholders})
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
     """
     params = list(top_ids)
 

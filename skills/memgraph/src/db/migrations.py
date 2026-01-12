@@ -75,6 +75,12 @@ def migrate_schema(db):
         db.execute("ALTER TABLE ideas ADD COLUMN last_accessed TEXT")
         db.commit()
 
+    # Add soft forgetting column
+    if "forgotten" not in idea_columns:
+        config.logger.info("Adding forgotten column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN forgotten BOOLEAN DEFAULT FALSE")
+        db.commit()
+
     # Create indexes that depend on migrated columns
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_spans_topic ON spans(topic_id)")
@@ -83,6 +89,7 @@ def migrate_schema(db):
         db.execute("CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_id)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_message_time ON ideas(message_time)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_forgotten ON ideas(forgotten)")
         db.commit()
     except sqlite3.OperationalError:
         pass  # Index already exists

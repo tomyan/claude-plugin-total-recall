@@ -57,7 +57,8 @@ def search_ideas(
     limit: int = 10,
     session: Optional[str] = None,
     intent: Optional[str] = None,
-    recency_weight: float = 0.0
+    recency_weight: float = 0.0,
+    include_forgotten: bool = False
 ) -> list[dict]:
     """Search for similar ideas using vector similarity."""
     query_embedding = get_embedding(query)
@@ -65,7 +66,10 @@ def search_ideas(
 
     # Vector search with larger k for filtering
     k = limit * 3 if (session or intent) else limit
-    cursor = db.execute("""
+
+    # Build query with optional forgotten filter
+    forgotten_filter = "" if include_forgotten else "AND (i.forgotten = FALSE OR i.forgotten IS NULL)"
+    cursor = db.execute(f"""
         SELECT
             i.id, i.content, i.intent, i.confidence,
             i.source_file, i.source_line, i.created_at,
@@ -75,6 +79,7 @@ def search_ideas(
         JOIN ideas i ON i.id = e.idea_id
         LEFT JOIN spans s ON s.id = i.span_id
         WHERE e.embedding MATCH ? AND k = ?
+            {forgotten_filter}
         ORDER BY e.distance
     """, (serialize_embedding(query_embedding), k))
 
@@ -138,7 +143,7 @@ def find_similar_ideas(
     embedding = row["embedding"]
     source_session = row["session"]
 
-    # Find similar ideas
+    # Find similar ideas (exclude forgotten)
     cursor = db.execute("""
         SELECT
             i.id, i.content, i.intent, i.confidence,
@@ -149,6 +154,7 @@ def find_similar_ideas(
         JOIN ideas i ON i.id = e.idea_id
         LEFT JOIN spans s ON s.id = i.span_id
         WHERE e.embedding MATCH ? AND k = ?
+            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
         ORDER BY e.distance
     """, (embedding, limit + 20))  # Get extra to filter
 
