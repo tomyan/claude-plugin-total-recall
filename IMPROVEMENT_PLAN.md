@@ -80,13 +80,13 @@ Each extraction is a separate commit:
 
 ### 2.4 Auto-Forget Candidates (thin slices)
 
-- [ ] **2.4a** Add `retention_score()` function (recency + access_count + importance)
-- [ ] **2.4b** Add `forgettable` command showing low-retention ideas (dry-run)
-- [ ] **2.4c** Add `--execute` flag to `forgettable` to actually forget
-- [ ] **2.4d** Add `--threshold` flag to control retention cutoff
-- [ ] **2.4e** Never auto-forget decisions/conclusions (importance override)
+- [x] **2.4a** Add `retention_score()` function (recency + access_count + importance)
+- [x] **2.4b** Add `forgettable` command showing low-retention ideas (dry-run)
+- [x] **2.4c** Add `--execute` flag to `forgettable` to actually forget
+- [x] **2.4d** Add `--threshold` flag to control retention cutoff
+- [x] **2.4e** Never auto-forget decisions/conclusions (importance override)
 
-**Done when:** `forgettable --execute` safely removes low-value ideas.
+**Done when:** `forgettable --execute` safely removes low-value ideas. ✓
 
 ### 2.5 Consolidation (thin slices)
 
@@ -199,12 +199,13 @@ Each extraction is a separate commit:
 - [x] 2.1a-e - Access tracking complete
 - [x] 2.2a-d - Working memory foundation complete
 - [x] 2.3a-f - Soft forgetting complete
+- [x] 2.4a-e - Auto-forget candidates complete
 
 ### In Progress
-- 2.4 - Auto-Forget Candidates
+- 2.5 - Consolidation
 
 ### Up Next
-- 2.5 - Consolidation
+- 3.1 - Intent Filtering
 
 ---
 

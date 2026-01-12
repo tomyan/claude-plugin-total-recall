@@ -3352,6 +3352,172 @@ def get_forgotten_ideas(limit: int = 50) -> list[dict]:
     return results
 
 
+def retention_score(idea: dict, now: str = None) -> float:
+    """Calculate retention score for an idea (0-1, higher = more worth keeping).
+
+    Score is based on:
+    - Recency: How recently the idea was created (decays over time)
+    - Access frequency: How often the idea has been accessed
+    - Importance: Intent-based importance (decisions, conclusions are important)
+
+    Args:
+        idea: Dict with id, created_at, access_count, last_accessed, intent
+        now: Current ISO datetime (defaults to utcnow)
+
+    Returns:
+        Float 0-1, where 1 = definitely keep, 0 = safe to forget
+    """
+    from datetime import datetime
+
+    if now is None:
+        now = datetime.utcnow().isoformat()
+
+    # Parse dates
+    created_at = idea.get("created_at") or idea.get("message_time") or now
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except:
+        created = datetime.utcnow()
+
+    try:
+        current = datetime.fromisoformat(now.replace("Z", "+00:00"))
+    except:
+        current = datetime.utcnow()
+
+    # Age in days (capped at 365)
+    age_days = min((current - created).days, 365)
+
+    # Recency score: decays from 1.0 to 0.2 over 90 days
+    recency = max(0.2, 1.0 - (age_days / 90) * 0.8)
+
+    # Access score: 0 accesses = 0.0, 5+ = 1.0
+    access_count = idea.get("access_count") or 0
+    access_score = min(1.0, access_count / 5)
+
+    # Importance by intent (decisions and conclusions are protected)
+    intent = idea.get("intent") or "context"
+    importance = {
+        "decision": 1.0,
+        "conclusion": 1.0,
+        "solution": 0.8,
+        "problem": 0.6,
+        "question": 0.5,
+        "todo": 0.7,
+        "context": 0.3,
+    }.get(intent, 0.3)
+
+    # Weighted combination
+    score = (recency * 0.3) + (access_score * 0.3) + (importance * 0.4)
+
+    return round(score, 3)
+
+
+def get_forgettable_ideas(
+    threshold: float = 0.3,
+    limit: int = 100,
+    session: Optional[str] = None
+) -> list[dict]:
+    """Find ideas with low retention scores that are candidates for forgetting.
+
+    Never returns decisions or conclusions (protected by importance).
+
+    Args:
+        threshold: Maximum retention score to include (0-1)
+        limit: Maximum ideas to return
+        session: Optional session filter
+
+    Returns:
+        List of idea dicts with retention_score field, sorted by score ascending
+    """
+    db = get_db()
+
+    # Get non-forgotten ideas with low importance intents
+    sql = """
+        SELECT
+            i.id, i.content, i.intent, i.confidence,
+            i.source_file, i.source_line, i.created_at,
+            i.message_time, i.access_count, i.last_accessed,
+            s.session, s.name as topic
+        FROM ideas i
+        LEFT JOIN spans s ON s.id = i.span_id
+        WHERE (i.forgotten = FALSE OR i.forgotten IS NULL)
+            AND i.intent NOT IN ('decision', 'conclusion')
+    """
+    params = []
+
+    if session:
+        sql += " AND s.session = ?"
+        params.append(session)
+
+    cursor = db.execute(sql, params)
+    ideas = [dict(row) for row in cursor]
+    db.close()
+
+    # Calculate retention scores
+    from datetime import datetime
+    now = datetime.utcnow().isoformat()
+
+    scored = []
+    for idea in ideas:
+        score = retention_score(idea, now)
+        if score <= threshold:
+            idea["retention_score"] = score
+            scored.append(idea)
+
+    # Sort by score ascending (lowest = most forgettable)
+    scored.sort(key=lambda x: x["retention_score"])
+
+    return scored[:limit]
+
+
+def auto_forget_ideas(
+    threshold: float = 0.3,
+    limit: int = 100,
+    session: Optional[str] = None,
+    dry_run: bool = True
+) -> dict:
+    """Automatically forget ideas with low retention scores.
+
+    Protected intents (decision, conclusion) are never forgotten.
+
+    Args:
+        threshold: Maximum retention score to forget (0-1)
+        limit: Maximum ideas to forget in one run
+        session: Optional session filter
+        dry_run: If True, return candidates without forgetting
+
+    Returns:
+        Dict with candidates, count, and samples
+    """
+    candidates = get_forgettable_ideas(threshold=threshold, limit=limit, session=session)
+
+    result = {
+        "threshold": threshold,
+        "candidates": len(candidates),
+        "samples": [
+            {
+                "id": c["id"],
+                "content": c["content"][:100],
+                "intent": c["intent"],
+                "retention_score": c["retention_score"],
+            }
+            for c in candidates[:10]
+        ],
+        "dry_run": dry_run,
+        "forgotten": 0,
+    }
+
+    if not dry_run and candidates:
+        db = get_db()
+        for idea in candidates:
+            db.execute("UPDATE ideas SET forgotten = TRUE WHERE id = ?", (idea["id"],))
+        db.commit()
+        db.close()
+        result["forgotten"] = len(candidates)
+
+    return result
+
+
 def get_session_time_range(session: str) -> dict | None:
     """Get the time range (first/last idea) for a session.
 

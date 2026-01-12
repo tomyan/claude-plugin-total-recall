@@ -866,6 +866,25 @@ def run_command(args):
             results = memory_db.get_forgotten_ideas(limit=args.limit)
             print(json.dumps(results, indent=2, default=str))
 
+        elif args.command == "forgettable":
+            result = memory_db.auto_forget_ideas(
+                threshold=args.threshold,
+                limit=args.limit,
+                session=args.session,
+                dry_run=not args.execute
+            )
+            print(f"Retention threshold: {result['threshold']}")
+            print(f"Found {result['candidates']} forgettable ideas")
+            if result['samples']:
+                print(f"\nSamples (lowest retention first):")
+                for s in result['samples']:
+                    score_bar = "█" * int(s['retention_score'] * 10)
+                    print(f"  [{s['id']:5}] {s['retention_score']:.2f} {score_bar:10} [{s['intent']:10}] {s['content'][:50]}...")
+            if not result['dry_run']:
+                print(f"\nForgotten: {result['forgotten']} ideas")
+            else:
+                print(f"\nDry run - use --execute to actually forget")
+
         elif args.command == "topic-activity":
             result = memory_db.get_topic_activity(
                 topic_id=args.topic_id,
@@ -1176,6 +1195,14 @@ def main():
 
     forgotten_p = subparsers.add_parser("forgotten", help="List all forgotten ideas")
     forgotten_p.add_argument("-n", "--limit", type=int, default=50, help="Max results")
+
+    # Auto-forget candidates
+    forgettable_p = subparsers.add_parser("forgettable", help="Show ideas that are candidates for auto-forgetting")
+    forgettable_p.add_argument("-t", "--threshold", type=float, default=0.3,
+                               help="Max retention score to include (0-1, default 0.3)")
+    forgettable_p.add_argument("-n", "--limit", type=int, default=100, help="Max ideas to show")
+    forgettable_p.add_argument("-s", "--session", help="Filter by session")
+    forgettable_p.add_argument("--execute", action="store_true", help="Actually forget (default is dry-run)")
 
     args = parser.parse_args()
 
