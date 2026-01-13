@@ -2,6 +2,42 @@
 
 A skill that indexes your Claude Code conversations for semantic search, allowing you to recall past decisions, ideas, and context.
 
+## Features
+
+### Search & Retrieval
+- **Hybrid search** - Combines vector similarity (semantic) with BM25 keyword matching
+- **HyDE search** - Uses LLM to generate hypothetical answers for better query matching
+- **Query decomposition** - Automatically handles complex queries like "decisions about X and Y"
+- **Intent filtering** - Filter by type: `decisions`, `questions`, `todos`, `conclusions`
+- **Relevance verification** - Optional LLM-based scoring to improve precision (`--verify`)
+- **Project scoping** - Search within current project or across all conversations
+
+### Memory Organization
+- **Automatic topic detection** - Conversations chunked by semantic shifts with hysteresis
+- **Hierarchical structure** - Projects → Topics → Spans → Ideas
+- **Entity extraction** - Tracks files, technologies, concepts mentioned
+- **Relation tracking** - Links between ideas (supersedes, builds_on, answers, contradicts)
+- **Cross-session linking** - Connects related topics across different conversations
+
+### Cognitive Features
+- **Soft forgetting** - Mark ideas as forgotten without deletion; restore anytime
+- **Retention scoring** - Automatic identification of low-value ideas based on recency, access, and importance
+- **Memory consolidation** - Summarize old context ideas while preserving decisions
+- **Working memory** - Tracks recently accessed ideas with activation decay
+- **Reflection** - Generate insights about sessions or topic evolution
+
+### Graph Exploration
+- **Multi-hop reasoning** - Trace idea relationships across 1-3 hops
+- **Path finding** - Discover how two ideas connect through relations
+- **Topic timeline** - View activity on a topic across sessions
+- **Clustering analysis** - Identify misplaced ideas and merge candidates
+
+### Developer Experience
+- **Continuous indexing** - Hooks index conversations in real-time
+- **CLI interface** - Comprehensive commands for search, management, and analysis
+- **Configurable thresholds** - TOML config with environment variable overrides
+- **164 tests** - Well-tested core functionality
+
 ## Prerequisites
 
 - **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
