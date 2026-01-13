@@ -18,9 +18,9 @@ When the user invokes `/memory-stats`:
 
 ### Step 1: Get Stats
 
-Run the memgraph CLI:
+Run the total-recall CLI:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/memgraph"
+SKILL_DIR="$HOME/.claude/skills/total-recall"
 uv run python "$SKILL_DIR/src/cli.py" stats
 ```
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import memory_db
-from memory_db import DB_PATH, MemgraphError, get_embedding, logger
+from memory_db import DB_PATH, TotalRecallError, get_embedding, logger
 from transcript import get_indexable_messages
 
 try:
@@ -115,7 +115,7 @@ def generate_topic_name_from_content(messages: list[dict], fallback: str = "Disc
         return fallback
 
     # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
     if not api_key or OpenAI is None:
         # No LLM available - extract key terms from first message
         first_content = messages[0].get("content", "")[:200]
@@ -302,7 +302,7 @@ def detect_topic_shift_semantic(content: str, context: dict) -> bool:
         if similarity < threshold + 0.1:
             logger.debug(f"Message diverging from topic (similarity: {similarity:.2f})")
 
-    except MemgraphError:
+    except TotalRecallError:
         # Can't get embedding, skip semantic check
         pass
     except Exception as e:
@@ -438,7 +438,7 @@ def classify_intent_with_llm(content: str) -> str:
     regex_intent = classify_intent(content)
 
     # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
     if not api_key or OpenAI is None:
         return regex_intent
 
@@ -809,7 +809,7 @@ def find_similar_ideas(query: str, limit: int = 5, threshold: float = 0.7) -> li
                 # Lower distance = higher similarity
                 r["similarity"] = 1 / (1 + r["distance"])
         return results
-    except MemgraphError:
+    except TotalRecallError:
         return []
 
 
@@ -835,7 +835,7 @@ def detect_relations_with_embeddings(
 
     try:
         content_embedding = get_embedding(content)
-    except MemgraphError:
+    except TotalRecallError:
         # Fallback to keyword-based detection
         return []
 
@@ -946,7 +946,7 @@ def summarize_span_with_llm(messages: list[dict]) -> str:
         return ""
 
     # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
     if not api_key or OpenAI is None:
         return summarize_span(messages)
 
@@ -995,11 +995,11 @@ def index_transcript(
         Dict with indexing stats
 
     Raises:
-        MemgraphError: If file not found or other critical errors
+        TotalRecallError: If file not found or other critical errors
     """
     # Check file exists
     if not Path(file_path).exists():
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Transcript file not found: {file_path}",
             "file_not_found",
             {"path": file_path}
@@ -1066,7 +1066,7 @@ def index_transcript(
         summary = summarize_span_with_llm(messages) if messages else ""
         try:
             memory_db.close_span(span_id, end_line, summary, end_time=end_time)
-        except MemgraphError as e:
+        except TotalRecallError as e:
             logger.warning(f"Failed to close span {span_id}: {e}")
         except Exception as e:
             logger.warning(f"Unexpected error closing span: {e}")
@@ -1239,7 +1239,7 @@ def index_transcript(
                 except Exception as e:
                     logger.debug(f"Incremental span embedding failed: {e}")
 
-        except MemgraphError as e:
+        except TotalRecallError as e:
             # Log embedding failures but continue processing
             if e.error_code == "missing_api_key":
                 logger.warning("Skipping idea storage: API key not configured")

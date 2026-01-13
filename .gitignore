@@ -5,4 +5,4 @@ __pycache__/
 .venv/
 
 # Runtime data (created by bootstrap)
-~/.claude-plugin-memgraph/
+~/.claude-plugin-total-recall/

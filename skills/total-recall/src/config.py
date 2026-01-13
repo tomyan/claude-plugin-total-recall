@@ -1,4 +1,4 @@
-"""Configuration and constants for memgraph."""
+"""Configuration and constants for total-recall."""
 
 import logging
 import os
@@ -13,13 +13,13 @@ except ImportError:
 
 
 @dataclass
-class MemgraphConfig:
-    """Configuration for memgraph.
+class TotalRecallConfig:
+    """Configuration for total-recall.
 
     All thresholds and tuneable parameters in one place.
     """
     # Database
-    db_path: Path = field(default_factory=lambda: Path.home() / ".claude-plugin-memgraph" / "memory.db")
+    db_path: Path = field(default_factory=lambda: Path.home() / ".claude-plugin-total-recall" / "memory.db")
 
     # Embedding settings
     embedding_model: str = "text-embedding-3-small"
@@ -40,20 +40,20 @@ class MemgraphConfig:
     default_confidence: float = 0.5
 
     # Logging
-    log_path: Path = field(default_factory=lambda: Path.home() / ".claude-plugin-memgraph" / "memgraph.log")
+    log_path: Path = field(default_factory=lambda: Path.home() / ".claude-plugin-total-recall" / "total-recall.log")
 
 
 def _find_config_file() -> Optional[Path]:
-    """Find memgraph.toml config file.
+    """Find total-recall.toml config file.
 
     Searches in order:
-    1. MEMGRAPH_CONFIG env var path
+    1. TOTAL_RECALL_CONFIG env var path
     2. Current working directory
-    3. ~/.config/memgraph/
-    4. ~/.claude-plugin-memgraph/
+    3. ~/.config/total-recall/
+    4. ~/.claude-plugin-total-recall/
     """
     # Check env var first
-    env_path = os.environ.get("MEMGRAPH_CONFIG")
+    env_path = os.environ.get("TOTAL_RECALL_CONFIG")
     if env_path:
         path = Path(env_path)
         if path.exists():
@@ -61,9 +61,9 @@ def _find_config_file() -> Optional[Path]:
 
     # Search paths
     search_paths = [
-        Path.cwd() / "memgraph.toml",
-        Path.home() / ".config" / "memgraph" / "memgraph.toml",
-        Path.home() / ".claude-plugin-memgraph" / "memgraph.toml",
+        Path.cwd() / "total-recall.toml",
+        Path.home() / ".config" / "total-recall" / "total-recall.toml",
+        Path.home() / ".claude-plugin-total-recall" / "total-recall.toml",
     ]
 
     for path in search_paths:
@@ -73,13 +73,13 @@ def _find_config_file() -> Optional[Path]:
     return None
 
 
-def _load_config_from_toml(path: Path) -> MemgraphConfig:
+def _load_config_from_toml(path: Path) -> TotalRecallConfig:
     """Load config from TOML file."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
     # Start with defaults
-    config = MemgraphConfig()
+    config = TotalRecallConfig()
 
     # Override with TOML values
     if "database" in data:
@@ -114,19 +114,19 @@ def _load_config_from_toml(path: Path) -> MemgraphConfig:
     return config
 
 
-def _apply_env_overrides(config: MemgraphConfig) -> MemgraphConfig:
+def _apply_env_overrides(config: TotalRecallConfig) -> TotalRecallConfig:
     """Apply environment variable overrides to config.
 
     Env vars:
-        MEMGRAPH_DB_PATH: Override database path
-        MEMGRAPH_TOPIC_SHIFT_THRESHOLD: Override topic shift threshold
+        TOTAL_RECALL_DB_PATH: Override database path
+        TOTAL_RECALL_TOPIC_SHIFT_THRESHOLD: Override topic shift threshold
     """
     # Database path
-    if db_path := os.environ.get("MEMGRAPH_DB_PATH"):
+    if db_path := os.environ.get("TOTAL_RECALL_DB_PATH"):
         config.db_path = Path(db_path)
 
     # Topic shift threshold
-    if threshold := os.environ.get("MEMGRAPH_TOPIC_SHIFT_THRESHOLD"):
+    if threshold := os.environ.get("TOTAL_RECALL_TOPIC_SHIFT_THRESHOLD"):
         try:
             config.topic_shift_threshold = float(threshold)
         except ValueError:
@@ -135,13 +135,13 @@ def _apply_env_overrides(config: MemgraphConfig) -> MemgraphConfig:
     return config
 
 
-def _init_config() -> MemgraphConfig:
+def _init_config() -> TotalRecallConfig:
     """Initialize config, loading from TOML if available, then applying env overrides."""
     config_file = _find_config_file()
     if config_file:
         config = _load_config_from_toml(config_file)
     else:
-        config = MemgraphConfig()
+        config = TotalRecallConfig()
 
     # Env vars override TOML and defaults
     config = _apply_env_overrides(config)
@@ -153,7 +153,7 @@ def _init_config() -> MemgraphConfig:
 _config = _init_config()
 
 
-def get_config() -> MemgraphConfig:
+def get_config() -> TotalRecallConfig:
     """Get the current configuration."""
     return _config
 
@@ -174,4 +174,4 @@ logging.basicConfig(
         logging.FileHandler(LOG_PATH),
     ]
 )
-logger = logging.getLogger("memgraph")
+logger = logging.getLogger("total-recall")

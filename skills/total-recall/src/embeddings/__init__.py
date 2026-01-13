@@ -1,4 +1,4 @@
-"""Embedding operations for memgraph."""
+"""Embedding operations for total-recall."""
 
 from embeddings.cache import (
     CACHE_PATH,

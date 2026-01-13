@@ -6,7 +6,7 @@ import subprocess
 from typing import Optional
 
 from config import logger
-from errors import MemgraphError
+from errors import TotalRecallError
 
 
 def claude_complete(prompt: str, system: Optional[str] = None) -> str:
@@ -23,15 +23,15 @@ def claude_complete(prompt: str, system: Optional[str] = None) -> str:
         The response text
 
     Raises:
-        MemgraphError: If Claude CLI fails
+        TotalRecallError: If Claude CLI fails
     """
     cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence"]
     if system:
         cmd.extend(["--system-prompt", system])
 
-    # Set MEMGRAPH_INTERNAL to prevent hooks from re-indexing during this call
+    # Set TOTAL_RECALL_INTERNAL to prevent hooks from re-indexing during this call
     env = os.environ.copy()
-    env["MEMGRAPH_INTERNAL"] = "1"
+    env["TOTAL_RECALL_INTERNAL"] = "1"
 
     try:
         result = subprocess.run(
@@ -45,7 +45,7 @@ def claude_complete(prompt: str, system: Optional[str] = None) -> str:
         if result.returncode != 0:
             error_msg = result.stderr or "Unknown error"
             logger.warning(f"Claude CLI failed: {error_msg}")
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"Claude CLI failed: {error_msg}",
                 "claude_cli_error",
                 {"stderr": result.stderr, "returncode": result.returncode}
@@ -71,12 +71,12 @@ def claude_complete(prompt: str, system: Optional[str] = None) -> str:
             return result.stdout.strip()
 
     except subprocess.TimeoutExpired:
-        raise MemgraphError(
+        raise TotalRecallError(
             "Claude CLI timed out after 60 seconds",
             "claude_cli_timeout"
         )
     except FileNotFoundError:
-        raise MemgraphError(
+        raise TotalRecallError(
             "Claude CLI not found. Ensure 'claude' is in PATH.",
             "claude_cli_not_found"
         )

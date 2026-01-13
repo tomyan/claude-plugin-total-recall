@@ -1,4 +1,4 @@
-"""Embedding provider abstraction for memgraph."""
+"""Embedding provider abstraction for total-recall."""
 
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -35,7 +35,7 @@ class EmbeddingProvider(ABC):
             Embedding vector
 
         Raises:
-            MemgraphError: If embedding fails
+            TotalRecallError: If embedding fails
         """
         pass
 

@@ -4,7 +4,7 @@
 
 set -e
 
-RUNTIME_DIR="$HOME/.claude-plugin-memgraph"
+RUNTIME_DIR="$HOME/.claude-plugin-total-recall"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Create runtime directory
@@ -13,7 +13,7 @@ mkdir -p "$RUNTIME_DIR"
 # Initialize uv project if needed
 if [ ! -f "$RUNTIME_DIR/pyproject.toml" ]; then
     cd "$RUNTIME_DIR"
-    uv init --name memgraph --no-readme
+    uv init --name total-recall --no-readme
     uv add sqlite-vec openai
 fi
 

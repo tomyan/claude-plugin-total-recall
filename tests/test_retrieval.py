@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "total-recall" / "src"))
 
 
 class TestHyDE:
@@ -79,14 +79,14 @@ class TestHyDE:
         assert result == "JWT auth with refresh tokens"
 
     def test_hyde_raises_on_llm_error(self, monkeypatch):
-        """HyDE generation raises MemgraphError on LLM failure."""
+        """HyDE generation raises TotalRecallError on LLM failure."""
         import search.hyde as hyde_module
         import memory_db
 
         mock_claude = MagicMock(side_effect=Exception("Claude CLI error"))
         monkeypatch.setattr(hyde_module, "claude_complete", mock_claude)
 
-        with pytest.raises(memory_db.MemgraphError) as exc_info:
+        with pytest.raises(memory_db.TotalRecallError) as exc_info:
             memory_db.generate_hypothetical_doc("how does auth work?")
 
         assert exc_info.value.error_code == "hyde_generation_error"
@@ -344,7 +344,7 @@ class TestBatchEmbedding:
 
         memory_db.clear_embedding_cache()
         memory_db._reset_provider()  # Reset provider to allow mocking
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         fake_embeddings = [[0.1] * 1536, [0.2] * 1536, [0.3] * 1536]
         mock_response = MagicMock()
@@ -368,7 +368,7 @@ class TestBatchEmbedding:
 
         memory_db.clear_embedding_cache()
         memory_db._reset_provider()  # Reset provider to allow mocking
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         # Pre-cache one text
         memory_db._embedding_cache["cached_text"] = [0.5] * 1536
@@ -405,7 +405,7 @@ class TestBatchEmbedding:
 
         memory_db.clear_embedding_cache()
         memory_db._reset_provider()  # Reset provider to allow mocking
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         # Pre-cache all texts
         memory_db._embedding_cache["text1"] = [0.1] * 1536
@@ -964,7 +964,7 @@ class TestExportImport:
         import memory_db
         memory_db.init_db()
 
-        with pytest.raises(memory_db.MemgraphError) as exc:
+        with pytest.raises(memory_db.TotalRecallError) as exc:
             memory_db.import_data({"version": 999, "spans": [], "ideas": []})
 
         assert "Unsupported export version" in str(exc.value)
@@ -1028,7 +1028,7 @@ class TestGetContext:
         import memory_db
         memory_db.init_db()
 
-        with pytest.raises(memory_db.MemgraphError) as exc:
+        with pytest.raises(memory_db.TotalRecallError) as exc:
             memory_db.get_context(999)
 
         assert exc.value.error_code == "not_found"

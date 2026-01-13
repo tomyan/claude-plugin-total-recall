@@ -40,7 +40,7 @@ Each extraction is a separate commit:
 - [x] **1.2d** Add env var override for one value (prove pattern)
 - [x] **1.2e** Migrate remaining thresholds to config (batch)
 
-**Done when:** `memgraph.toml` can override any threshold, env vars work.
+**Done when:** `total-recall.toml` can override any threshold, env vars work.
 
 ---
 

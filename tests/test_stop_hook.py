@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
-SKILL_SRC = Path(__file__).parent.parent / "skills" / "memgraph" / "src"
+SKILL_SRC = Path(__file__).parent.parent / "skills" / "total-recall" / "src"
 
 # Add src to path for imports
 sys.path.insert(0, str(SKILL_SRC))
@@ -87,7 +87,7 @@ class TestIndexAfterTurn:
     def test_index_after_turn_cli(self, mock_db, mock_embeddings, tmp_path, monkeypatch):
         """CLI backfill command works for incremental indexing."""
         # Set up environment
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "fake-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "fake-key")
 
         import memory_db
         memory_db.init_db()
@@ -105,7 +105,7 @@ class TestIndexAfterTurn:
             [sys.executable, str(SKILL_SRC / "backfill.py"), "backfill", str(transcript)],
             capture_output=True,
             text=True,
-            env={**os.environ, "OPENAI_TOKEN_MEMORY_EMBEDDINGS": "fake-key"}
+            env={**os.environ, "OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS": "fake-key"}
         )
 
         # Should succeed (may fail on actual API call, but structure is tested)

@@ -19,9 +19,9 @@ When the user invokes `/memory-topics`:
 
 ### Step 1: List Topics
 
-Run the memgraph CLI:
+Run the total-recall CLI:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/memgraph"
+SKILL_DIR="$HOME/.claude/skills/total-recall"
 uv run python "$SKILL_DIR/src/cli.py" topics
 ```
 

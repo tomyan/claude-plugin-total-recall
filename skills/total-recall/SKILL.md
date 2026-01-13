@@ -1,16 +1,16 @@
 ---
 context: fork
-name: memgraph
+name: total-recall
 description: Search past conversations for relevant context
 hooks:
   UserPromptSubmit:
     - hooks:
         - type: command
-          command: bash ~/.claude/skills/memgraph/hooks/index-continuous.sh
+          command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
   Stop:
     - hooks:
         - type: command
-          command: bash ~/.claude/skills/memgraph/hooks/index-continuous.sh
+          command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
 ---
 
 # Memory Retrieval Skill
@@ -20,7 +20,7 @@ Searches past conversations for relevant ideas, decisions, and context using sem
 ## Prerequisites
 
 - **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **OPENAI_TOKEN_MEMORY_EMBEDDINGS** - Environment variable with OpenAI API key (used for embeddings)
+- **OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS** - Environment variable with OpenAI API key (used for embeddings)
 
 ## Invocation
 
@@ -37,9 +37,9 @@ When the user invokes `/remember <query>`:
 
 ### Step 1: Search
 
-Run the memgraph CLI (handles bootstrap automatically). Pass `--cwd` to scope search to the current project:
+Run the total-recall CLI (handles bootstrap automatically). Pass `--cwd` to scope search to the current project:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/memgraph"
+SKILL_DIR="$HOME/.claude/skills/total-recall"
 uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --cwd "$(pwd)"
 ```
 

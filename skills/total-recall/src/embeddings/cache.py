@@ -1,4 +1,4 @@
-"""Embedding cache management for memgraph."""
+"""Embedding cache management for total-recall."""
 
 import json
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 from config import logger
 
 # Cache configuration
-CACHE_PATH = Path.home() / ".claude-plugin-memgraph" / "embedding_cache.json"
+CACHE_PATH = Path.home() / ".claude-plugin-total-recall" / "embedding_cache.json"
 _CACHE_MAX_SIZE = 1000
 
 # LRU cache for embeddings to reduce API calls

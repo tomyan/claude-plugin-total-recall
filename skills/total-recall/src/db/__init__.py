@@ -1,4 +1,4 @@
-"""Database operations for memgraph."""
+"""Database operations for total-recall."""
 
 from db.connection import get_db
 from db.schema import init_db

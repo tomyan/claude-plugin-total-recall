@@ -507,12 +507,12 @@ Modes:
 - 1536 dimensions
 - Good quality/cost balance
 - Well-supported
-- Environment variable: `OPENAI_TOKEN_MEMORY_EMBEDDINGS`
+- Environment variable: `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS`
 
 ### Python with uv
 - sqlite-vec has good Python bindings
 - uv for fast, reliable dependency management
-- Runtime at `~/.claude-plugin-memgraph/`
+- Runtime at `~/.claude-plugin-total-recall/`
 - **Self-bootstrapping**: Skills detect missing deps and install on first run
 
 ### Stop Hook for Indexing
@@ -531,12 +531,12 @@ Modes:
 
 ### Directory Structure
 ```
-~/.claude-plugin-memgraph/     # Runtime (deps + data only)
+~/.claude-plugin-total-recall/     # Runtime (deps + data only)
 ├── .venv/                     # Virtual environment (created by uv)
 ├── memory.db                  # SQLite database
 └── pyproject.toml             # Dependencies
 
-~/.claude/skills/memgraph/     # Skill (code lives here)
+~/.claude/skills/total-recall/     # Skill (code lives here)
 ├── SKILL.md
 ├── bootstrap.sh
 └── src/
@@ -551,8 +551,8 @@ Skills call a bootstrap script before running Python code:
 #!/bin/bash
 # bootstrap.sh - ensures runtime is ready
 
-RUNTIME_DIR="$HOME/.claude-plugin-memgraph"
-PLUGIN_DIR="$(dirname "$(dirname "$0")")"  # Resolve from skills/memgraph/
+RUNTIME_DIR="$HOME/.claude-plugin-total-recall"
+PLUGIN_DIR="$(dirname "$(dirname "$0")")"  # Resolve from skills/total-recall/
 
 # Create runtime directory
 mkdir -p "$RUNTIME_DIR"
@@ -581,7 +581,7 @@ echo "$RUNTIME_DIR"
 
 Each skill starts with:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/memgraph"
+SKILL_DIR="$HOME/.claude/skills/total-recall"
 RUNTIME=$("$SKILL_DIR/bootstrap.sh")
 cd "$RUNTIME" && uv run python "$SKILL_DIR/src/memory_db.py" <command> [args]
 ```

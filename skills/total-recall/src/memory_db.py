@@ -23,7 +23,7 @@ from config import DB_PATH, EMBEDDING_MODEL, EMBEDDING_DIM, LOG_PATH, logger  # 
 # Custom Exception
 # =============================================================================
 
-from errors import MemgraphError  # noqa: E402 - imported here for backward compatibility
+from errors import TotalRecallError  # noqa: E402
 
 
 # =============================================================================
@@ -92,7 +92,7 @@ def create_project(name: str, description: Optional[str] = None) -> int:
         db.commit()
     except sqlite3.IntegrityError:
         db.close()
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Project '{name}' already exists",
             "duplicate_project",
             {"name": name}
@@ -195,7 +195,7 @@ def reparent_topic(topic_id: int, parent_id: int) -> bool:
         True if updated
 
     Raises:
-        MemgraphError: If topic or parent not found, or would create cycle
+        TotalRecallError: If topic or parent not found, or would create cycle
     """
     db = get_db()
 
@@ -205,10 +205,10 @@ def reparent_topic(topic_id: int, parent_id: int) -> bool:
 
     if not topic:
         db.close()
-        raise MemgraphError(f"Topic {topic_id} not found", "topic_not_found")
+        raise TotalRecallError(f"Topic {topic_id} not found", "topic_not_found")
     if not parent:
         db.close()
-        raise MemgraphError(f"Parent topic {parent_id} not found", "topic_not_found")
+        raise TotalRecallError(f"Parent topic {parent_id} not found", "topic_not_found")
 
     # Check for cycles - walk up the parent chain
     current = parent_id
@@ -216,7 +216,7 @@ def reparent_topic(topic_id: int, parent_id: int) -> bool:
     while current:
         if current in visited:
             db.close()
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"Cannot reparent: would create cycle",
                 "cycle_detected",
                 {"topic_id": topic_id, "parent_id": parent_id}
@@ -424,11 +424,11 @@ Reply with ONLY the project name that best matches, or "NONE" if no good match."
                 if not dry_run:
                     assign_topic_to_project(topic["id"], matched_project["id"])
 
-        except MemgraphError:
-            raise  # Re-raise MemgraphError as-is
+        except TotalRecallError:
+            raise  # Re-raise TotalRecallError as-is
         except Exception as e:
             logger.error(f"Failed to categorize topic {topic['id']}: {e}")
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"Failed to categorize topic: {e}",
                 "auto_categorize_error",
                 {"topic_id": topic["id"], "original_error": str(e)}
@@ -1696,11 +1696,11 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
 
 Reply with ONLY the topic name, nothing else."""
             suggested_name = claude_complete(prompt).strip()
-        except MemgraphError:
-            raise  # Re-raise MemgraphError as-is
+        except TotalRecallError:
+            raise  # Re-raise TotalRecallError as-is
         except Exception as e:
             logger.error(f"Failed to generate cluster name: {e}")
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"Failed to generate cluster name: {e}",
                 "cluster_naming_error",
                 {"cluster_id": cluster_id, "original_error": str(e)}
@@ -2014,11 +2014,11 @@ Reply with ONLY the suggested topic name, nothing else."""
         name = re.sub(r'^\*(.+)\*$', r'\1', name)  # Remove italic
         name = name.strip('"\'')  # Remove quotes
         return name
-    except MemgraphError:
-        raise  # Re-raise MemgraphError as-is
+    except TotalRecallError:
+        raise  # Re-raise TotalRecallError as-is
     except Exception as e:
         logger.error(f"Failed to suggest topic name: {e}")
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Failed to suggest topic name: {e}",
             "topic_name_suggestion_error",
             {"topic_id": topic_id, "original_error": str(e)}
@@ -4731,13 +4731,13 @@ If none should be removed, reply: []"""
                             "reason": "llm_low_value",
                         })
 
-        except MemgraphError:
+        except TotalRecallError:
             db.close()
-            raise  # Re-raise MemgraphError as-is
+            raise  # Re-raise TotalRecallError as-is
         except Exception as e:
             db.close()
             logger.error(f"LLM filter batch failed: {e}")
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"LLM filter failed: {e}",
                 "llm_filter_error",
                 {"batch_start": i, "original_error": str(e)}
@@ -4803,7 +4803,7 @@ def get_context(idea_id: int, lines_before: int = 5, lines_after: int = 5) -> di
     db.close()
 
     if not row:
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Idea {idea_id} not found",
             "not_found",
             {"idea_id": idea_id}
@@ -4986,7 +4986,7 @@ def import_data(data: dict, replace: bool = False) -> dict:
     """
     version = data.get("version", 1)
     if version != 1:
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Unsupported export version: {version}",
             "import_error",
             {"version": version}

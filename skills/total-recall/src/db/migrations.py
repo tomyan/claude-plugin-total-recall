@@ -1,4 +1,4 @@
-"""Database migrations for memgraph."""
+"""Database migrations for total-recall."""
 
 import json
 import sqlite3

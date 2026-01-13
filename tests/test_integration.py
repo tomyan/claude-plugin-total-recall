@@ -5,7 +5,7 @@ import pytest
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "total-recall" / "src"))
 
 from transcript import read_transcript, is_indexable
 

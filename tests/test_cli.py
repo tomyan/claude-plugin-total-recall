@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 
-SKILL_SRC = Path(__file__).parent.parent / "skills" / "memgraph" / "src"
+SKILL_SRC = Path(__file__).parent.parent / "skills" / "total-recall" / "src"
 
 
 class TestUnifiedCLI:
-    """Test the unified memgraph CLI."""
+    """Test the unified total-recall CLI."""
 
     def test_cli_help(self):
         """CLI shows help without error."""
@@ -22,7 +22,7 @@ class TestUnifiedCLI:
             text=True
         )
         assert result.returncode == 0
-        assert "memgraph" in result.stdout.lower() or "memory" in result.stdout.lower()
+        assert "total-recall" in result.stdout.lower() or "memory" in result.stdout.lower()
 
     def test_cli_stats_command(self):
         """CLI stats command returns JSON."""

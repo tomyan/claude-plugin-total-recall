@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Unified CLI for memgraph memory system.
+"""Unified CLI for total-recall memory system.
 
 Single entry point that handles bootstrap internally.
-Usage: memgraph <command> [args]
+Usage: total-recall <command> [args]
 """
 
 import argparse
@@ -18,7 +18,7 @@ SKILL_DIR = Path(__file__).parent.parent
 SRC_DIR = SKILL_DIR / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-RUNTIME_DIR = Path.home() / ".claude-plugin-memgraph"
+RUNTIME_DIR = Path.home() / ".claude-plugin-total-recall"
 
 
 def safe_result(data: Any) -> dict:
@@ -152,7 +152,7 @@ def run_search_command(
             "results": results,
             "detected_filters": detected if detected else None
         })
-    except memory_db.MemgraphError as e:
+    except memory_db.TotalRecallError as e:
         return error_result(str(e), e.error_code, e.details)
     except Exception as e:
         return error_result(f"Search failed: {e}", "search_error")
@@ -164,7 +164,7 @@ def run_stats_command() -> dict:
         import memory_db
         stats = memory_db.get_stats()
         return safe_result(stats)
-    except memory_db.MemgraphError as e:
+    except memory_db.TotalRecallError as e:
         return error_result(str(e), e.error_code, e.details)
     except Exception as e:
         return error_result(f"Failed to get stats: {e}", "stats_error")
@@ -178,7 +178,7 @@ def ensure_runtime():
     if not pyproject.exists():
         # Initialize uv project
         subprocess.run(
-            ["uv", "init", "--name", "memgraph", "--no-readme"],
+            ["uv", "init", "--name", "total-recall", "--no-readme"],
             cwd=RUNTIME_DIR,
             capture_output=True
         )
@@ -1120,7 +1120,7 @@ def run_command(args):
                     print(f"    {prefix} {idea['content']}")
             print()
 
-    except memory_db.MemgraphError as e:
+    except memory_db.TotalRecallError as e:
         print(json.dumps(e.to_dict()), file=sys.stderr)
         sys.exit(1)
     except Exception as e:
@@ -1130,7 +1130,7 @@ def run_command(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="memgraph",
+        prog="total-recall",
         description="Memory graph for Claude conversations"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)

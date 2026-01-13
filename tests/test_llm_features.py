@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "total-recall" / "src"))
 
 
 class TestLLMSummarization:
@@ -15,7 +15,7 @@ class TestLLMSummarization:
 
     def test_summarize_span_with_llm(self, monkeypatch):
         """LLM generates meaningful summary from messages."""
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         from indexer import summarize_span_with_llm
 
@@ -42,7 +42,7 @@ class TestLLMSummarization:
 
     def test_summarize_span_fallback_on_api_failure(self, monkeypatch):
         """Falls back to basic summarization on API failure."""
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         from indexer import summarize_span_with_llm
 
@@ -62,7 +62,7 @@ class TestLLMSummarization:
 
     def test_summarize_span_fallback_no_api_key(self, monkeypatch):
         """Falls back to basic summarization without API key."""
-        monkeypatch.delenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", raising=False)
+        monkeypatch.delenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", raising=False)
 
         from indexer import summarize_span_with_llm
 
@@ -81,7 +81,7 @@ class TestLLMIntentClassification:
 
     def test_classify_intent_with_llm(self, monkeypatch):
         """LLM classifies ambiguous content accurately."""
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         from indexer import classify_intent_with_llm
 
@@ -102,7 +102,7 @@ class TestLLMIntentClassification:
 
     def test_classify_intent_with_llm_validates_output(self, monkeypatch):
         """LLM output is validated against known intents."""
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         from indexer import classify_intent_with_llm
 
@@ -125,7 +125,7 @@ class TestLLMIntentClassification:
 
     def test_classify_intent_fallback_on_failure(self, monkeypatch):
         """Falls back to regex classification on LLM failure."""
-        monkeypatch.setenv("OPENAI_TOKEN_MEMORY_EMBEDDINGS", "test-key")
+        monkeypatch.setenv("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS", "test-key")
 
         from indexer import classify_intent_with_llm
 

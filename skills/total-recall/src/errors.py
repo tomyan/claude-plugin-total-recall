@@ -1,10 +1,10 @@
-"""Custom exceptions for memgraph."""
+"""Custom exceptions for total-recall."""
 
 from typing import Any, Optional
 
 
-class MemgraphError(Exception):
-    """Custom exception for memgraph errors with structured info."""
+class TotalRecallError(Exception):
+    """Custom exception for total-recall errors with structured info."""
 
     def __init__(
         self,

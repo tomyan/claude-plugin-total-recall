@@ -1,10 +1,10 @@
-"""Database schema and initialization for memgraph."""
+"""Database schema and initialization for total-recall."""
 
 import sqlite3
 
 import config
 from db.connection import get_db
-from errors import MemgraphError
+from errors import TotalRecallError
 
 
 # Schema SQL for all tables
@@ -154,7 +154,7 @@ def init_db():
         config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         config.logger.error(f"Failed to create database directory: {e}")
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Cannot create database directory: {e}",
             "database_error",
             {"path": str(config.DB_PATH.parent), "original_error": str(e)}

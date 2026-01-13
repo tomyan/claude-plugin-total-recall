@@ -1,11 +1,11 @@
-"""Database connection management for memgraph."""
+"""Database connection management for total-recall."""
 
 import sqlite3
 
 import sqlite_vec
 
 import config
-from errors import MemgraphError
+from errors import TotalRecallError
 
 
 def get_db() -> sqlite3.Connection:
@@ -19,14 +19,14 @@ def get_db() -> sqlite3.Connection:
         return db
     except sqlite3.DatabaseError as e:
         config.logger.error(f"Database error: {e}")
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Failed to open database at {config.DB_PATH}: {e}",
             "database_error",
             {"path": str(config.DB_PATH), "original_error": str(e)}
         ) from e
     except Exception as e:
         config.logger.error(f"Unexpected error opening database: {e}")
-        raise MemgraphError(
+        raise TotalRecallError(
             f"Failed to open database: {e}",
             "database_error",
             {"original_error": str(e)}

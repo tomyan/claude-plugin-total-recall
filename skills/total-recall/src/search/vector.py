@@ -1,4 +1,4 @@
-"""Vector search operations for memgraph."""
+"""Vector search operations for total-recall."""
 
 from datetime import datetime
 from typing import Optional

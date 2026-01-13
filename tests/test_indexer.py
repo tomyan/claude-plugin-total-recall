@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "memgraph" / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "total-recall" / "src"))
 
 
 class TestTopicDetection:

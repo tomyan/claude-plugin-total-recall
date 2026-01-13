@@ -21,7 +21,7 @@ When the user invokes `/memory-backfill`:
 ### Step 1: Determine Scope
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/memgraph"
+SKILL_DIR="$HOME/.claude/skills/total-recall"
 ```
 
 **Current session (no args):**

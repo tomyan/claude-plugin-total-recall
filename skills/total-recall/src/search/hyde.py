@@ -1,4 +1,4 @@
-"""HyDE (Hypothetical Document Embeddings) search for memgraph."""
+"""HyDE (Hypothetical Document Embeddings) search for total-recall."""
 
 from typing import Optional
 
@@ -6,7 +6,7 @@ import config
 from db.connection import get_db
 from embeddings.openai import get_embedding
 from embeddings.serialize import serialize_embedding
-from errors import MemgraphError
+from errors import TotalRecallError
 from llm.claude import claude_complete
 from search.vector import _update_access_tracking
 
@@ -34,11 +34,11 @@ Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably".""
         config.logger.debug(f"HyDE generated: {hypothetical[:100]}...")
         return hypothetical
 
-    except MemgraphError:
-        raise  # Re-raise MemgraphError as-is
+    except TotalRecallError:
+        raise  # Re-raise TotalRecallError as-is
     except Exception as e:
         config.logger.error(f"LLM HyDE generation failed: {e}")
-        raise MemgraphError(
+        raise TotalRecallError(
             f"HyDE generation failed: {e}",
             "hyde_generation_error",
             {"query": query, "original_error": str(e)}

@@ -2,12 +2,12 @@
 # Continuous indexing hook - runs on UserPromptSubmit and Stop
 # Designed to be fast and run frequently
 
-SKILL_DIR="$HOME/.claude/skills/memgraph"
-RUNTIME_DIR="$HOME/.claude-plugin-memgraph"
+SKILL_DIR="$HOME/.claude/skills/total-recall"
+RUNTIME_DIR="$HOME/.claude-plugin-total-recall"
 LOCK_FILE="$RUNTIME_DIR/index.lock"
 
-# Skip if called from memgraph itself (prevents unnecessary re-indexing)
-if [ -n "$MEMGRAPH_INTERNAL" ]; then
+# Skip if called from total-recall itself (prevents unnecessary re-indexing)
+if [ -n "$TOTAL_RECALL_INTERNAL" ]; then
     exit 0
 fi
 

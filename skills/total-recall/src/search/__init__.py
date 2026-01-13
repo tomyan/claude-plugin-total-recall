@@ -1,4 +1,4 @@
-"""Search operations for memgraph."""
+"""Search operations for total-recall."""
 
 from search.vector import (
     search_ideas,

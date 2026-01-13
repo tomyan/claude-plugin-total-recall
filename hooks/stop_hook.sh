@@ -5,7 +5,7 @@
 # Environment variables used:
 #   CLAUDE_SESSION_ID - The current session UUID
 #   CLAUDE_PROJECT_DIR - The project directory path
-#   OPENAI_TOKEN_MEMORY_EMBEDDINGS - OpenAI API key for embeddings
+#   OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS - OpenAI API key for embeddings
 
 set -e
 
@@ -27,13 +27,13 @@ if [ ! -f "$TRANSCRIPT" ]; then
 fi
 
 # Skip if no API key configured
-if [ -z "$OPENAI_TOKEN_MEMORY_EMBEDDINGS" ]; then
+if [ -z "$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" ]; then
     exit 0
 fi
 
 # Paths
-SKILL_DIR="$(dirname "$(dirname "$(realpath "$0")")")/skills/memgraph"
-RUNTIME_DIR="$HOME/.claude-plugin-memgraph"
+SKILL_DIR="$(dirname "$(dirname "$(realpath "$0")")")/skills/total-recall"
+RUNTIME_DIR="$HOME/.claude-plugin-total-recall"
 
 # Bootstrap runtime if needed
 if [ ! -d "$RUNTIME_DIR/.venv" ]; then
@@ -42,7 +42,7 @@ if [ ! -d "$RUNTIME_DIR/.venv" ]; then
 
     # Initialize uv project
     if [ ! -f "pyproject.toml" ]; then
-        uv init --name memgraph 2>/dev/null || true
+        uv init --name total-recall 2>/dev/null || true
         uv add sqlite-vec openai 2>/dev/null || true
     fi
 

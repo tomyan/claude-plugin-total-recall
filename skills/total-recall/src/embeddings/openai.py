@@ -1,4 +1,4 @@
-"""OpenAI embedding provider for memgraph."""
+"""OpenAI embedding provider for total-recall."""
 
 import os
 from typing import Optional
@@ -8,7 +8,7 @@ from openai import OpenAI
 from config import EMBEDDING_MODEL, EMBEDDING_DIM, logger
 from embeddings.cache import cache_embedding, get_cached_embedding
 from embeddings.provider import EmbeddingProvider
-from errors import MemgraphError
+from errors import TotalRecallError
 
 
 class OpenAIEmbeddings(EmbeddingProvider):
@@ -36,10 +36,10 @@ class OpenAIEmbeddings(EmbeddingProvider):
     def _get_client(self) -> OpenAI:
         """Get or create OpenAI client."""
         if self._client is None:
-            api_key = os.environ.get("OPENAI_TOKEN_MEMORY_EMBEDDINGS")
+            api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
             if not api_key:
-                raise MemgraphError(
-                    "OPENAI_TOKEN_MEMORY_EMBEDDINGS environment variable not set. "
+                raise TotalRecallError(
+                    "OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS environment variable not set. "
                     "Set this to your OpenAI API key to enable memory search.",
                     "missing_api_key"
                 )
@@ -57,7 +57,7 @@ class OpenAIEmbeddings(EmbeddingProvider):
             Embedding vector (1536 floats)
 
         Raises:
-            MemgraphError: If API key is missing or API call fails
+            TotalRecallError: If API key is missing or API call fails
         """
         # Check cache first
         if use_cache:
@@ -72,11 +72,11 @@ class OpenAIEmbeddings(EmbeddingProvider):
                 input=text
             )
             embedding = response.data[0].embedding
-        except MemgraphError:
+        except TotalRecallError:
             raise
         except Exception as e:
             logger.error(f"Embedding API call failed: {e}")
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"Failed to get embedding from OpenAI: {e}",
                 "embedding_failed",
                 {"model": self._model, "original_error": str(e)}
@@ -105,7 +105,7 @@ class OpenAIEmbeddings(EmbeddingProvider):
             List of embedding vectors, one per input text
 
         Raises:
-            MemgraphError: If API key is missing or API call fails
+            TotalRecallError: If API key is missing or API call fails
         """
         if not texts:
             return []
@@ -148,11 +148,11 @@ class OpenAIEmbeddings(EmbeddingProvider):
 
             logger.debug(f"Batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
 
-        except MemgraphError:
+        except TotalRecallError:
             raise
         except Exception as e:
             logger.error(f"Batch embedding API call failed: {e}")
-            raise MemgraphError(
+            raise TotalRecallError(
                 f"Failed to get embeddings from OpenAI: {e}",
                 "embedding_failed",
                 {"model": self._model, "batch_size": len(texts_to_embed), "original_error": str(e)}
@@ -191,7 +191,7 @@ def get_embedding(text: str, use_cache: bool = True) -> list[float]:
         Embedding vector (1536 floats)
 
     Raises:
-        MemgraphError: If API key is missing or API call fails
+        TotalRecallError: If API key is missing or API call fails
     """
     return _get_provider().get_embedding(text, use_cache)
 
@@ -209,6 +209,6 @@ def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[
         List of embedding vectors, one per input text
 
     Raises:
-        MemgraphError: If API key is missing or API call fails
+        TotalRecallError: If API key is missing or API call fails
     """
     return _get_provider().get_embeddings_batch(texts, use_cache)
