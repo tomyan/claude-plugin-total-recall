@@ -251,3 +251,122 @@ class TestContextBuilder:
         # Should have recent_spans with session history
         assert "recent_spans" in ctx
         assert len(ctx["recent_spans"]) == 3
+
+
+class TestCrossSessionContext:
+    """Tests for cross-session topic context - Slice 10."""
+
+    def test_finds_related_topics_from_other_sessions(self, test_db):
+        """Should find related topics from other sessions."""
+        from context import get_related_topics
+        from db.connection import get_db
+
+        db = get_db()
+
+        # Create topics in different sessions
+        cursor = db.execute("""
+            INSERT INTO topics (name, canonical_name, summary)
+            VALUES ('Authentication', 'authentication', 'User auth')
+        """)
+        topic1_id = cursor.lastrowid
+
+        cursor = db.execute("""
+            INSERT INTO topics (name, canonical_name, summary)
+            VALUES ('Authorization', 'authorization', 'Access control')
+        """)
+        topic2_id = cursor.lastrowid
+
+        # Link them via topic_links
+        db.execute("""
+            INSERT INTO topic_links (topic_id, related_topic_id, similarity)
+            VALUES (?, ?, 0.8)
+        """, (topic1_id, topic2_id))
+        db.commit()
+        db.close()
+
+        related = get_related_topics(topic_id=topic1_id, limit=3)
+
+        assert len(related) >= 1
+        assert any(t["name"] == "Authorization" for t in related)
+
+    def test_limits_to_top_n_related(self, test_db):
+        """Should limit to top N related topics."""
+        from context import get_related_topics
+        from db.connection import get_db
+
+        db = get_db()
+
+        # Create main topic
+        cursor = db.execute("""
+            INSERT INTO topics (name, canonical_name, summary)
+            VALUES ('Main Topic', 'main topic', 'The main one')
+        """)
+        main_id = cursor.lastrowid
+
+        # Create 5 related topics
+        for i in range(5):
+            cursor = db.execute("""
+                INSERT INTO topics (name, canonical_name, summary)
+                VALUES (?, ?, ?)
+            """, (f"Related {i}", f"related {i}", f"Related topic {i}"))
+            related_id = cursor.lastrowid
+            db.execute("""
+                INSERT INTO topic_links (topic_id, related_topic_id, similarity)
+                VALUES (?, ?, ?)
+            """, (main_id, related_id, 0.9 - i * 0.1))
+
+        db.commit()
+        db.close()
+
+        related = get_related_topics(topic_id=main_id, limit=3)
+
+        assert len(related) == 3
+        # Should be sorted by similarity (highest first)
+        assert related[0]["name"] == "Related 0"
+
+    def test_excludes_current_topic(self, test_db):
+        """Should not include the current topic in related list."""
+        from context import get_related_topics
+        from db.connection import get_db
+
+        db = get_db()
+
+        cursor = db.execute("""
+            INSERT INTO topics (name, canonical_name, summary)
+            VALUES ('Topic A', 'topic a', 'First topic')
+        """)
+        topic_id = cursor.lastrowid
+        db.commit()
+        db.close()
+
+        related = get_related_topics(topic_id=topic_id, limit=3)
+
+        # Current topic should not appear in related
+        assert not any(t.get("id") == topic_id for t in related)
+
+    def test_handles_no_related_topics(self, test_db):
+        """Should return empty list when no related topics."""
+        from context import get_related_topics
+        from db.connection import get_db
+
+        db = get_db()
+
+        cursor = db.execute("""
+            INSERT INTO topics (name, canonical_name, summary)
+            VALUES ('Lonely Topic', 'lonely topic', 'No friends')
+        """)
+        topic_id = cursor.lastrowid
+        db.commit()
+        db.close()
+
+        related = get_related_topics(topic_id=topic_id, limit=3)
+
+        assert related == []
+
+    def test_handles_none_topic_id(self, test_db):
+        """Should return empty list when topic_id is None."""
+        from context import get_related_topics
+
+        related = get_related_topics(topic_id=None, limit=3)
+
+        assert related == []

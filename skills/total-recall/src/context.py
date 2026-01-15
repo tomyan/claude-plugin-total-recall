@@ -114,3 +114,45 @@ def build_context(session: str, span_id: int | None = None) -> dict[str, Any]:
 
     db.close()
     return result
+
+
+def get_related_topics(topic_id: int | None, limit: int = 3) -> list[dict[str, Any]]:
+    """
+    Find related topics from other sessions.
+
+    Uses topic_links table to find semantically related topics.
+
+    Args:
+        topic_id: Current topic ID
+        limit: Maximum number of related topics to return
+
+    Returns:
+        List of related topics with name, summary, similarity
+    """
+    if topic_id is None:
+        return []
+
+    db = get_db()
+
+    # Find related topics via topic_links
+    cursor = db.execute("""
+        SELECT t.id, t.name, t.summary, tl.similarity
+        FROM topic_links tl
+        JOIN topics t ON tl.related_topic_id = t.id
+        WHERE tl.topic_id = ?
+        ORDER BY tl.similarity DESC
+        LIMIT ?
+    """, (topic_id, limit))
+
+    related = [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "summary": row["summary"],
+            "similarity": row["similarity"],
+        }
+        for row in cursor.fetchall()
+    ]
+
+    db.close()
+    return related
