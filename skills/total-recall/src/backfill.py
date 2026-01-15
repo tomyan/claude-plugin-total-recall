@@ -1,189 +1,242 @@
-"""Backfill functionality for indexing existing transcripts."""
+"""Backfill functionality for indexing existing transcripts.
 
-import hashlib
+Enqueues transcript files for the daemon to process.
+"""
+
 import json
-import re
+import os
 from pathlib import Path
-from typing import Optional
 
-import memory_db
-from memory_db import DB_PATH
-from transcript import get_indexable_messages
+from db.connection import get_db
 
 
-def compute_content_hash(content: str) -> str:
-    """Compute a hash of content for deduplication.
-
-    Normalizes whitespace to catch near-duplicates.
-
-    Args:
-        content: Text content to hash
+def find_transcripts() -> list[str]:
+    """Find all transcript files in the Claude projects directory.
 
     Returns:
-        SHA256 hash of normalized content
+        List of absolute paths to transcript files
     """
-    # Normalize whitespace
-    normalized = re.sub(r'\s+', ' ', content.strip())
-    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        return []
+
+    transcripts = []
+    for jsonl in projects_dir.rglob("*.jsonl"):
+        # Skip subagent transcripts
+        if "subagents" in jsonl.parts:
+            continue
+        transcripts.append(str(jsonl))
+
+    return sorted(transcripts)
 
 
-def is_duplicate_idea(content: str) -> bool:
-    """Check if an idea with this content already exists.
-
-    Args:
-        content: Content to check
-
-    Returns:
-        True if duplicate exists
-    """
-    db = memory_db.get_db()
-
-    # Check for exact match
-    cursor = db.execute(
-        "SELECT id FROM ideas WHERE content = ? LIMIT 1",
-        (content,)
-    )
-    exact_match = cursor.fetchone()
-    db.close()
-
-    return exact_match is not None
-
-
-def backfill_transcript(
-    file_path: str,
-    start_line: Optional[int] = None
-) -> dict:
-    """Backfill a transcript file into the memory database.
-
-    Indexes all indexable messages from the transcript, storing each as an idea.
-    Supports incremental indexing - only processes lines after the last indexed line.
-    Deduplicates content to avoid storing the same idea twice.
+def enqueue_file(file_path: str) -> dict:
+    """Enqueue a single transcript file for processing.
 
     Args:
         file_path: Path to the JSONL transcript file
-        start_line: Optional override for start line (defaults to last indexed + 1)
 
     Returns:
-        Dict with:
-            - file_path: The processed file
-            - messages_indexed: Count of messages stored
-            - skipped_duplicates: Count of duplicates skipped
-            - start_line: Line indexing started from
-            - end_line: Last line processed
+        Dict with file_path, file_size, and whether it was already queued
     """
-    # Get start line from index state if not provided
-    if start_line is None:
-        last_indexed = memory_db.get_last_indexed_line(file_path)
-        start_line = last_indexed + 1
+    if not os.path.exists(file_path):
+        return {"file_path": file_path, "error": "File not found"}
 
-    # Get indexable messages from start_line onwards
-    messages = get_indexable_messages(file_path, start_line)
+    file_size = os.path.getsize(file_path)
 
-    # Extract session name from path
-    session = memory_db.extract_session_from_path(file_path)
+    db = get_db()
 
-    # Get or create a span for this session
-    span_id = None
-    open_span = memory_db.get_open_span(session)
-    if open_span:
-        span_id = open_span["id"]
+    # Check if already queued
+    cursor = db.execute(
+        "SELECT id FROM work_queue WHERE file_path = ?",
+        (file_path,)
+    )
+    if cursor.fetchone():
+        db.close()
+        return {"file_path": file_path, "file_size": file_size, "status": "already_queued"}
 
-    # Store each message as an idea (with deduplication)
-    messages_indexed = 0
-    skipped_duplicates = 0
-    last_line = start_line - 1
+    # Enqueue with file size
+    db.execute(
+        "INSERT INTO work_queue (file_path, file_size) VALUES (?, ?)",
+        (file_path, file_size)
+    )
+    db.commit()
+    db.close()
 
-    for msg in messages:
-        content = msg["content"]
+    return {"file_path": file_path, "file_size": file_size, "status": "queued"}
 
-        # Check for duplicate
-        if is_duplicate_idea(content):
-            skipped_duplicates += 1
-            last_line = max(last_line, msg["line_num"])
-            continue
 
-        memory_db.store_idea(
-            content=content,
-            source_file=file_path,
-            source_line=msg["line_num"],
-            span_id=span_id,
-            intent=None,  # Future: classify intent
-            confidence=0.5
-        )
-        messages_indexed += 1
-        last_line = max(last_line, msg["line_num"])
+def enqueue_all() -> dict:
+    """Find and enqueue all transcript files.
 
-    # Count total lines in file
-    with open(file_path, "r") as f:
-        total_lines = sum(1 for _ in f)
+    Returns:
+        Dict with counts of files found, queued, and already queued
+    """
+    transcripts = find_transcripts()
 
-    # Update index state to mark all lines as processed
-    if total_lines > 0:
-        memory_db.update_index_state(file_path, total_lines)
+    queued = 0
+    already_queued = 0
+    total_size = 0
+
+    for file_path in transcripts:
+        result = enqueue_file(file_path)
+        if result.get("status") == "queued":
+            queued += 1
+            total_size += result.get("file_size", 0)
+        elif result.get("status") == "already_queued":
+            already_queued += 1
+            total_size += result.get("file_size", 0)
 
     return {
-        "file_path": file_path,
-        "messages_indexed": messages_indexed,
-        "skipped_duplicates": skipped_duplicates,
-        "start_line": start_line,
-        "end_line": last_line if last_line >= start_line else start_line - 1
+        "files_found": len(transcripts),
+        "files_queued": queued,
+        "files_already_queued": already_queued,
+        "total_size_bytes": total_size
     }
 
 
-def get_progress(file_path: str) -> dict:
-    """Get indexing progress for a transcript file.
+def session_from_path(file_path: str) -> str:
+    """Generate session ID from file path.
+
+    Uses the file name (without extension) as session ID.
 
     Args:
-        file_path: Path to the JSONL transcript file
+        file_path: Path to transcript file
 
     Returns:
-        Dict with:
-            - file_path: The file
-            - last_indexed_line: Last line that was indexed
-            - total_lines: Total lines in the file
+        Session identifier
     """
-    last_indexed = memory_db.get_last_indexed_line(file_path)
+    return Path(file_path).stem
 
-    # Count total lines
-    try:
-        with open(file_path, "r") as f:
-            total_lines = sum(1 for _ in f)
-    except FileNotFoundError:
-        total_lines = 0
+
+def process_queue(limit: int = 10) -> dict:
+    """Process files from the work queue.
+
+    Args:
+        limit: Maximum number of files to process
+
+    Returns:
+        Dict with processing stats
+    """
+    from batch_processor import process_transcript, ProcessingError
+
+    db = get_db()
+
+    # Get pending files
+    cursor = db.execute("""
+        SELECT id, file_path FROM work_queue
+        ORDER BY queued_at ASC
+        LIMIT ?
+    """, (limit,))
+    pending = cursor.fetchall()
+    db.close()
+
+    files_processed = 0
+    errors = 0
+    batches_total = 0
+
+    for row in pending:
+        queue_id = row["id"]
+        file_path = row["file_path"]
+        session = session_from_path(file_path)
+
+        try:
+            result = process_transcript(file_path, session=session)
+            batches_total += result.get("batches_processed", 0)
+            files_processed += 1
+
+            # Remove from queue on success
+            db = get_db()
+            db.execute("DELETE FROM work_queue WHERE id = ?", (queue_id,))
+            db.commit()
+            db.close()
+
+        except ProcessingError:
+            errors += 1
+            # Leave in queue for retry
 
     return {
-        "file_path": file_path,
-        "last_indexed_line": last_indexed,
-        "total_lines": total_lines
+        "files_processed": files_processed,
+        "batches_total": batches_total,
+        "errors": errors
+    }
+
+
+def get_progress() -> dict:
+    """Get overall indexing progress.
+
+    Returns:
+        Dict with queue stats and byte progress
+    """
+    db = get_db()
+
+    # Queue stats
+    cursor = db.execute("SELECT COUNT(*) as count, SUM(file_size) as size FROM work_queue")
+    row = cursor.fetchone()
+    queued_count = row["count"] or 0
+    queued_size = row["size"] or 0
+
+    # Index state stats
+    cursor = db.execute("SELECT COUNT(*) as count, SUM(byte_position) as indexed FROM index_state")
+    row = cursor.fetchone()
+    files_indexed = row["count"] or 0
+    bytes_indexed = row["indexed"] or 0
+
+    # Get total size of all known files
+    cursor = db.execute("SELECT file_path FROM index_state")
+    total_size = 0
+    for row in cursor:
+        try:
+            total_size += os.path.getsize(row["file_path"])
+        except (FileNotFoundError, OSError):
+            pass
+
+    db.close()
+
+    return {
+        "queue": {
+            "pending_files": queued_count,
+            "pending_bytes": queued_size
+        },
+        "indexed": {
+            "files": files_indexed,
+            "bytes": bytes_indexed,
+            "total_bytes": total_size,
+            "percent": round(100 * bytes_indexed / total_size, 1) if total_size > 0 else 0
+        }
     }
 
 
 def main():
     """CLI entry point."""
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(description="Backfill transcripts into memory database")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # backfill command
-    bf_cmd = subparsers.add_parser("backfill", help="Backfill a transcript file")
-    bf_cmd.add_argument("file", help="Path to JSONL transcript file")
-    bf_cmd.add_argument("--start-line", type=int, help="Line number to start from")
+    # enqueue command (single file)
+    eq_cmd = subparsers.add_parser("enqueue", help="Enqueue a single transcript file")
+    eq_cmd.add_argument("file", help="Path to JSONL transcript file")
+
+    # enqueue-all command
+    subparsers.add_parser("enqueue-all", help="Find and enqueue all transcript files")
 
     # progress command
-    prog_cmd = subparsers.add_parser("progress", help="Get indexing progress for a file")
-    prog_cmd.add_argument("file", help="Path to JSONL transcript file")
+    subparsers.add_parser("progress", help="Get overall indexing progress")
 
     args = parser.parse_args()
 
-    if args.command == "backfill":
-        result = backfill_transcript(args.file, args.start_line)
+    if args.command == "enqueue":
+        result = enqueue_file(args.file)
         print(json.dumps(result))
 
+    elif args.command == "enqueue-all":
+        result = enqueue_all()
+        print(json.dumps(result, indent=2))
+
     elif args.command == "progress":
-        result = get_progress(args.file)
-        print(json.dumps(result))
+        result = get_progress()
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
