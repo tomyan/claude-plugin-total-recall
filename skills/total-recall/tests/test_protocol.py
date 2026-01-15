@@ -197,3 +197,205 @@ class TestLLMInputProtocol:
         result = format_llm_input(batch, context, recent_messages=[])
 
         assert result["new_messages"][0]["timestamp"] == "2024-01-15T10:30:45.123456"
+
+
+class TestLLMOutputProtocol:
+    """Tests for LLM output protocol parsing - Slice 4."""
+
+    def test_parses_valid_response(self):
+        """Should parse a complete valid response."""
+        from protocol import parse_llm_output
+
+        response = {
+            "topic_update": {
+                "name": "Auth implementation",
+                "summary": "Working on authentication"
+            },
+            "items": [
+                {
+                    "type": "decision",
+                    "content": "Using JWT for auth",
+                    "confidence": 0.9,
+                    "source_line": 42,
+                    "entities": ["JWT"]
+                }
+            ],
+            "relations": [],
+            "skip_lines": []
+        }
+
+        result = parse_llm_output(response)
+
+        assert result.topic_update is not None
+        assert result.topic_update["name"] == "Auth implementation"
+        assert len(result.items) == 1
+        assert result.items[0]["type"] == "decision"
+
+    def test_handles_missing_optional_fields(self):
+        """Should handle missing optional fields gracefully."""
+        from protocol import parse_llm_output
+
+        # Minimal response with only items
+        response = {
+            "items": [
+                {
+                    "type": "context",
+                    "content": "User is setting up project",
+                    "source_line": 1
+                }
+            ]
+        }
+
+        result = parse_llm_output(response)
+
+        assert result.topic_update is None
+        assert result.new_span is None
+        assert result.relations == []
+        assert result.skip_lines == []
+        assert len(result.items) == 1
+
+    def test_validates_intent_types(self):
+        """Should validate item intent types."""
+        from protocol import parse_llm_output, ProtocolError
+
+        response = {
+            "items": [
+                {
+                    "type": "invalid_type",
+                    "content": "Test",
+                    "source_line": 1
+                }
+            ]
+        }
+
+        with pytest.raises(ProtocolError) as exc:
+            parse_llm_output(response)
+
+        assert "invalid_type" in str(exc.value)
+
+    def test_rejects_malformed_json(self):
+        """Should handle malformed JSON gracefully."""
+        from protocol import parse_llm_output_str, ProtocolError
+
+        malformed = "{ not valid json }"
+
+        with pytest.raises(ProtocolError) as exc:
+            parse_llm_output_str(malformed)
+
+        assert "JSON" in str(exc.value) or "parse" in str(exc.value).lower()
+
+    def test_handles_partial_response(self):
+        """Should handle partial/incomplete responses."""
+        from protocol import parse_llm_output
+
+        # Response with only topic_update
+        response = {
+            "topic_update": {
+                "name": "New topic",
+                "summary": "Topic summary"
+            }
+        }
+
+        result = parse_llm_output(response)
+
+        assert result.topic_update is not None
+        assert result.items == []
+
+    def test_parses_new_span_action(self):
+        """Should parse new_span for topic shifts."""
+        from protocol import parse_llm_output
+
+        response = {
+            "new_span": {
+                "name": "Debugging session",
+                "reason": "Shifted from implementation to debugging"
+            },
+            "items": []
+        }
+
+        result = parse_llm_output(response)
+
+        assert result.new_span is not None
+        assert result.new_span["name"] == "Debugging session"
+        assert result.new_span["reason"] == "Shifted from implementation to debugging"
+
+    def test_parses_relations(self):
+        """Should parse relations between ideas."""
+        from protocol import parse_llm_output
+
+        response = {
+            "items": [],
+            "relations": [
+                {"from_line": 42, "to_idea_id": 156, "type": "supersedes"},
+                {"from_line": 43, "to_idea_id": 100, "type": "builds_on"}
+            ]
+        }
+
+        result = parse_llm_output(response)
+
+        assert len(result.relations) == 2
+        assert result.relations[0]["type"] == "supersedes"
+        assert result.relations[1]["from_line"] == 43
+
+    def test_parses_skip_lines(self):
+        """Should parse lines to skip."""
+        from protocol import parse_llm_output
+
+        response = {
+            "items": [],
+            "skip_lines": [44, 45, 46]
+        }
+
+        result = parse_llm_output(response)
+
+        assert result.skip_lines == [44, 45, 46]
+
+    def test_validates_required_item_fields(self):
+        """Should validate that items have required fields."""
+        from protocol import parse_llm_output, ProtocolError
+
+        response = {
+            "items": [
+                {
+                    "type": "decision"
+                    # Missing content and source_line
+                }
+            ]
+        }
+
+        with pytest.raises(ProtocolError) as exc:
+            parse_llm_output(response)
+
+        assert "content" in str(exc.value).lower() or "source_line" in str(exc.value).lower()
+
+    def test_empty_response_returns_empty_result(self):
+        """Empty response should return empty result."""
+        from protocol import parse_llm_output
+
+        response = {}
+
+        result = parse_llm_output(response)
+
+        assert result.topic_update is None
+        assert result.new_span is None
+        assert result.items == []
+        assert result.relations == []
+        assert result.skip_lines == []
+
+    def test_confidence_defaults_to_half(self):
+        """Items without confidence should default to 0.5."""
+        from protocol import parse_llm_output
+
+        response = {
+            "items": [
+                {
+                    "type": "context",
+                    "content": "Test content",
+                    "source_line": 1
+                }
+            ]
+        }
+
+        result = parse_llm_output(response)
+
+        assert result.items[0].get("confidence", 0.5) == 0.5
