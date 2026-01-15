@@ -62,6 +62,7 @@ SCHEMA_SQL = """
 
     CREATE INDEX IF NOT EXISTS idx_ideas_span ON ideas(span_id);
     CREATE INDEX IF NOT EXISTS idx_ideas_intent ON ideas(intent);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ideas_source_unique ON ideas(source_file, source_line);
 
     -- Named entities
     CREATE TABLE IF NOT EXISTS entities (
@@ -114,12 +115,22 @@ SCHEMA_SQL = """
     CREATE INDEX IF NOT EXISTS idx_topic_links_topic ON topic_links(topic_id);
     CREATE INDEX IF NOT EXISTS idx_topic_links_related ON topic_links(related_topic_id);
 
-    -- Index state tracking
+    -- Index state tracking (byte position for efficient seeking)
     CREATE TABLE IF NOT EXISTS index_state (
         file_path TEXT PRIMARY KEY,
-        last_line INTEGER DEFAULT 0,
+        byte_position INTEGER DEFAULT 0,
         last_indexed TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Work queue for daemon processing
+    CREATE TABLE IF NOT EXISTS work_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path TEXT NOT NULL,
+        file_size INTEGER,
+        queued_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_work_queue_file ON work_queue(file_path);
 
     -- Working memory (recently activated ideas with decay)
     CREATE TABLE IF NOT EXISTS working_memory (

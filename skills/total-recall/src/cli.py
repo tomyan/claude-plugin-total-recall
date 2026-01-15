@@ -419,9 +419,55 @@ def run_command(args):
                 sys.exit(1)
 
         elif args.command == "backfill":
-            from backfill import backfill_transcript
-            result = backfill_transcript(args.file, args.start_line)
-            print(json.dumps(result))
+            from backfill import enqueue_file, enqueue_all, get_progress
+            import subprocess
+
+            # Enqueue files
+            if args.all:
+                result = enqueue_all()
+                print(f"Enqueued {result['files_queued']} files ({result['files_already_queued']} already queued)")
+            elif args.file:
+                result = enqueue_file(args.file)
+                if result.get("error"):
+                    print(f"Error: {result['error']}", file=sys.stderr)
+                    sys.exit(1)
+                print(f"Enqueued: {result['file_path']} ({result.get('status', 'unknown')})")
+            else:
+                print("Usage: backfill <file> or backfill --all", file=sys.stderr)
+                sys.exit(1)
+
+            # Ensure daemon is running
+            runtime_dir = Path.home() / ".claude-plugin-total-recall"
+            pidfile = runtime_dir / "daemon.pid"
+            daemon_running = False
+
+            if pidfile.exists():
+                try:
+                    pid = int(pidfile.read_text().strip())
+                    os.kill(pid, 0)  # Check if process exists
+                    daemon_running = True
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pidfile.unlink(missing_ok=True)
+
+            if not daemon_running:
+                skill_dir = Path.home() / ".claude" / "skills" / "total-recall"
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(skill_dir / "src")
+                subprocess.Popen(
+                    ["uv", "run", "python", "-u", str(skill_dir / "src" / "daemon.py")],
+                    cwd=str(runtime_dir),
+                    stdout=open(runtime_dir / "daemon.log", "a"),
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True
+                )
+                print("Started background daemon")
+
+            # Show progress
+            progress = get_progress()
+            print(f"Queue: {progress['queue']['pending_files']} files pending")
+            print(f"Indexed: {progress['indexed']['files']} files, {progress['indexed']['percent']}% complete")
+            print("\nIndexing runs in background - check progress with: cli.py progress")
 
         elif args.command == "index":
             from indexer import index_transcript
@@ -1221,10 +1267,10 @@ def main():
     # stats
     subparsers.add_parser("stats", help="Show database statistics")
 
-    # backfill
-    backfill_p = subparsers.add_parser("backfill", help="Backfill a transcript")
-    backfill_p.add_argument("file", help="Transcript file path")
-    backfill_p.add_argument("--start-line", type=int, help="Start from line")
+    # backfill (async - enqueues for daemon)
+    backfill_p = subparsers.add_parser("backfill", help="Enqueue transcripts for background indexing")
+    backfill_p.add_argument("file", nargs="?", help="Transcript file path (optional)")
+    backfill_p.add_argument("--all", action="store_true", help="Enqueue all transcripts")
 
     # index (full indexing with topic tracking)
     index_p = subparsers.add_parser("index", help="Index with topic tracking")

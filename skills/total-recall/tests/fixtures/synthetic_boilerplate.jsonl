@@ -1,0 +1,12 @@
+{"type":"assistant","message":{"role":"assistant","content":"I understand. I'm ready to help you explore a codebase and design implementation plans. I'm in read-only mode and will only use research tools."}}
+{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"assistant","message":{"role":"assistant","content":"Hello! How can I help you today?"}}
+{"type":"user","message":{"role":"user","content":"thanks"}}
+{"type":"assistant","message":{"role":"assistant","content":"You're welcome! Let me know if you need anything else."}}
+{"type":"user","message":{"role":"user","content":"ok"}}
+{"type":"assistant","message":{"role":"assistant","content":"I'll proceed with that."}}
+{"type":"user","message":{"role":"user","content":"sounds good"}}
+{"type":"assistant","message":{"role":"assistant","content":"Great! Is there anything else you'd like me to help with?"}}
+{"type":"user","message":{"role":"user","content":"y"}}
+{"type":"assistant","message":{"role":"assistant","content":"Let me check that file for you."}}
+{"type":"user","message":{"role":"user","content":"got it"}}

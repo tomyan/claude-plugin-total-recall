@@ -10,6 +10,44 @@ from db.connection import get_db
 
 def migrate_schema(db):
     """Add new columns and indexes to existing tables."""
+    # Migrate index_state table: drop old schema with last_line
+    cursor = db.execute("PRAGMA table_info(index_state)")
+    index_state_columns = [row[1] for row in cursor]
+
+    if "last_line" in index_state_columns:
+        config.logger.info("Dropping old index_state table (had last_line)")
+        db.execute("DROP TABLE index_state")
+        db.execute("""
+            CREATE TABLE index_state (
+                file_path TEXT PRIMARY KEY,
+                byte_position INTEGER DEFAULT 0,
+                last_indexed TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.commit()
+
+    # Create work_queue table if it doesn't exist
+    try:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS work_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                file_size INTEGER,
+                queued_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_work_queue_file ON work_queue(file_path)")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass  # Already exists
+
+    # Add file_size column to work_queue if missing
+    cursor = db.execute("PRAGMA table_info(work_queue)")
+    work_queue_columns = [row[1] for row in cursor]
+    if "file_size" not in work_queue_columns:
+        db.execute("ALTER TABLE work_queue ADD COLUMN file_size INTEGER")
+        db.commit()
+
     # Check if topic_id column exists in spans
     cursor = db.execute("PRAGMA table_info(spans)")
     span_columns = [row[1] for row in cursor]

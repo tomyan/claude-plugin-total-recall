@@ -423,6 +423,104 @@ def classify_intent(content: str) -> str:
     return "context"
 
 
+def analyze_message_with_llm(content: str) -> dict:
+    """Analyze a message using LLM for filtering and classification.
+
+    Combines filtering (should this be indexed?) and intent classification
+    in a single LLM call for efficiency.
+
+    Args:
+        content: Message content
+
+    Returns:
+        Dict with:
+            - indexable: bool - whether to index this message
+            - intent: str - the classified intent (if indexable)
+            - confidence: float - confidence in the classification
+    """
+    # Fast path: very short messages are never indexable
+    if len(content.strip()) < 20:
+        return {"indexable": False, "intent": None, "confidence": 1.0, "reason": "too_short"}
+
+    # Get API key
+    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    if not api_key or OpenAI is None:
+        # Fallback to regex classification, assume indexable
+        return {
+            "indexable": True,
+            "intent": classify_intent(content),
+            "confidence": 0.5,
+            "reason": "regex_fallback"
+        }
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Analyze this message from a coding conversation.
+
+First, determine if it's worth indexing for long-term memory. DO NOT index:
+- Greetings ("hello", "hi there")
+- Simple acknowledgments ("ok", "thanks", "got it", "sounds good")
+- Warmup/ready messages ("I understand. I'm ready to help...")
+- Tool preambles ("Let me check that file", "I'll read...")
+- Status updates without substance ("Done!", "Running...")
+- Very short responses with no information
+
+If worth indexing, classify into exactly one category:
+- decision: A choice or decision made ("We decided to use X", "Going with Y", "Let's use Z")
+- conclusion: An insight or realization ("Turns out...", "The root cause was...")
+- question: A genuine question being asked
+- problem: A problem or issue described
+- solution: How something was fixed
+- todo: A task that needs to be done
+- context: Substantive background information
+
+Respond with JSON only:
+{"indexable": true/false, "intent": "category", "confidence": 0.0-1.0}
+
+If not indexable, set intent to null."""
+                },
+                {"role": "user", "content": content[:1000]}
+            ],
+            max_tokens=50,
+            temperature=0,
+        )
+        result_text = response.choices[0].message.content.strip()
+
+        # Parse JSON response
+        import json
+        try:
+            result = json.loads(result_text)
+            # Validate
+            if not isinstance(result.get("indexable"), bool):
+                raise ValueError("Missing indexable field")
+            if result["indexable"] and result.get("intent") not in VALID_INTENTS:
+                logger.warning(f"LLM returned invalid intent '{result.get('intent')}', using regex")
+                result["intent"] = classify_intent(content)
+            return result
+        except json.JSONDecodeError:
+            logger.warning(f"LLM returned invalid JSON: {result_text}")
+            return {
+                "indexable": True,
+                "intent": classify_intent(content),
+                "confidence": 0.5,
+                "reason": "json_parse_error"
+            }
+
+    except Exception as e:
+        logger.warning(f"LLM analysis failed, using regex fallback: {e}")
+        return {
+            "indexable": True,
+            "intent": classify_intent(content),
+            "confidence": 0.5,
+            "reason": f"llm_error: {e}"
+        }
+
+
 def classify_intent_with_llm(content: str) -> str:
     """Classify the intent using LLM for better accuracy on ambiguous content.
 
@@ -434,49 +532,8 @@ def classify_intent_with_llm(content: str) -> str:
     Returns:
         Intent string: decision, question, problem, solution, conclusion, todo, or context
     """
-    # First try regex - if it finds a clear pattern, use it
-    regex_intent = classify_intent(content)
-
-    # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
-    if not api_key or OpenAI is None:
-        return regex_intent
-
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """Classify this message into exactly one category:
-- decision: A choice or decision that was made
-- conclusion: An insight or conclusion reached
-- question: A question being asked
-- problem: A problem or issue being described
-- solution: A solution to a problem
-- todo: A task that needs to be done
-- context: General context or information
-
-Respond with just the category name, nothing else."""
-                },
-                {"role": "user", "content": content[:500]}
-            ],
-            max_tokens=10,
-            temperature=0,
-        )
-        llm_intent = response.choices[0].message.content.strip().lower()
-
-        # Validate the response
-        if llm_intent in VALID_INTENTS:
-            return llm_intent
-        else:
-            logger.warning(f"LLM returned invalid intent '{llm_intent}', using regex fallback")
-            return regex_intent
-
-    except Exception as e:
-        logger.warning(f"LLM intent classification failed, using regex: {e}")
-        return regex_intent
+    result = analyze_message_with_llm(content)
+    return result.get("intent") or classify_intent(content)
 
 
 # Known technologies for entity extraction
@@ -1007,8 +1064,7 @@ def index_transcript(
 
     # Get start line from index state if not provided
     if start_line is None:
-        last_indexed = memory_db.get_last_indexed_line(file_path)
-        start_line = last_indexed + 1
+        start_line = 1  # Always start from beginning
 
     # Get indexable messages
     try:
@@ -1255,9 +1311,9 @@ def index_transcript(
     with open(file_path, "r") as f:
         total_lines = sum(1 for _ in f)
 
-    # Update index state
-    if total_lines > 0:
-        memory_db.update_index_state(file_path, total_lines)
+    # Update byte position to end of file
+    file_size = os.path.getsize(file_path)
+    memory_db.update_byte_position(file_path, file_size)
 
     # Save embedding cache to disk for future runs
     memory_db.save_embedding_cache()

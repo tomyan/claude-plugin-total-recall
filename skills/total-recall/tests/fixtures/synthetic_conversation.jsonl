@@ -1,0 +1,9 @@
+{"type":"user","message":{"role":"user","content":"I'm getting database locked errors when running the backfill while the hook is also running."}}
+{"type":"assistant","message":{"role":"assistant","content":"This is a concurrency issue. SQLite's default journal mode blocks writers when another write is in progress.\n\nThe problem is that both the hook and backfill try to write to the same database, and SQLite's default rollback journal mode only allows one writer at a time."}}
+{"type":"user","message":{"role":"user","content":"What's the best way to fix this?"}}
+{"type":"assistant","message":{"role":"assistant","content":"I recommend enabling WAL (Write-Ahead Logging) mode. WAL allows concurrent reads and writes - readers don't block writers and writers don't block readers.\n\nTo enable it, add this after connecting:\n```python\ndb.execute('PRAGMA journal_mode=WAL')\n```\n\nThis is a one-time setting that persists in the database file."}}
+{"type":"user","message":{"role":"user","content":"Let's do that."}}
+{"type":"assistant","message":{"role":"assistant","content":"I've added WAL mode to the database connection in `db/connection.py`. The change is:\n\n```python\ndb = sqlite3.connect(str(config.DB_PATH))\ndb.execute(\"PRAGMA journal_mode=WAL\")  # Better concurrent access\n```\n\nThis should resolve the locking issues between the hook and backfill."}}
+{"type":"user","message":{"role":"user","content":"What about duplicate entries if they both process the same lines?"}}
+{"type":"assistant","message":{"role":"assistant","content":"Good point. We should add a unique constraint as a safety net.\n\nThe decision is to add a unique index on `(source_file, source_line)` in the ideas table, plus change the INSERT to `INSERT OR IGNORE`.\n\nThis ensures idempotency - if the same line is processed twice, the second insert is silently ignored."}}
+{"type":"user","message":{"role":"user","content":"ok sounds good"}}

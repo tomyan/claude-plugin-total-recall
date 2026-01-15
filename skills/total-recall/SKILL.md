@@ -464,89 +464,49 @@ uv run python "$SKILL_DIR/src/cli.py" topic-activity 42 --by week --days 90
 
 ## Backfill: `/total-recall backfill`
 
-Indexes existing conversation history that occurred before the skill was installed.
+Indexes existing conversation history. **Runs in background** - returns immediately.
 
 ### Invocation
 
-- `/total-recall backfill` - Index current session's history
-- `/total-recall backfill <file>` - Index specific transcript file
-- `/total-recall backfill --all` - Index all transcripts in ~/.claude/projects/
+- `/total-recall backfill --all` - Enqueue all transcripts for background indexing
+- `/total-recall backfill <file>` - Enqueue specific file
 
 ### Instructions
 
-**Step 1: Determine Scope**
-
+**Run backfill:**
 ```bash
 SKILL_DIR="$HOME/.claude/skills/total-recall"
+cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/cli.py" backfill --all
 ```
 
-**Current session (no args):**
-The current transcript path is available in the conversation context.
+This returns immediately after enqueueing. Indexing happens in the background via daemon.
 
-**Specific file:**
-Use the provided file path.
-
-**All transcripts (--all):**
+**Check progress:**
 ```bash
-find ~/.claude/projects -name "*.jsonl" -type f
+cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/cli.py" stats
 ```
 
-**Step 2: Run Backfill**
-
-For each transcript file:
-```bash
-uv run python "$SKILL_DIR/src/cli.py" index "<file_path>"
-```
-
-This will:
-- Parse the transcript for indexable messages
-- Detect topic shifts and create spans
-- Classify intent (decision, question, problem, solution, etc.)
-- Extract entities and assess confidence
-- Track progress for incremental indexing
-
-**Step 3: Check Progress**
-
-```bash
-uv run python "$SKILL_DIR/src/cli.py" progress "<file_path>"
-```
-
-**Step 4: Report Results**
-
+**Report to user:**
 ```markdown
-## Backfill Complete
+## Backfill Started
 
-**Processed:** <file_path>
-**Messages indexed:** <count>
-**Spans created:** <count>
-```
+Enqueued **<N>** transcript files for background indexing.
 
-**Step 5: Verify**
+The daemon is processing in the background. You can continue working - indexing won't block you.
 
-```bash
-uv run python "$SKILL_DIR/src/cli.py" stats
+Check progress anytime with `/total-recall stats`.
 ```
 
 ### What Gets Indexed
 
-**High Value (Indexed):**
-- Architecture decisions and rationale
-- Technology choices and trade-offs
-- Substantive questions and answers
-- Solutions to problems encountered
-- Key insights and conclusions
-
-**Low Value (Filtered):**
-- Greetings ("hello", "hi there")
-- Acknowledgments ("ok", "thanks", "got it")
-- Very short messages (< 20 characters)
-- Tool use preambles ("Let me check that file")
+**High Value:** Decisions, conclusions, questions, problems, solutions, todos, key context
+**Filtered:** Greetings, acknowledgments, very short messages, tool use preambles
 
 ### Notes
 
-- Backfill is incremental - running again only indexes new content
-- Large transcripts may take time due to embedding API calls
-- The stop hook automatically indexes new content after each turn
+- Backfill is incremental - re-running only indexes new content
+- Background daemon processes queue automatically
+- Hook on each turn keeps current session indexed in real-time
 
 ---
 

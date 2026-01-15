@@ -206,6 +206,17 @@ _ASSISTANT_GREETING_PREFIXES = [
     "hello.", "hi.", "hey.",
 ]
 
+# Assistant warmup/ready patterns (these are boilerplate intros)
+_WARMUP_PATTERNS = [
+    r"^i understand\.?\s*(i'?m|i am)?\s*ready",
+    r"^i'?m ready to help",
+    r"^i understand this is a warmup",
+    r"^i'?m here to help",
+    r"^how can i (help|assist)",
+]
+
+_WARMUP_RE = re.compile("|".join(_WARMUP_PATTERNS), re.IGNORECASE)
+
 # Minimum length thresholds
 MIN_INDEXABLE_LENGTH = 20
 MIN_SUBSTANTIVE_LENGTH = 80  # Messages under this get extra scrutiny

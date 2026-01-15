@@ -6,3 +6,6 @@ __pycache__/
 
 # Runtime data (created by bootstrap)
 ~/.claude-plugin-total-recall/
+
+# Database files (should only exist in runtime directory)
+*.db

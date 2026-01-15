@@ -632,3 +632,403 @@ claude-plugin-memgraph/
 | **Pruning** | None (for now) | Storage is cheap. Can add pruning later if growth becomes an issue |
 
 **General principle:** Use the model. The indexer agent is Claude - leverage its understanding rather than building parallel heuristics.
+
+---
+
+## 12. Daemon Architecture (v2)
+
+The original design called the LLM per-message during hook execution. This had problems:
+- Hook blocks user typing while processing
+- No batching = inefficient LLM usage
+- Network/sleep issues cause hangs or silent failures
+- Context lost between messages
+
+### 12.1 Decoupled Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Claude Code                               │
+│                                                                   │
+│  ┌─────────────────┐                  ┌─────────────────────────┐│
+│  │ UserPromptSubmit│                  │        Stop             ││
+│  │      Hook       │                  │        Hook             ││
+│  └────────┬────────┘                  └───────────┬─────────────┘│
+└───────────┼───────────────────────────────────────┼──────────────┘
+            │                                       │
+            │  Enqueue file path + size (fast)      │
+            ▼                                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         work_queue                               │
+│                    (SQLite table)                                │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             │ Poll every 2s
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Indexing Daemon                               │
+│                  (background process)                            │
+│                                                                   │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────────────┐│
+│  │  Message    │     │   Batch     │     │     LLM Call        ││
+│  │  Collector  │────▶│  Assembler  │────▶│   (single call)     ││
+│  │ (5s window) │     │  (context)  │     │                     ││
+│  └─────────────┘     └─────────────┘     └──────────┬──────────┘│
+│                                                      │           │
+│                                          ┌───────────▼─────────┐│
+│                                          │   Action Executor   ││
+│                                          │ - Update topic      ││
+│                                          │ - Store ideas       ││
+│                                          │ - Create spans      ││
+│                                          │ - Extract entities  ││
+│                                          └───────────┬─────────┘│
+│                                                      │           │
+│                                          ┌───────────▼─────────┐│
+│                                          │  Batch Embeddings   ││
+│                                          └─────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 12.2 Key Principles
+
+1. **Hooks are fast** - Only enqueue file path, don't process
+2. **Daemon is resilient** - Timeouts, exponential backoff (max 10s), infinite retry
+3. **Batch for efficiency** - Collect messages within time window, single LLM call
+4. **Context-aware** - LLM sees hierarchy (project → topic → span) + surrounding messages
+5. **Structured protocol** - Well-defined JSON input/output for LLM
+
+### 12.3 LLM Protocol
+
+**Input Context:**
+```json
+{
+  "hierarchy": {
+    "project": {"name": "control-v1-1", "description": "..."},
+    "topic": {"name": "LoRa prototyping", "summary": "..."},
+    "span": {"name": "Range testing", "summary": "..."}
+  },
+  "recent_messages": [
+    {"role": "user", "content": "...", "timestamp": "..."},
+    {"role": "assistant", "content": "...", "timestamp": "..."}
+  ],
+  "new_messages": [
+    {"role": "user", "content": "...", "timestamp": "...", "line": 42},
+    {"role": "assistant", "content": "...", "timestamp": "...", "line": 43}
+  ]
+}
+```
+
+**Output Protocol:**
+```json
+{
+  "topic_update": {
+    "name": "LoRa range testing results",
+    "summary": "Testing max range with different antenna configs"
+  },
+  "new_span": {
+    "name": "Antenna comparison",
+    "reason": "Shifted from general testing to comparing antenna types"
+  },
+  "items": [
+    {
+      "type": "decision",
+      "content": "Using the 5dBi antenna for final deployment",
+      "confidence": 0.9,
+      "source_line": 42,
+      "entities": ["5dBi antenna", "SX1262"]
+    },
+    {
+      "type": "question",
+      "content": "What's the power consumption difference?",
+      "answered": false,
+      "source_line": 43
+    }
+  ],
+  "relations": [
+    {"from_line": 42, "to_idea_id": 156, "type": "supersedes"}
+  ],
+  "skip_lines": [44, 45]
+}
+```
+
+### 12.4 Benefits for Existing Features
+
+| Feature | Benefit |
+|---------|---------|
+| **Topic detection** | LLM sees full context, detects shifts accurately |
+| **Span naming** | Names refined as conversation develops |
+| **Intent classification** | Context-aware, not just keywords |
+| **Entity extraction** | Batch extract from multiple messages |
+| **Relation detection** | LLM identifies connections within batch |
+| **Confidence scoring** | Based on conversation tone, not heuristics |
+| **Cross-session linking** | Can reference similar topics in prompt |
+| **Working memory** | Activate related ideas based on batch content |
+
+### 12.5 Resilience
+
+All operations wrapped with:
+- **Timeouts**: DB (30s), File (60s), LLM (120s)
+- **Exponential backoff**: 1s → 2s → 4s → 8s → 10s (capped)
+- **Infinite retry**: Transient failures don't kill daemon
+- **Clear logging**: Every operation logged, errors visible
+- **Heartbeat**: Log every 60s to show daemon is alive
+
+---
+
+## 13. Implementation Plan (Elephant Carpaccio)
+
+Thin vertical slices, each delivering working functionality. TDD with adversarial review at each commit.
+
+### Slice 1: Message Batcher
+**Goal**: Collect messages within time window, emit batches
+
+```
+Input:  Stream of (file_path, byte_position) from queue
+Output: Batches of messages with metadata
+
+Tests:
+- Messages within 5s window batched together
+- Messages > 5s apart in separate batches
+- Empty file returns empty batch
+- Handles file read errors gracefully
+```
+
+**Files**: `src/batcher.py`
+**Commit**: "feat: message batcher with time windowing"
+
+---
+
+### Slice 2: Context Builder
+**Goal**: Assemble hierarchy context for LLM
+
+```
+Input:  Current span_id, session
+Output: Hierarchy dict (project → topic → span) with summaries
+
+Tests:
+- Returns empty hierarchy for new session
+- Includes project if topic assigned
+- Includes parent spans if nested
+- Handles missing/orphan spans
+```
+
+**Files**: `src/context.py`
+**Commit**: "feat: context builder for LLM prompt"
+
+---
+
+### Slice 3: LLM Protocol - Input
+**Goal**: Format batch + context as LLM prompt
+
+```
+Input:  Batch of messages, hierarchy context, recent messages
+Output: Structured prompt string
+
+Tests:
+- Includes all hierarchy levels
+- Recent messages truncated to N
+- New messages include line numbers
+- Total tokens under limit
+```
+
+**Files**: `src/protocol.py`
+**Commit**: "feat: LLM input protocol formatting"
+
+---
+
+### Slice 4: LLM Protocol - Output
+**Goal**: Parse and validate LLM response
+
+```
+Input:  Raw LLM JSON response
+Output: Validated actions (topic_update, items, relations, etc.)
+
+Tests:
+- Parses valid response
+- Handles missing optional fields
+- Validates intent types
+- Rejects malformed JSON gracefully
+- Handles partial responses
+```
+
+**Files**: `src/protocol.py` (extend)
+**Commit**: "feat: LLM output protocol parsing"
+
+---
+
+### Slice 5: Action Executor - Ideas
+**Goal**: Store ideas from LLM response
+
+```
+Input:  Parsed items array
+Output: Ideas stored in database
+
+Tests:
+- Stores idea with correct intent
+- Links to current span
+- Handles duplicates (source_line unique)
+- Records confidence and entities
+```
+
+**Files**: `src/executor.py`
+**Commit**: "feat: action executor for ideas"
+
+---
+
+### Slice 6: Action Executor - Topic Updates
+**Goal**: Update topic/span from LLM response
+
+```
+Input:  topic_update, new_span from response
+Output: Updated span name/summary, new span if shift
+
+Tests:
+- Updates span name if changed
+- Updates summary if provided
+- Creates child span on topic shift
+- Links to existing topic or creates new
+```
+
+**Files**: `src/executor.py` (extend)
+**Commit**: "feat: action executor for topic updates"
+
+---
+
+### Slice 7: Action Executor - Relations
+**Goal**: Create relations between ideas
+
+```
+Input:  relations array from response
+Output: Relations stored in database
+
+Tests:
+- Creates relation between ideas
+- Maps source_line to idea_id
+- Validates relation_type
+- Handles missing target ideas
+```
+
+**Files**: `src/executor.py` (extend)
+**Commit**: "feat: action executor for relations"
+
+---
+
+### Slice 8: Batch Embeddings
+**Goal**: Embed all new ideas in single API call
+
+```
+Input:  List of idea IDs to embed
+Output: Embeddings stored in idea_embeddings
+
+Tests:
+- Batches up to 100 texts per call
+- Handles API failures with retry
+- Skips already-embedded ideas
+- Updates span embedding if summary changed
+```
+
+**Files**: `src/embeddings.py`
+**Commit**: "feat: batch embedding for ideas"
+
+---
+
+### Slice 9: Daemon Integration
+**Goal**: Wire batcher → LLM → executor → embeddings
+
+```
+Input:  Work queue items
+Output: Fully processed transcripts
+
+Tests:
+- End-to-end: queue item → ideas in DB
+- Handles LLM timeout with retry
+- Updates byte position on success
+- Removes queue item on completion
+```
+
+**Files**: `src/daemon.py` (rewrite)
+**Commit**: "feat: integrated daemon with batched LLM"
+
+---
+
+### Slice 10: Cross-Session Context
+**Goal**: Include similar topics from other sessions in prompt
+
+```
+Input:  Current topic name/summary
+Output: Related topics to include in context
+
+Tests:
+- Finds semantically similar topics
+- Limits to top 3 related
+- Excludes current session
+- Handles no similar topics
+```
+
+**Files**: `src/context.py` (extend)
+**Commit**: "feat: cross-session topic context"
+
+---
+
+### Slice 11: Working Memory Integration
+**Goal**: Activate related ideas based on batch content
+
+```
+Input:  Processed batch
+Output: Working memory updated with activations
+
+Tests:
+- Activates ideas mentioned in batch
+- Decays old activations
+- Prunes very low activations
+- Respects session scope
+```
+
+**Files**: `src/working_memory.py`
+**Commit**: "feat: working memory activation from batches"
+
+---
+
+### Slice 12: Backfill Integration
+**Goal**: Backfill uses batched processing
+
+```
+Input:  Transcript files to backfill
+Output: All content processed via daemon
+
+Tests:
+- Enqueues all files
+- Progress tracking works
+- Handles large transcripts
+- Deduplicates existing ideas
+```
+
+**Files**: `src/backfill.py` (update)
+**Commit**: "feat: backfill via daemon queue"
+
+---
+
+## 14. TDD Workflow
+
+For each slice:
+
+1. **Write failing tests** - Define expected behavior
+2. **Implement minimum code** - Make tests pass
+3. **Adversarial review** - Challenge assumptions:
+   - What if input is malformed?
+   - What if network fails mid-operation?
+   - What if database is locked?
+   - What if LLM returns unexpected format?
+4. **Add edge case tests** - Based on review
+5. **Refactor** - Clean up while tests pass
+6. **Commit** - Atomic, working slice
+
+---
+
+## 15. Fresh Start
+
+No backwards compatibility needed. On first run of new daemon:
+1. Delete `~/.claude-plugin-total-recall/memory.db`
+2. Reinitialize schema
+3. Backfill all transcripts with new batched processing
+
+This ensures clean data with proper context-aware classification from the start.

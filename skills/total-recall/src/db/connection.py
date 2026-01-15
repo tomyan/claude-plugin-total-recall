@@ -12,6 +12,7 @@ def get_db() -> sqlite3.Connection:
     """Get database connection with sqlite-vec loaded."""
     try:
         db = sqlite3.connect(str(config.DB_PATH))
+        db.execute("PRAGMA journal_mode=WAL")  # Better concurrent access
         db.enable_load_extension(True)
         sqlite_vec.load(db)
         db.enable_load_extension(False)

@@ -94,13 +94,13 @@ Restart Claude Code for the hooks to take effect.
 To index your existing conversation history:
 
 ```
-/memory-backfill --all
+/total-recall backfill --all
 ```
 
 Or to index just the current session:
 
 ```
-/memory-backfill
+/total-recall backfill
 ```
 
 ## Usage

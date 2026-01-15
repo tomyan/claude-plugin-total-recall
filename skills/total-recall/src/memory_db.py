@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 import struct
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -2366,12 +2367,17 @@ def store_idea(
     db = get_db()
     cursor = db.cursor()
 
-    # Insert idea with message_time
+    # Insert idea with message_time (OR IGNORE for idempotency)
     cursor.execute("""
-        INSERT INTO ideas (span_id, content, intent, confidence, source_file, source_line, message_time)
+        INSERT OR IGNORE INTO ideas (span_id, content, intent, confidence, source_file, source_line, message_time)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (span_id, content, intent, confidence, source_file, source_line, message_time))
     idea_id = cursor.lastrowid
+
+    # If insert was ignored (duplicate), skip embedding/FTS/entities
+    if not idea_id:
+        db.commit()
+        return None
 
     # Get and store embedding
     embedding = get_embedding(content)
@@ -3463,28 +3469,28 @@ Respond with ONLY a JSON object like:
 # Index State
 # =============================================================================
 
-def get_last_indexed_line(file_path: str) -> int:
-    """Get the last indexed line number for a file."""
+def get_byte_position(file_path: str) -> int:
+    """Get the last indexed byte position for a file."""
     db = get_db()
     cursor = db.execute(
-        "SELECT last_line FROM index_state WHERE file_path = ?",
+        "SELECT byte_position FROM index_state WHERE file_path = ?",
         (file_path,)
     )
     row = cursor.fetchone()
     db.close()
-    return row['last_line'] if row else 0
+    return row['byte_position'] if row else 0
 
 
-def update_index_state(file_path: str, last_line: int):
-    """Update the index state for a file."""
+def update_byte_position(file_path: str, byte_position: int):
+    """Update the byte position for a file."""
     db = get_db()
     db.execute("""
-        INSERT INTO index_state (file_path, last_line, last_indexed)
+        INSERT INTO index_state (file_path, byte_position, last_indexed)
         VALUES (?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(file_path) DO UPDATE SET
-            last_line = excluded.last_line,
+            byte_position = excluded.byte_position,
             last_indexed = excluded.last_indexed
-    """, (file_path, last_line))
+    """, (file_path, byte_position))
     db.commit()
     db.close()
 
@@ -5060,7 +5066,7 @@ def import_data(data: dict, replace: bool = False) -> dict:
             continue
 
         cursor = db.execute("""
-            INSERT INTO ideas (span_id, content, intent, confidence, answered, source_file, source_line, created_at)
+            INSERT OR IGNORE INTO ideas (span_id, content, intent, confidence, answered, source_file, source_line, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             new_span_id,
@@ -5073,6 +5079,9 @@ def import_data(data: dict, replace: bool = False) -> dict:
             idea.get("created_at")
         ))
         new_idea_id = cursor.lastrowid
+        if not new_idea_id:
+            logger.info(f"Skipping duplicate idea from {idea.get('source_file')}:{idea.get('source_line')}")
+            continue
         idea_id_map[old_id] = new_idea_id
 
         # Store embedding
