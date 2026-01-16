@@ -2983,6 +2983,114 @@ def search_ideas_temporal(
     return results
 
 
+def search_messages(
+    query: str,
+    limit: int = 20,
+    session: Optional[str] = None,
+    role: Optional[str] = None
+) -> list[dict]:
+    """Search messages using full-text search.
+
+    Args:
+        query: Search query (FTS5 syntax supported)
+        limit: Maximum results
+        session: Filter to specific session
+        role: Filter to "user" or "assistant" messages
+
+    Returns:
+        List of matching message dicts
+    """
+    db = get_db()
+
+    # Build query with optional filters
+    sql = """
+        SELECT m.id, m.session, m.line_num, m.role, m.content,
+               m.timestamp, m.source_file,
+               highlight(messages_fts, 0, '[', ']') as highlight
+        FROM messages_fts f
+        JOIN messages m ON m.id = f.rowid
+        WHERE messages_fts MATCH ?
+    """
+    params = [query]
+
+    if session:
+        sql += " AND m.session = ?"
+        params.append(session)
+    if role:
+        sql += " AND m.role = ?"
+        params.append(role)
+
+    sql += " ORDER BY rank LIMIT ?"
+    params.append(limit)
+
+    try:
+        cursor = db.execute(sql, params)
+        results = [dict(row) for row in cursor]
+    except Exception as e:
+        # FTS table might not exist yet
+        db.close()
+        return []
+
+    db.close()
+    return results
+
+
+def get_message_context(
+    message_id: int,
+    before: int = 3,
+    after: int = 3
+) -> dict:
+    """Get a message with surrounding context.
+
+    Args:
+        message_id: ID of the target message
+        before: Number of messages before to include
+        after: Number of messages after to include
+
+    Returns:
+        Dict with target message and context messages
+    """
+    db = get_db()
+
+    # Get the target message
+    cursor = db.execute("""
+        SELECT id, session, line_num, role, content, timestamp, source_file
+        FROM messages WHERE id = ?
+    """, (message_id,))
+    target = cursor.fetchone()
+    if not target:
+        db.close()
+        return {"error": f"Message {message_id} not found"}
+
+    target = dict(target)
+
+    # Get context messages from same source file
+    cursor = db.execute("""
+        SELECT id, session, line_num, role, content, timestamp
+        FROM messages
+        WHERE source_file = ? AND line_num >= ? AND line_num <= ?
+        ORDER BY line_num
+    """, (
+        target["source_file"],
+        target["line_num"] - before * 10,  # Approximate - messages aren't every line
+        target["line_num"] + after * 10
+    ))
+
+    context_msgs = [dict(row) for row in cursor]
+    db.close()
+
+    # Find target index and extract surrounding
+    target_idx = next((i for i, m in enumerate(context_msgs) if m["id"] == message_id), 0)
+    start = max(0, target_idx - before)
+    end = min(len(context_msgs), target_idx + after + 1)
+
+    return {
+        "target": target,
+        "before": context_msgs[start:target_idx],
+        "after": context_msgs[target_idx + 1:end]
+    }
+
+
 # Synonym mappings for query expansion
 _SYNONYMS = {
     "auth": ["authentication", "login", "signin", "sign-in"],
@@ -3570,6 +3678,20 @@ def get_stats() -> dict:
         {"id": row['id'], "content": row['content'][:100], "access_count": row['access_count']}
         for row in cursor
     ]
+
+    # Message storage stats
+    try:
+        cursor = db.execute("SELECT COUNT(*) as count FROM messages")
+        stats["total_messages"] = cursor.fetchone()['count']
+
+        cursor = db.execute("""
+            SELECT role, COUNT(*) as count FROM messages GROUP BY role
+        """)
+        stats["messages_by_role"] = {row['role']: row['count'] for row in cursor}
+    except Exception:
+        # Table might not exist yet
+        stats["total_messages"] = 0
+        stats["messages_by_role"] = {}
 
     db.close()
 
@@ -5589,6 +5711,27 @@ if __name__ == "__main__":
         limit = int(sys.argv[3]) if len(sys.argv) > 3 else 5
         results = search_spans(query, limit)
         print(json.dumps(results, indent=2, default=str))
+
+    elif cmd == "search-messages":
+        if len(sys.argv) < 3:
+            print("Usage: memory_db.py search-messages <query> [limit] [session] [role]")
+            sys.exit(1)
+        query = sys.argv[2]
+        limit = int(sys.argv[3]) if len(sys.argv) > 3 else 20
+        session = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "null" else None
+        role = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != "null" else None
+        results = search_messages(query, limit, session, role)
+        print(json.dumps(results, indent=2, default=str))
+
+    elif cmd == "message-context":
+        if len(sys.argv) < 3:
+            print("Usage: memory_db.py message-context <message_id> [before] [after]")
+            sys.exit(1)
+        message_id = int(sys.argv[2])
+        before = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+        after = int(sys.argv[4]) if len(sys.argv) > 4 else 3
+        result = get_message_context(message_id, before, after)
+        print(json.dumps(result, indent=2, default=str))
 
     elif cmd == "hybrid":
         if len(sys.argv) < 3:

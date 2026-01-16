@@ -31,6 +31,22 @@ def error_result(error: str, code: str = "unknown", details: dict = None) -> dic
     result = {"success": False, "error": error, "error_code": code}
     if details:
         result["details"] = details
+
+    # Print critical errors prominently (both stdout and stderr)
+    if code == "missing_api_key":
+        msg = f"""
+================================================================================
+❌ CONFIGURATION ERROR: {error}
+
+To fix this:
+  export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="your-openai-api-key"
+
+Then retry your search.
+================================================================================
+"""
+        print(msg)
+        print(msg, file=sys.stderr)
+
     return result
 
 
@@ -410,6 +426,32 @@ def run_command(args):
                 "spans_updated": updated
             }, indent=2))
 
+        elif args.command == "embed-ideas":
+            # Find ideas without embeddings
+            db = memory_db.get_db()
+            cursor = db.execute("""
+                SELECT i.id, i.content
+                FROM ideas i
+                LEFT JOIN idea_embeddings ie ON ie.idea_id = i.id
+                WHERE ie.idea_id IS NULL
+            """)
+            ideas_to_embed = list(cursor)
+            db.close()
+
+            print(f"Found {len(ideas_to_embed)} ideas without embeddings", file=sys.stderr)
+
+            if not ideas_to_embed:
+                print(json.dumps({"ideas_found": 0, "ideas_embedded": 0}))
+            else:
+                from executor import embed_ideas
+                idea_ids = [idea['id'] for idea in ideas_to_embed]
+                embedded = embed_ideas(idea_ids)
+                print(f"Embedded {embedded} ideas", file=sys.stderr)
+                print(json.dumps({
+                    "ideas_found": len(ideas_to_embed),
+                    "ideas_embedded": embedded
+                }, indent=2))
+
         elif args.command == "stats":
             result = run_stats_command()
             if result["success"]:
@@ -419,6 +461,16 @@ def run_command(args):
                 sys.exit(1)
 
         elif args.command == "backfill":
+            # Check for API key FIRST - refuse to backfill without it
+            if not os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS"):
+                print(error_result(
+                    "OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS not set. "
+                    "Backfill requires this for generating embeddings. "
+                    "Set it to your OpenAI API key and retry.",
+                    "missing_api_key"
+                ))
+                sys.exit(1)
+
             from backfill import enqueue_file, enqueue_all, get_progress
             import subprocess
 
@@ -1263,6 +1315,10 @@ def main():
     # refresh-embeddings (update span embeddings for spans missing them)
     refresh_p = subparsers.add_parser("refresh-embeddings", help="Update span embeddings for spans missing them")
     refresh_p.add_argument("-s", "--session", help="Only refresh spans in this session")
+
+    # embed-ideas (generate embeddings for ideas missing them)
+    embed_p = subparsers.add_parser("embed-ideas", help="Generate embeddings for ideas missing them")
+    embed_p.add_argument("--all", action="store_true", help="Embed all ideas without embeddings")
 
     # stats
     subparsers.add_parser("stats", help="Show database statistics")

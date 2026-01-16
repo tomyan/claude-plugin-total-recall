@@ -47,6 +47,6 @@ if [ -f "$PIDFILE" ]; then
     rm -f "$PIDFILE"
 fi
 
-# Start daemon in background (pass through API keys)
+# Start daemon in background (pass through embeddings API key)
 cd "$RUNTIME_DIR" 2>/dev/null || exit 0
-PYTHONPATH="$SKILL_DIR/src" OPENAI_API_KEY="$OPENAI_API_KEY" nohup uv run python -u "$SKILL_DIR/src/daemon.py" >> "$RUNTIME_DIR/daemon.log" 2>&1 &
+PYTHONPATH="$SKILL_DIR/src" OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" nohup uv run python -u "$SKILL_DIR/src/daemon.py" >> "$RUNTIME_DIR/daemon.log" 2>&1 &

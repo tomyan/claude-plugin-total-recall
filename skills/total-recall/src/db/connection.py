@@ -11,8 +11,9 @@ from errors import TotalRecallError
 def get_db() -> sqlite3.Connection:
     """Get database connection with sqlite-vec loaded."""
     try:
-        db = sqlite3.connect(str(config.DB_PATH))
+        db = sqlite3.connect(str(config.DB_PATH), timeout=30.0)
         db.execute("PRAGMA journal_mode=WAL")  # Better concurrent access
+        db.execute("PRAGMA busy_timeout=30000")  # Wait up to 30s for locks
         db.enable_load_extension(True)
         sqlite_vec.load(db)
         db.enable_load_extension(False)

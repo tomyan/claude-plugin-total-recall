@@ -25,11 +25,15 @@ def execute_ideas(
     idea_ids = []
 
     for item in items:
-        content = item["content"]
-        intent = item["type"]
-        source_line = item["source_line"]
+        content = item.get("content")
+        intent = item.get("type", "context")
+        source_line = item.get("source_line")
         confidence = item.get("confidence", 0.5)
         entities = item.get("entities", [])
+
+        # Skip malformed items
+        if not content or not source_line:
+            continue
 
         # Upsert idea (update if exists, insert if not)
         cursor = db.execute("""
@@ -187,9 +191,13 @@ def execute_relations(
     created = 0
 
     for rel in relations:
-        from_line = rel["from_line"]
-        to_idea_id = rel["to_idea_id"]
-        rel_type = rel["type"]
+        from_line = rel.get("from_line")
+        to_idea_id = rel.get("to_idea_id")
+        rel_type = rel.get("type", "related")
+
+        # Skip malformed relations
+        if not from_line or not to_idea_id:
+            continue
 
         # Find source idea
         cursor = db.execute("""
@@ -222,3 +230,122 @@ def execute_relations(
     db.close()
 
     return created
+
+
+def embed_ideas(idea_ids: list[int]) -> int:
+    """
+    Generate embeddings for ideas.
+
+    Args:
+        idea_ids: List of idea IDs to embed
+
+    Returns:
+        Number of ideas embedded
+    """
+    import os
+    if not idea_ids:
+        return 0
+
+    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    if not api_key:
+        # Silently skip embedding if no API key - will error on search
+        return 0
+
+    try:
+        from embeddings.openai import OpenAIEmbeddings
+        provider = OpenAIEmbeddings()
+    except Exception:
+        return 0
+
+    db = get_db()
+    embedded = 0
+
+    for idea_id in idea_ids:
+        # Get idea content
+        cursor = db.execute("SELECT content FROM ideas WHERE id = ?", (idea_id,))
+        row = cursor.fetchone()
+        if not row:
+            continue
+
+        # Check if already embedded
+        cursor = db.execute("SELECT 1 FROM idea_embeddings WHERE idea_id = ?", (idea_id,))
+        if cursor.fetchone():
+            continue
+
+        # Generate embedding
+        try:
+            embedding = provider.get_embedding(row["content"])
+
+            # Store embedding
+            import json
+            db.execute("""
+                INSERT INTO idea_embeddings (idea_id, embedding)
+                VALUES (?, ?)
+            """, (idea_id, json.dumps(embedding)))
+            embedded += 1
+        except Exception:
+            continue
+
+    db.commit()
+    db.close()
+
+    return embedded
+
+
+def embed_messages(message_ids: list[int]) -> int:
+    """
+    Generate embeddings for messages.
+
+    Args:
+        message_ids: List of message IDs to embed
+
+    Returns:
+        Number of messages embedded
+    """
+    import os
+    if not message_ids:
+        return 0
+
+    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    if not api_key:
+        return 0
+
+    try:
+        from embeddings.openai import OpenAIEmbeddings
+        provider = OpenAIEmbeddings()
+    except Exception:
+        return 0
+
+    db = get_db()
+    embedded = 0
+
+    for message_id in message_ids:
+        # Get message content
+        cursor = db.execute("SELECT content FROM messages WHERE id = ?", (message_id,))
+        row = cursor.fetchone()
+        if not row:
+            continue
+
+        # Check if already embedded
+        cursor = db.execute("SELECT 1 FROM message_embeddings WHERE message_id = ?", (message_id,))
+        if cursor.fetchone():
+            continue
+
+        # Generate embedding
+        try:
+            embedding = provider.get_embedding(row["content"])
+
+            # Store embedding
+            import json
+            db.execute("""
+                INSERT INTO message_embeddings (message_id, embedding)
+                VALUES (?, ?)
+            """, (message_id, json.dumps(embedding)))
+            embedded += 1
+        except Exception:
+            continue
+
+    db.commit()
+    db.close()
+
+    return embedded

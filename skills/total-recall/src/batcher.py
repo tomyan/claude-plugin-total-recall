@@ -12,6 +12,29 @@ class BatcherError(Exception):
     pass
 
 
+def _extract_text_content(content) -> str:
+    """Extract text-only content from message content field.
+
+    Handles both string content (user messages) and list content (assistant messages).
+    Filters out thinking blocks, tool calls, and other non-text content.
+    """
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                # Only include text blocks, skip thinking, tool_use, tool_result, etc.
+                if block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                text_parts.append(block)
+        return "\n".join(text_parts)
+
+    return str(content) if content else ""
+
+
 @dataclass
 class Message:
     """A single message from a transcript."""
@@ -41,7 +64,8 @@ def parse_timestamp(ts_str: str) -> datetime:
 def collect_batches(
     file_path: str,
     start_byte: int = 0,
-    window_seconds: float = 5.0
+    window_seconds: float = 5.0,
+    max_messages: int = 100
 ) -> Generator[Batch, None, None]:
     """
     Collect messages from a transcript file into time-windowed batches.
@@ -50,6 +74,7 @@ def collect_batches(
         file_path: Path to the JSONL transcript file
         start_byte: Byte position to start reading from
         window_seconds: Maximum time gap between messages in same batch
+        max_messages: Maximum messages per batch (default 100)
 
     Yields:
         Batch objects containing messages within the time window
@@ -101,8 +126,15 @@ def collect_batches(
 
                 # Extract message content and timestamp
                 message_data = data.get("message", {})
-                content = message_data.get("content", "")
+                raw_content = message_data.get("content", "")
                 timestamp_str = data.get("timestamp", "")
+
+                # Extract text content only (skip thinking blocks, tool calls, etc.)
+                content = _extract_text_content(raw_content)
+
+                # Skip messages with no extractable text
+                if not content or not content.strip():
+                    continue
 
                 if not timestamp_str:
                     continue
@@ -112,10 +144,10 @@ def collect_batches(
                 except (ValueError, TypeError):
                     continue
 
-                # Check if we need to start a new batch
+                # Check if we need to start a new batch (time gap or max messages)
                 if last_timestamp is not None:
                     gap = (timestamp - last_timestamp).total_seconds()
-                    if gap > window_seconds:
+                    if gap > window_seconds or len(current_batch.messages) >= max_messages:
                         # Yield current batch and start new one
                         if current_batch.messages:
                             yield current_batch

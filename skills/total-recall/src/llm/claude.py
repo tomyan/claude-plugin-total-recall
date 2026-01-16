@@ -3,13 +3,18 @@
 import json
 import os
 import subprocess
-from typing import Optional
+from typing import Any, Optional
 
 from config import logger
 from errors import TotalRecallError
+from llm.tools import INDEXING_TOOLS, execute_tool
 
 
-def claude_complete(prompt: str, system: Optional[str] = None) -> str:
+def claude_complete(
+    prompt: str,
+    system: Optional[str] = None,
+    model: str = "haiku"
+) -> str:
     """Call Claude CLI non-interactively for LLM tasks.
 
     Uses `claude -p` with `--no-session-persistence` to avoid creating
@@ -18,6 +23,7 @@ def claude_complete(prompt: str, system: Optional[str] = None) -> str:
     Args:
         prompt: The user prompt
         system: Optional system prompt
+        model: Model to use (default: haiku for speed)
 
     Returns:
         The response text
@@ -25,7 +31,7 @@ def claude_complete(prompt: str, system: Optional[str] = None) -> str:
     Raises:
         TotalRecallError: If Claude CLI fails
     """
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence"]
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence", "--model", model]
     if system:
         cmd.extend(["--system-prompt", system])
 
@@ -80,3 +86,143 @@ def claude_complete(prompt: str, system: Optional[str] = None) -> str:
             "Claude CLI not found. Ensure 'claude' is in PATH.",
             "claude_cli_not_found"
         )
+
+
+def claude_with_tools(
+    prompt: str,
+    system: Optional[str] = None,
+    model: str = "haiku",
+    session_context: Optional[str] = None,
+    max_turns: int = 5
+) -> str:
+    """Call Claude with tool use support for richer analysis.
+
+    Allows Claude to search existing ideas, get details, and explore
+    the knowledge base before producing final output.
+
+    Args:
+        prompt: The user prompt
+        system: Optional system prompt
+        model: Model to use (default: haiku)
+        session_context: Session identifier for tool context
+        max_turns: Maximum tool-use turns before forcing completion
+
+    Returns:
+        The final response text
+
+    Raises:
+        TotalRecallError: If Claude CLI fails
+    """
+    # Build tool definitions as JSON for --allowedTools
+    tool_names = [t["name"] for t in INDEXING_TOOLS]
+
+    env = os.environ.copy()
+    env["TOTAL_RECALL_INTERNAL"] = "1"
+
+    messages = []
+    current_prompt = prompt
+
+    for turn in range(max_turns):
+        # Build command
+        cmd = [
+            "claude", "-p", current_prompt,
+            "--output-format", "json",
+            "--no-session-persistence",
+            "--model", model
+        ]
+        if system:
+            cmd.extend(["--system-prompt", system])
+
+        # Add tool allowlist
+        for tool_name in tool_names:
+            cmd.extend(["--allowedTools", tool_name])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,  # Longer timeout for tool use
+                env=env
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error"
+                logger.warning(f"Claude CLI failed: {error_msg}")
+                raise TotalRecallError(
+                    f"Claude CLI failed: {error_msg}",
+                    "claude_cli_error",
+                    {"stderr": result.stderr, "returncode": result.returncode}
+                )
+
+            # Parse response
+            try:
+                response = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                # If not JSON, return raw output
+                return result.stdout.strip()
+
+            # Look for tool use or final result
+            tool_calls = []
+            final_result = None
+
+            if isinstance(response, list):
+                for event in response:
+                    if not isinstance(event, dict):
+                        continue
+
+                    # Check for tool use in assistant message
+                    if event.get("type") == "assistant":
+                        message = event.get("message", {})
+                        content = message.get("content", [])
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "tool_use":
+                                    tool_calls.append({
+                                        "id": block.get("id"),
+                                        "name": block.get("name"),
+                                        "input": block.get("input", {})
+                                    })
+
+                    # Check for final result
+                    if event.get("type") == "result":
+                        final_result = event.get("result", "")
+
+            # If we have tool calls, execute them and continue
+            if tool_calls:
+                tool_results = []
+                for tc in tool_calls:
+                    logger.info(f"Executing tool: {tc['name']}({tc['input']})")
+                    result_str = execute_tool(tc["name"], tc["input"], session=session_context)
+                    tool_results.append({
+                        "tool_use_id": tc["id"],
+                        "result": result_str
+                    })
+                    logger.info(f"Tool result: {result_str[:200]}...")
+
+                # Build continuation prompt with tool results
+                # Note: Claude CLI doesn't support direct tool_result injection,
+                # so we format results as a follow-up message
+                results_text = "\n\n".join([
+                    f"Tool result for {tc['name']}:\n{tr['result']}"
+                    for tc, tr in zip(tool_calls, tool_results)
+                ])
+                current_prompt = f"Here are the tool results:\n\n{results_text}\n\nNow provide your final analysis based on these results."
+                continue
+
+            # No tool calls - return final result
+            if final_result is not None:
+                return final_result
+
+            # Fallback - look for text in response
+            return result.stdout.strip()
+
+        except subprocess.TimeoutExpired:
+            raise TotalRecallError(
+                "Claude CLI timed out",
+                "claude_cli_timeout"
+            )
+
+    # Max turns reached
+    logger.warning(f"Max tool turns ({max_turns}) reached, returning last response")
+    return current_prompt  # Return what we have

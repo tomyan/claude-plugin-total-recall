@@ -37,18 +37,38 @@ Examples:
 
 ## Instructions
 
+Jump directly to the section for the user's command:
+- `/total-recall <query>` → [Search](#search-total-recall-query)
+- `/total-recall backfill` → [Backfill](#backfill-total-recall-backfill)
+- `/total-recall stats` → [Stats](#stats-total-recall-stats)
+- `/total-recall topics` → [Topics](#topics-total-recall-topics)
+
+If any command fails with "database not found" or "no such file", run [First-Run Setup](#first-run-setup) first.
+
+---
+
 ### First-Run Setup
 
-When `/total-recall` is invoked, **always check if setup is needed first**.
+**Only run this section if a command failed because the database doesn't exist.**
 
-**Step 0: Check if runtime environment exists**
-
+**FIRST: Check for required API key:**
 ```bash
-RUNTIME_DIR="$HOME/.claude-plugin-total-recall"
-[ -f "$RUNTIME_DIR/memory.db" ] && echo "Setup complete" || echo "Setup needed"
+if [ -z "$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" ]; then
+  echo "❌ ERROR: OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS is not set!"
+  echo ""
+  echo "This skill requires an OpenAI API key for generating embeddings."
+  echo "Without it, search will not work."
+  echo ""
+  echo "Please set this environment variable and try again:"
+  echo "  export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS='your-openai-api-key'"
+  exit 1
+fi
+echo "✓ API key found"
 ```
 
-**If setup is needed**, run these commands to initialize the environment. Explain each step to the user:
+If the above check fails, **STOP** and tell the user they need to set `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` before proceeding.
+
+Run these commands to initialize the environment. Explain each step to the user:
 
 ```markdown
 ## Total Recall - First Time Setup
@@ -97,66 +117,7 @@ Then stop - don't proceed with a search until setup is confirmed complete.
 
 ### Search: `/total-recall <query>`
 
-When the user invokes `/total-recall` with a query:
-
-### Step 1: Check Setup and Database Status
-
-First, check if the database has any indexed content:
-```bash
-SKILL_DIR="$HOME/.claude/skills/total-recall"
-uv run python "$SKILL_DIR/src/cli.py" stats
-```
-
-**If the database is empty (0 ideas indexed)**, check if the API key is configured:
-```bash
-[ -n "$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" ] && echo "API key is set" || echo "API key missing"
-```
-
-**If API key is missing**, respond with:
-
-```markdown
-## Memory: <query>
-
-Total Recall needs an OpenAI API key to generate embeddings for semantic search.
-
-**Setup required:**
-
-1. Get an API key from [OpenAI](https://platform.openai.com/api-keys)
-2. Add to your shell profile (~/.zshrc or ~/.bashrc):
-   ```bash
-   export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="sk-..."
-   ```
-3. Restart your terminal or run `source ~/.zshrc`
-4. Run `/total-recall backfill` to index your conversation history
-
-The embedding costs are minimal (~$0.001 per conversation indexed).
-```
-
-Then stop.
-
-**If API key is set but database is empty**, respond with:
-
-```markdown
-## Memory: <query>
-
-I don't have any memories yet - this is a fresh start!
-
-**Total Recall** is your long-term memory across conversations. As we work together, I'll automatically remember:
-- Decisions we make
-- Problems we solve
-- Questions that come up
-- Key context about your projects
-
-**To get started**, run `/total-recall backfill` to index your existing Claude Code conversation history. This takes a few minutes depending on how much history you have.
-
-Once indexed, you can search your memory anytime with `/remember <query>`.
-```
-
-Then stop - don't run a search on an empty database.
-
-### Step 2: Search (if database has content)
-
-Run the total-recall CLI. Pass `--cwd` to scope search to the current project:
+Run the search directly:
 ```bash
 SKILL_DIR="$HOME/.claude/skills/total-recall"
 uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --cwd "$(pwd)"

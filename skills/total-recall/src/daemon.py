@@ -17,6 +17,7 @@ import signal
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -73,6 +74,7 @@ TIMEOUT_LLM_CALL = 120
 # Daemon settings
 POLL_INTERVAL = 2  # seconds between queue checks
 IDLE_TIMEOUT = 300  # seconds of idle before exit (0 = never)
+PARALLEL_WORKERS = 8  # number of transcripts to process in parallel
 HEARTBEAT_INTERVAL = 60  # log heartbeat every N seconds
 
 # Processing settings
@@ -171,18 +173,35 @@ def retry_with_backoff(
 @retry_with_backoff("db_get_queue_item")
 def db_get_queue_item() -> Optional[dict]:
     """Get next item from work queue."""
+    items = db_get_queue_items(limit=1)
+    return items[0] if items else None
+
+
+def db_get_queue_items(limit: int = 4) -> list[dict]:
+    """Get multiple items from work queue and remove them atomically.
+
+    Items are removed immediately to allow parallel processing.
+    """
     @with_timeout(TIMEOUT_DB_QUERY)
     def _query():
         db = get_db()
         try:
+            # Get items
             cursor = db.execute("""
                 SELECT id, file_path, file_size FROM work_queue
-                ORDER BY queued_at ASC LIMIT 1
-            """)
-            row = cursor.fetchone()
-            if row:
-                return {"id": row["id"], "file_path": row["file_path"], "file_size": row["file_size"]}
-            return None
+                ORDER BY queued_at ASC LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            items = [{"id": row["id"], "file_path": row["file_path"], "file_size": row["file_size"]} for row in rows]
+
+            # Remove them immediately (claim)
+            if items:
+                ids = [item["id"] for item in items]
+                placeholders = ",".join("?" * len(ids))
+                db.execute(f"DELETE FROM work_queue WHERE id IN ({placeholders})", ids)
+                db.commit()
+
+            return items
         finally:
             db.close()
     return _query()
@@ -513,8 +532,38 @@ def process_file(file_path: str, ctx: ProcessingContext) -> dict:
     return {"status": "processed", "messages": len(messages), "ideas": ideas_stored}
 
 
+def process_single_file(file_path: str) -> dict:
+    """Process a single transcript file. Thread-safe.
+
+    Returns:
+        Dict with batches_processed, ideas_stored, error (if any)
+    """
+    from batch_processor import process_transcript, ProcessingError
+    from backfill import session_from_path
+
+    session = session_from_path(file_path)
+
+    try:
+        logger.info(f"Processing: {file_path}")
+        result = process_transcript(file_path, session=session)
+        logger.info(f"  Result: batches={result.get('batches_processed', 0)}, ideas={result.get('ideas_stored', 0)}")
+        return {
+            "file_path": file_path,
+            "batches_processed": result.get('batches_processed', 0),
+            "ideas_stored": result.get('ideas_stored', 0),
+            "error": None
+        }
+    except ProcessingError as e:
+        logger.error(f"  Failed to process {file_path}: {e}")
+        return {"file_path": file_path, "batches_processed": 0, "ideas_stored": 0, "error": str(e)}
+    except Exception as e:
+        logger.error(f"  Unexpected error processing {file_path}: {e}")
+        logger.error(traceback.format_exc())
+        return {"file_path": file_path, "batches_processed": 0, "ideas_stored": 0, "error": str(e)}
+
+
 def process_queue_item(ctx: ProcessingContext) -> bool:
-    """Process one item from the queue.
+    """Process one item from the queue (legacy single-threaded).
 
     Returns:
         True if an item was processed, False if queue empty
@@ -523,17 +572,33 @@ def process_queue_item(ctx: ProcessingContext) -> bool:
     if not item:
         return False
 
-    try:
-        result = process_file(item["file_path"], ctx)
-        logger.info(f"  Result: {result}")
-    except Exception as e:
-        logger.error(f"  Failed to process {item['file_path']}: {e}")
-        logger.error(traceback.format_exc())
-        # Don't remove from queue on failure - will retry
-        return True
+    result = process_single_file(item["file_path"])
+    ctx.messages_processed += result["batches_processed"]
+    ctx.ideas_stored += result["ideas_stored"]
+    return True
 
-    # Remove from queue on success
-    db_remove_queue_item(item["id"])
+
+def process_queue_batch(ctx: ProcessingContext, max_workers: int = PARALLEL_WORKERS) -> bool:
+    """Process multiple queue items in parallel.
+
+    Returns:
+        True if any items were processed, False if queue empty
+    """
+    items = db_get_queue_items(limit=max_workers)
+    if not items:
+        return False
+
+    file_paths = [item["file_path"] for item in items]
+    logger.info(f"Processing {len(file_paths)} files in parallel")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_single_file, fp): fp for fp in file_paths}
+
+        for future in as_completed(futures):
+            result = future.result()
+            ctx.messages_processed += result["batches_processed"]
+            ctx.ideas_stored += result["ideas_stored"]
+
     return True
 
 
@@ -549,6 +614,10 @@ class IndexingDaemon:
         self.ctx = ProcessingContext()
         self.last_activity = time.time()
         self.last_heartbeat = time.time()
+        self.last_pidfile_check = 0
+        self.my_pid = os.getpid()
+        # Use absolute path for pidfile
+        self.pidfile_path = (RUNTIME_DIR / "daemon.pid").resolve()
 
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -557,6 +626,35 @@ class IndexingDaemon:
     def _handle_signal(self, signum, frame):
         logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+
+    def _check_pidfile(self) -> bool:
+        """Check if pidfile exists and contains our PID. Called every second.
+
+        Returns:
+            True if we should continue running, False if we should exit
+        """
+        now = time.time()
+        if now - self.last_pidfile_check < 1.0:
+            return True  # Not time to check yet
+
+        self.last_pidfile_check = now
+
+        # Check if pidfile exists
+        if not self.pidfile_path.exists():
+            logger.info(f"Pidfile {self.pidfile_path} no longer exists, exiting")
+            return False
+
+        # Check if pidfile contains our PID
+        try:
+            stored_pid = int(self.pidfile_path.read_text().strip())
+            if stored_pid != self.my_pid:
+                logger.info(f"Pidfile contains PID {stored_pid}, but we are {self.my_pid}, exiting")
+                return False
+        except (ValueError, OSError) as e:
+            logger.info(f"Cannot read pidfile ({e}), exiting")
+            return False
+
+        return True
 
     def _log_heartbeat(self):
         """Log periodic heartbeat."""
@@ -578,25 +676,23 @@ class IndexingDaemon:
         logger.info(f"  OpenAI available: {HAS_OPENAI}")
         logger.info("=" * 60)
 
-        # Write pidfile
-        pidfile = RUNTIME_DIR / "daemon.pid"
-        pidfile.write_text(str(os.getpid()))
-        logger.info(f"PID {os.getpid()} written to {pidfile}")
+        # Write pidfile (using absolute path)
+        self.pidfile_path.write_text(str(self.my_pid))
+        logger.info(f"PID {self.my_pid} written to {self.pidfile_path}")
 
         try:
             while self.running:
                 try:
-                    # Process one queue item
-                    had_work = process_queue_item(self.ctx)
+                    # Check pidfile every second (method self-throttles)
+                    if not self._check_pidfile():
+                        break
+
+                    # Process queue items in parallel
+                    had_work = process_queue_batch(self.ctx)
 
                     if had_work:
                         self.last_activity = time.time()
                     else:
-                        # Check if pidfile was deleted (signal to exit)
-                        if not pidfile.exists():
-                            logger.info("Pidfile deleted, exiting")
-                            break
-
                         # Check idle timeout
                         if IDLE_TIMEOUT > 0:
                             idle_time = time.time() - self.last_activity
@@ -619,14 +715,37 @@ class IndexingDaemon:
         finally:
             # Cleanup
             logger.info("Daemon shutting down")
-            pidfile.unlink(missing_ok=True)
+
+            # Save embedding cache to disk
+            try:
+                from embeddings.cache import save_embedding_cache, get_embedding_cache_stats
+                stats = get_embedding_cache_stats()
+                if stats["size"] > 0:
+                    save_embedding_cache()
+                    logger.info(f"Saved embedding cache ({stats['size']} entries)")
+            except Exception as e:
+                logger.warning(f"Failed to save embedding cache: {e}")
+
+            self.pidfile_path.unlink(missing_ok=True)
             logger.info(f"Final stats: {self.ctx.messages_processed} messages, {self.ctx.ideas_stored} ideas")
 
 
 def main():
     """Entry point."""
-    # Check if already running
-    pidfile = RUNTIME_DIR / "daemon.pid"
+    # Check for API key FIRST - refuse to run without it
+    if not os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS"):
+        logger.error("=" * 70)
+        logger.error("❌ OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS not set!")
+        logger.error("")
+        logger.error("The daemon requires this API key to generate embeddings.")
+        logger.error("Without embeddings, search will not work.")
+        logger.error("")
+        logger.error("To fix: export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS='your-key'")
+        logger.error("=" * 70)
+        sys.exit(1)
+
+    # Check if already running (use absolute path)
+    pidfile = (RUNTIME_DIR / "daemon.pid").resolve()
     if pidfile.exists():
         try:
             pid = int(pidfile.read_text().strip())

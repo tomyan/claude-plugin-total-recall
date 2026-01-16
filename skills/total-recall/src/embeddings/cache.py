@@ -7,7 +7,7 @@ from config import logger
 
 # Cache configuration
 CACHE_PATH = Path.home() / ".claude-plugin-total-recall" / "embedding_cache.json"
-_CACHE_MAX_SIZE = 1000
+_CACHE_MAX_SIZE = 50000
 
 # LRU cache for embeddings to reduce API calls
 _embedding_cache: dict[str, list[float]] = {}

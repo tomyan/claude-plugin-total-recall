@@ -115,6 +115,22 @@ SCHEMA_SQL = """
     CREATE INDEX IF NOT EXISTS idx_topic_links_topic ON topic_links(topic_id);
     CREATE INDEX IF NOT EXISTS idx_topic_links_related ON topic_links(related_topic_id);
 
+    -- Raw messages from transcripts (full content for FTS and RAG)
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session TEXT NOT NULL,
+        line_num INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        timestamp TEXT,
+        source_file TEXT NOT NULL,
+        UNIQUE(source_file, line_num)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session);
+    CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source_file);
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+
     -- Index state tracking (byte position for efficient seeking)
     CREATE TABLE IF NOT EXISTS index_state (
         file_path TEXT PRIMARY KEY,
@@ -156,6 +172,12 @@ SCHEMA_SQL = """
         idea_id INTEGER PRIMARY KEY,
         embedding FLOAT[1536]
     );
+
+    -- Vector embeddings for messages
+    CREATE VIRTUAL TABLE IF NOT EXISTS message_embeddings USING vec0(
+        message_id INTEGER PRIMARY KEY,
+        embedding FLOAT[1536]
+    );
 """
 
 
@@ -194,6 +216,17 @@ def init_db():
                 name,
                 summary,
                 content='spans',
+                content_rowid='id'
+            )
+        """)
+    except sqlite3.OperationalError:
+        pass  # Already exists
+
+    try:
+        db.execute("""
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                content,
+                content='messages',
                 content_rowid='id'
             )
         """)

@@ -5,6 +5,7 @@ A skill that indexes your Claude Code conversations for semantic search, allowin
 ## Features
 
 ### Search & Retrieval
+- **Dual-layer search** - Semantic search on both extracted ideas AND raw messages
 - **Hybrid search** - Combines vector similarity (semantic) with BM25 keyword matching
 - **HyDE search** - Uses LLM to generate hypothetical answers for better query matching
 - **Query decomposition** - Automatically handles complex queries like "decisions about X and Y"
@@ -144,20 +145,22 @@ uv run python ~/.claude/skills/total-recall/src/cli.py topics
 
 ## How it works
 
-1. **Continuous indexing**: Hooks trigger on each user prompt and when Claude stops, incrementally indexing new messages
+1. **Background daemon**: A persistent daemon processes conversations in the background, triggered by hooks on each user prompt
 2. **Semantic chunking**: Conversations are split into topic spans based on semantic shifts
 3. **Idea extraction**: Each message is analyzed and classified by intent (decision, question, problem, solution, etc.)
-4. **Vector embeddings**: Ideas are embedded using OpenAI's text-embedding-3-small for semantic search
-5. **LLM tasks**: Topic naming, HyDE search, and filtering use Claude CLI (`claude -p`) for non-interactive queries
-6. **Entity extraction**: Key entities (files, technologies, concepts) are tracked and linked
+4. **Dual embeddings**: Both extracted ideas AND raw messages are embedded for comprehensive semantic search
+5. **Embedding cache**: 50K entry cache reduces API calls across sessions (persisted to disk)
+6. **LLM tasks**: Topic naming, HyDE search, and filtering use Claude CLI (`claude -p`) for non-interactive queries
+7. **Entity extraction**: Key entities (files, technologies, concepts) are tracked and linked
 
 ## Data location
 
 - **Skill code**: `~/.claude/skills/total-recall/`
 - **Runtime data**: `~/.claude-plugin-total-recall/`
-  - `memory.db` - SQLite database with vector embeddings
-  - `embedding_cache.json` - Cached embeddings to reduce API calls
-  - `hook.log` - Hook execution log
+  - `memory.db` - SQLite database with vector embeddings (ideas, messages, topics)
+  - `embedding_cache.json` - 50K entry cache to reduce API calls
+  - `daemon.log` - Background daemon processing log
+  - `daemon.pid` - PID file for the running daemon
 
 ## Troubleshooting
 
@@ -165,20 +168,36 @@ uv run python ~/.claude/skills/total-recall/src/cli.py topics
 
 1. Check `~/.claude/settings.json` is valid JSON
 2. Restart Claude Code after modifying settings
-3. Check `~/.claude-plugin-total-recall/hook.log` for errors
+3. Check `~/.claude-plugin-total-recall/daemon.log` for errors
 
 ### Empty search results
 
-1. Run `/memory-backfill` to index existing history
-2. Check `uv run python ~/.claude/skills/total-recall/src/cli.py stats` to see what's indexed
+1. Run `/total-recall backfill --all` to index existing history
+2. Check `/total-recall stats` to see what's indexed
 3. Verify `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` is set
 
-### Bootstrap issues
+### Daemon not running
 
-The skill auto-bootstraps on first use. If you encounter issues:
-
+Check the daemon log:
 ```bash
-bash ~/.claude/skills/total-recall/bootstrap.sh
+tail -50 ~/.claude-plugin-total-recall/daemon.log
 ```
 
-This creates the runtime environment at `~/.claude-plugin-total-recall/` with required dependencies.
+The daemon auto-starts when hooks fire. If needed, manually restart:
+```bash
+kill $(cat ~/.claude-plugin-total-recall/daemon.pid)
+rm ~/.claude-plugin-total-recall/daemon.pid
+# Daemon will restart on next hook trigger
+```
+
+### Missing API key
+
+The skill requires `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` for generating embeddings. Without it:
+- Backfill will refuse to run
+- Daemon will refuse to start
+- Search will not work
+
+Set it in your shell profile:
+```bash
+export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="your-openai-api-key"
+```
