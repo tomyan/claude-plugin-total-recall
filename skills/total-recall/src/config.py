@@ -164,6 +164,32 @@ EMBEDDING_MODEL = _config.embedding_model
 EMBEDDING_DIM = _config.embedding_dim
 LOG_PATH = _config.log_path
 
+# OpenAI API key file location (config, not state)
+OPENAI_KEY_FILE = Path.home() / ".config" / "total-recall" / "openai-api-key"
+
+
+def get_openai_api_key() -> Optional[str]:
+    """Get OpenAI API key from file or environment variable.
+
+    Checks in order:
+    1. File at ~/.claude-plugin-total-recall/openai-api-key
+    2. OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS env var
+
+    Returns:
+        API key string or None if not found
+    """
+    # Check file first (more reliable across processes)
+    if OPENAI_KEY_FILE.exists():
+        try:
+            key = OPENAI_KEY_FILE.read_text().strip()
+            if key:
+                return key
+        except Exception:
+            pass
+
+    # Fall back to env var
+    return os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+
 # Logging setup
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 

@@ -36,11 +36,12 @@ class OpenAIEmbeddings(EmbeddingProvider):
     def _get_client(self) -> OpenAI:
         """Get or create OpenAI client."""
         if self._client is None:
-            api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+            from config import get_openai_api_key, OPENAI_KEY_FILE
+            api_key = get_openai_api_key()
             if not api_key:
                 raise TotalRecallError(
-                    "OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS environment variable not set. "
-                    "Set this to your OpenAI API key to enable memory search.",
+                    f"OpenAI API key not found. Create {OPENAI_KEY_FILE} with your key, "
+                    "or set OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS environment variable.",
                     "missing_api_key"
                 )
             self._client = OpenAI(api_key=api_key)

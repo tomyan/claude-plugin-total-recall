@@ -34,11 +34,15 @@ def error_result(error: str, code: str = "unknown", details: dict = None) -> dic
 
     # Print critical errors prominently (both stdout and stderr)
     if code == "missing_api_key":
+        from config import OPENAI_KEY_FILE
         msg = f"""
 ================================================================================
 ❌ CONFIGURATION ERROR: {error}
 
 To fix this:
+  echo 'your-openai-api-key' > {OPENAI_KEY_FILE}
+
+Or set environment variable:
   export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="your-openai-api-key"
 
 Then retry your search.
@@ -462,11 +466,11 @@ def run_command(args):
 
         elif args.command == "backfill":
             # Check for API key FIRST - refuse to backfill without it
-            if not os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS"):
+            from config import get_openai_api_key
+            if not get_openai_api_key():
                 print(error_result(
-                    "OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS not set. "
-                    "Backfill requires this for generating embeddings. "
-                    "Set it to your OpenAI API key and retry.",
+                    "OpenAI API key not found. "
+                    "Backfill requires this for generating embeddings.",
                     "missing_api_key"
                 ))
                 sys.exit(1)

@@ -43,7 +43,11 @@ A skill that indexes your Claude Code conversations for semantic search, allowin
 
 - **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 - **Claude Code** - Authenticated and in PATH (used for LLM tasks like topic naming, HyDE search)
-- **OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS** - Environment variable with OpenAI API key (used only for embeddings)
+- **OpenAI API key** - For embeddings. Create the key file:
+  ```bash
+  echo 'your-openai-api-key' > ~/.config/total-recall/openai-api-key
+  ```
+  Or set env var: `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS`
 
 ## Installation
 
@@ -192,12 +196,18 @@ rm ~/.claude-plugin-total-recall/daemon.pid
 
 ### Missing API key
 
-The skill requires `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` for generating embeddings. Without it:
+The skill requires an OpenAI API key for generating embeddings. Without it:
 - Backfill will refuse to run
 - Daemon will refuse to start
 - Search will not work
 
-Set it in your shell profile:
+Create the key file (recommended - works across all shells/processes):
+```bash
+mkdir -p ~/.config/total-recall
+echo 'your-openai-api-key' > ~/.config/total-recall/openai-api-key
+```
+
+Or set environment variable:
 ```bash
 export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="your-openai-api-key"
 ```

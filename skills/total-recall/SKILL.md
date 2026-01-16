@@ -20,7 +20,7 @@ Searches past conversations for relevant ideas, decisions, and context using sem
 ## Prerequisites
 
 - **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS** - Environment variable with OpenAI API key (used for embeddings)
+- **OpenAI API key** - Create `~/.config/total-recall/openai-api-key` with your key, or set `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` env var
 
 ## Invocation
 
@@ -53,20 +53,28 @@ If any command fails with "database not found" or "no such file", run [First-Run
 
 **FIRST: Check for required API key:**
 ```bash
-if [ -z "$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" ]; then
-  echo "❌ ERROR: OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS is not set!"
+KEY_FILE="$HOME/.config/total-recall/openai-api-key"
+if [ -f "$KEY_FILE" ] && [ -s "$KEY_FILE" ]; then
+  echo "✓ API key found in $KEY_FILE"
+elif [ -n "$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" ]; then
+  echo "✓ API key found in environment"
+else
+  echo "❌ ERROR: OpenAI API key not found!"
   echo ""
   echo "This skill requires an OpenAI API key for generating embeddings."
   echo "Without it, search will not work."
   echo ""
-  echo "Please set this environment variable and try again:"
+  echo "To fix, create the key file (recommended):"
+  echo "  mkdir -p ~/.config/total-recall"
+  echo "  echo 'your-openai-api-key' > ~/.config/total-recall/openai-api-key"
+  echo ""
+  echo "Or set environment variable:"
   echo "  export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS='your-openai-api-key'"
   exit 1
 fi
-echo "✓ API key found"
 ```
 
-If the above check fails, **STOP** and tell the user they need to set `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` before proceeding.
+If the above check fails, **STOP** and tell the user they need to create the key file before proceeding.
 
 Run these commands to initialize the environment. Explain each step to the user:
 

@@ -242,12 +242,11 @@ def embed_ideas(idea_ids: list[int]) -> int:
     Returns:
         Number of ideas embedded
     """
-    import os
     if not idea_ids:
         return 0
 
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
-    if not api_key:
+    from config import get_openai_api_key
+    if not get_openai_api_key():
         # Silently skip embedding if no API key - will error on search
         return 0
 
@@ -302,12 +301,11 @@ def embed_messages(message_ids: list[int]) -> int:
     Returns:
         Number of messages embedded
     """
-    import os
     if not message_ids:
         return 0
 
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
-    if not api_key:
+    from config import get_openai_api_key
+    if not get_openai_api_key():
         return 0
 
     try:

@@ -733,14 +733,16 @@ class IndexingDaemon:
 def main():
     """Entry point."""
     # Check for API key FIRST - refuse to run without it
-    if not os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS"):
+    from config import get_openai_api_key, OPENAI_KEY_FILE
+    if not get_openai_api_key():
         logger.error("=" * 70)
-        logger.error("❌ OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS not set!")
+        logger.error("❌ OpenAI API key not found!")
         logger.error("")
         logger.error("The daemon requires this API key to generate embeddings.")
         logger.error("Without embeddings, search will not work.")
         logger.error("")
-        logger.error("To fix: export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS='your-key'")
+        logger.error(f"To fix: echo 'your-key' > {OPENAI_KEY_FILE}")
+        logger.error("   Or:  export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS='your-key'")
         logger.error("=" * 70)
         sys.exit(1)
 
