@@ -32,7 +32,7 @@ from errors import TotalRecallError  # noqa: E402
 # Claude CLI Integration
 # =============================================================================
 
-from llm.claude import claude_complete, claude_complete_async  # noqa: E402
+from llm.claude import claude_complete  # noqa: E402
 
 # Import database operations from db module
 from db.connection import get_db  # noqa: E402
@@ -54,18 +54,18 @@ from embeddings.cache import (  # noqa: E402
     clear_embedding_cache,
 )
 from embeddings.openai import (  # noqa: E402
-    get_embedding_async,
-    get_embeddings_batch_async,
+    get_embedding,
+    get_embeddings_batch,
     _reset_async_provider,
 )
 from search.vector import (  # noqa: E402
-    search_ideas_async,
-    find_similar_ideas_async,
-    enrich_with_relations_async,
-    search_spans_async,
+    search_ideas,
+    find_similar_ideas,
+    enrich_with_relations,
+    search_spans,
 )
-from search.hybrid import hybrid_search_async  # noqa: E402
-from search.hyde import generate_hypothetical_doc_async, hyde_search_async  # noqa: E402
+from search.hybrid import hybrid_search  # noqa: E402
+from search.hyde import generate_hypothetical_doc, hyde_search  # noqa: E402
 
 
 # =============================================================================
@@ -464,7 +464,7 @@ Sample content: {content_sample}
 Reply with ONLY the project name that best matches, or "NONE" if no good match."""
 
         try:
-            suggested = (await claude_complete_async(prompt)).strip()
+            suggested = (await claude_complete(prompt)).strip()
 
             # Find matching project
             matched_project = None
@@ -1500,7 +1500,7 @@ async def find_duplicate_topics(threshold: float = None) -> list[dict]:
     for topic in topics:
         text = f"{topic['name']}: {topic['summary'] or ''}"
         try:
-            embedding = await get_embedding_async(text)
+            embedding = await get_embedding(text)
             topic_embeddings[topic["id"]] = {
                 "name": topic["name"],
                 "embedding": embedding
@@ -1824,7 +1824,7 @@ async def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
 {sample_content}
 
 Reply with ONLY the topic name, nothing else."""
-            suggested_name = (await claude_complete_async(prompt)).strip()
+            suggested_name = (await claude_complete(prompt)).strip()
         except TotalRecallError:
             raise  # Re-raise TotalRecallError as-is
         except Exception as e:
@@ -2148,7 +2148,7 @@ Sample content:
 
 Reply with ONLY the suggested topic name, nothing else."""
 
-        name = (await claude_complete_async(prompt)).strip()
+        name = (await claude_complete(prompt)).strip()
         # Clean the output - strip markdown and quotes
         import re
         name = re.sub(r'^\*\*(.+)\*\*$', r'\1', name)  # Remove bold
@@ -2259,7 +2259,7 @@ async def close_span(span_id: int, end_line: int, summary: str, end_time: Option
 
             # Embed and store - delete first for sqlite-vec compatibility
             embed_text = f"{row['name']}: {row['summary']}"
-            embedding = await get_embedding_async(embed_text)
+            embedding = await get_embedding(embed_text)
             await db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
             await db.execute("""
                 INSERT INTO span_embeddings (span_id, embedding)
@@ -2347,7 +2347,7 @@ async def update_span_embedding(span_id: int, include_ideas: bool = True) -> boo
                     parts.append("Key points: " + "; ".join(all_ideas[:5]))
 
             embed_text = " | ".join(parts)[:2000]  # Limit length
-            embedding = await get_embedding_async(embed_text)
+            embedding = await get_embedding(embed_text)
 
             # Delete first for sqlite-vec compatibility
             await db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
@@ -2426,7 +2426,7 @@ async def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
         return None
 
     span_embedding = deserialize_embedding(row['embedding'])
-    message_embedding = await get_embedding_async(message[:1000])  # Limit message length
+    message_embedding = await get_embedding(message[:1000])  # Limit message length
 
     # Compute cosine similarity directly for accuracy
     import math
@@ -2529,7 +2529,7 @@ async def store_idea(
         confidence = get_config().default_confidence
 
     # Get embedding first (outside of transaction)
-    embedding = await get_embedding_async(content)
+    embedding = await get_embedding(content)
 
     async def do_store():
         db = await get_async_db()
@@ -2681,9 +2681,9 @@ async def search_with_topic_expansion(
     """
     # First do regular search
     if session:
-        primary_results = await search_ideas_async(query, limit=limit, session=session)
+        primary_results = await search_ideas(query, limit=limit, session=session)
     else:
-        primary_results = await search_ideas_async(query, limit=limit)
+        primary_results = await search_ideas(query, limit=limit)
 
     if not primary_results:
         return {
@@ -2741,7 +2741,7 @@ async def search_with_topic_expansion(
         }
 
     # Search within linked topics
-    query_embedding = await get_embedding_async(query)
+    query_embedding = await get_embedding(query)
 
     async def do_linked_search():
         db = await get_async_db()
@@ -3152,7 +3152,7 @@ async def search_ideas_temporal(
     if relative:
         since, until = resolve_temporal_qualifier(relative)
 
-    query_embedding = await get_embedding_async(query)
+    query_embedding = await get_embedding(query)
 
     async def do_search():
         db = await get_async_db()
@@ -4526,7 +4526,7 @@ Context points:
 Write a 2-4 sentence summary that captures the essential information:"""
 
     try:
-        summary_text = await claude_complete_async(summary_prompt)
+        summary_text = await claude_complete(summary_prompt)
     except Exception as e:
         return {**result, "error": f"LLM summary failed: {e}"}
 
@@ -5183,7 +5183,7 @@ Reply with ONLY a JSON array of indices that should be REMOVED, e.g. [0, 3, 5]
 If none should be removed, reply: []"""
 
         try:
-            response_text = (await claude_complete_async(prompt)).strip()
+            response_text = (await claude_complete(prompt)).strip()
 
             # Parse response - handle various formats
             import re
@@ -5541,7 +5541,7 @@ async def import_data(data: dict, replace: bool = False) -> dict:
 
                 # Generate embedding for the idea
                 try:
-                    embedding = await get_embedding_async(idea["content"])
+                    embedding = await get_embedding(idea["content"])
                 except Exception as e:
                     logger.warning(f"Failed to embed idea {old_id}: {e}")
                     continue
@@ -5837,7 +5837,7 @@ Activity summary:
 Reflection:"""
 
     try:
-        reflection_text = await claude_complete_async(prompt)
+        reflection_text = await claude_complete(prompt)
     except Exception as e:
         return {
             "session": session,
@@ -5894,7 +5894,7 @@ async def store_reflection(
             idea_id = cursor.lastrowid
 
             # Generate and store embedding
-            embedding = await get_embedding_async(reflection_text)
+            embedding = await get_embedding(reflection_text)
             await db.execute(
                 "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
                 (idea_id, serialize_embedding(embedding))
@@ -6025,7 +6025,7 @@ Topic timeline ({len(ideas)} ideas total):
 Reflection (2-4 paragraphs):"""
 
     try:
-        reflection_text = await claude_complete_async(prompt)
+        reflection_text = await claude_complete(prompt)
     except Exception as e:
         return {
             "topic_id": topic_id,

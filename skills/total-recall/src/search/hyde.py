@@ -5,16 +5,16 @@ from typing import Optional
 
 import config
 from db.async_connection import get_async_db
-from embeddings.openai import get_embedding_async
+from embeddings.openai import get_embedding
 from embeddings.cache import cache_source
 from embeddings.serialize import serialize_embedding
 from errors import TotalRecallError
 from llm.claude import claude_complete
-from search.vector import _update_access_tracking_async
+from search.vector import _update_access_tracking
 from utils.async_retry import retry_with_backoff
 
 
-async def generate_hypothetical_doc_async(query: str) -> str:
+async def generate_hypothetical_doc(query: str) -> str:
     """Generate a hypothetical document that would answer the query (async).
 
     Used for HyDE (Hypothetical Document Embeddings) to improve retrieval.
@@ -33,10 +33,8 @@ write a brief hypothetical answer that might appear in documentation or conversa
 Write in a direct, factual style as if you were recording a decision or explaining a solution.
 Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably"."""
 
-        # Run blocking Claude CLI call in thread pool
-        hypothetical = await asyncio.to_thread(
-            claude_complete, query, system=system_prompt
-        )
+        # Call async Claude CLI
+        hypothetical = await claude_complete(query, system=system_prompt)
         hypothetical = hypothetical.strip()
         config.logger.debug(f"HyDE generated: {hypothetical[:100]}...")
         return hypothetical
@@ -52,7 +50,7 @@ Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably".""
         ) from e
 
 
-async def hyde_search_async(
+async def hyde_search(
     query: str,
     limit: int = 10,
     session: Optional[str] = None,
@@ -74,11 +72,11 @@ async def hyde_search_async(
         List of matching idea dicts
     """
     # Generate hypothetical document
-    hypothetical = await generate_hypothetical_doc_async(query)
+    hypothetical = await generate_hypothetical_doc(query)
 
     # Embed the hypothetical document
     async with cache_source("search"):
-        hypo_embedding = await get_embedding_async(hypothetical)
+        hypo_embedding = await get_embedding(hypothetical)
 
     async def do_search():
         db = await get_async_db()
@@ -119,7 +117,7 @@ async def hyde_search_async(
 
             # Update access tracking for returned results
             if results:
-                await _update_access_tracking_async(
+                await _update_access_tracking(
                     [r['id'] for r in results], db, session=session
                 )
 

@@ -4,25 +4,25 @@ All functions are async.
 """
 
 from search.vector import (
-    search_ideas_async,
-    find_similar_ideas_async,
-    enrich_with_relations_async,
-    search_spans_async,
-    _update_access_tracking_async,
+    search_ideas,
+    find_similar_ideas,
+    enrich_with_relations,
+    search_spans,
+    _update_access_tracking,
 )
-from search.hybrid import hybrid_search_async
-from search.hyde import generate_hypothetical_doc_async, hyde_search_async
+from search.hybrid import hybrid_search
+from search.hyde import generate_hypothetical_doc, hyde_search
 
 __all__ = [
     # Vector search (async)
-    "search_ideas_async",
-    "find_similar_ideas_async",
-    "enrich_with_relations_async",
-    "search_spans_async",
-    "_update_access_tracking_async",
+    "search_ideas",
+    "find_similar_ideas",
+    "enrich_with_relations",
+    "search_spans",
+    "_update_access_tracking",
     # Hybrid search (async)
-    "hybrid_search_async",
+    "hybrid_search",
     # HyDE search (async)
-    "generate_hypothetical_doc_async",
-    "hyde_search_async",
+    "generate_hypothetical_doc",
+    "hyde_search",
 ]

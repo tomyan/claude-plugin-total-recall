@@ -57,7 +57,7 @@ class TestBatchEmbeddings:
         # Mock the embedding API
         mock_embeddings = [[0.1] * 1536, [0.2] * 1536, [0.3] * 1536]
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.return_value = mock_embeddings
             result = embed_ideas(idea_ids)
 
@@ -79,7 +79,7 @@ class TestBatchEmbeddings:
         mock_embeddings_100 = [[0.1] * 1536] * 100
         mock_embeddings_50 = [[0.1] * 1536] * 50
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.side_effect = [mock_embeddings_100, mock_embeddings_50]
             result = embed_ideas(idea_ids)
 
@@ -106,7 +106,7 @@ class TestBatchEmbeddings:
 
         mock_embeddings = [[0.1] * 1536, [0.2] * 1536]
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.return_value = mock_embeddings
             result = embed_ideas(idea_ids)
 
@@ -126,7 +126,7 @@ class TestBatchEmbeddings:
 
         mock_embeddings = [[0.1] * 1536, [0.2] * 1536]
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.return_value = mock_embeddings
             embed_ideas(idea_ids)
 
@@ -146,7 +146,7 @@ class TestBatchEmbeddings:
         idea_ids = create_test_ideas(db, 2)
         db.close()
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.side_effect = Exception("API error")
 
             with pytest.raises(EmbeddingError):
@@ -168,7 +168,7 @@ class TestBatchEmbeddings:
 
         mock_embedding = [0.1] * 1536
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.return_value = [mock_embedding]
             embed_span(span_id)
 
@@ -183,7 +183,7 @@ class TestBatchEmbeddings:
         """Should return 0 for empty idea list."""
         from embeddings.batch import embed_ideas
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             result = embed_ideas([])
 
         assert result == 0
@@ -209,7 +209,7 @@ class TestBatchEmbeddings:
 
         new_embedding = [0.9] * 1536
 
-        with patch('embeddings.batch.get_embeddings_batch') as mock_get:
+        with patch('embeddings.batch.get_embeddings_batch_sync') as mock_get:
             mock_get.return_value = [new_embedding]
             # Force re-embed
             result = embed_ideas(idea_ids, force=True)

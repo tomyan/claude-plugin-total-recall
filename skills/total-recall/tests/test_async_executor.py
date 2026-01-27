@@ -42,9 +42,9 @@ def mock_openai_response():
 
 
 @pytest.mark.asyncio
-async def test_store_idea_async(mock_openai_response):
+async def test_store_idea(mock_openai_response):
     """Test storing an idea asynchronously."""
-    from async_executor import store_idea_async
+    from async_executor import store_idea
 
     with patch('embeddings.openai.AsyncOpenAI') as mock_client_class:
         mock_client = AsyncMock()
@@ -52,7 +52,7 @@ async def test_store_idea_async(mock_openai_response):
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            idea_id = await store_idea_async(
+            idea_id = await store_idea(
                 content="Test idea content",
                 source_file="/test/file.py",
                 source_line=10,
@@ -67,7 +67,7 @@ async def test_store_idea_async(mock_openai_response):
 @pytest.mark.asyncio
 async def test_store_idea_with_entities(mock_openai_response):
     """Test storing an idea with entities."""
-    from async_executor import store_idea_async
+    from async_executor import store_idea
     import uuid
 
     with patch('embeddings.openai.AsyncOpenAI') as mock_client_class:
@@ -76,7 +76,7 @@ async def test_store_idea_with_entities(mock_openai_response):
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            idea_id = await store_idea_async(
+            idea_id = await store_idea(
                 content="Using Python and PostgreSQL",
                 source_file=f"/test/entities-{uuid.uuid4()}.py",
                 source_line=10,
@@ -87,9 +87,9 @@ async def test_store_idea_with_entities(mock_openai_response):
 
 
 @pytest.mark.asyncio
-async def test_store_ideas_batch_async():
+async def test_store_ideas_batch():
     """Test storing multiple ideas in a batch."""
-    from async_executor import store_ideas_batch_async
+    from async_executor import store_ideas_batch
     from embeddings.openai import _reset_async_provider
     import uuid
 
@@ -117,7 +117,7 @@ async def test_store_ideas_batch_async():
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            idea_ids = await store_ideas_batch_async(ideas)
+            idea_ids = await store_ideas_batch(ideas)
 
             assert len(idea_ids) == 3
             assert all(isinstance(id, int) for id in idea_ids)
@@ -130,18 +130,18 @@ async def test_store_ideas_batch_async():
 @pytest.mark.asyncio
 async def test_store_ideas_batch_empty():
     """Test storing empty batch returns empty list."""
-    from async_executor import store_ideas_batch_async
+    from async_executor import store_ideas_batch
 
-    idea_ids = await store_ideas_batch_async([])
+    idea_ids = await store_ideas_batch([])
     assert idea_ids == []
 
 
 @pytest.mark.asyncio
-async def test_create_span_async():
+async def test_create_span():
     """Test creating a span asynchronously."""
-    from async_executor import create_span_async
+    from async_executor import create_span
 
-    span_id = await create_span_async(
+    span_id = await create_span(
         session="test-session",
         name="Test Topic",
         start_line=1
@@ -155,15 +155,15 @@ async def test_create_span_async():
 @pytest.mark.asyncio
 async def test_create_child_span_async():
     """Test creating a child span."""
-    from async_executor import create_span_async
+    from async_executor import create_span
 
-    parent_id = await create_span_async(
+    parent_id = await create_span(
         session="test-session",
         name="Parent Topic",
         start_line=1
     )
 
-    child_id = await create_span_async(
+    child_id = await create_span(
         session="test-session",
         name="Child Topic",
         start_line=5,
@@ -176,17 +176,17 @@ async def test_create_child_span_async():
 
 
 @pytest.mark.asyncio
-async def test_close_span_async():
+async def test_close_span():
     """Test closing a span."""
-    from async_executor import create_span_async, close_span_async
+    from async_executor import create_span, close_span
 
-    span_id = await create_span_async(
+    span_id = await create_span(
         session="test-session",
         name="Test Topic",
         start_line=1
     )
 
-    await close_span_async(
+    await close_span(
         span_id=span_id,
         end_line=10,
         summary="Test summary"
@@ -204,30 +204,30 @@ async def test_close_span_async():
 
 
 @pytest.mark.asyncio
-async def test_get_open_span_async():
+async def test_get_open_span():
     """Test getting open span for a session."""
-    from async_executor import create_span_async, get_open_span_async
+    from async_executor import create_span, get_open_span
 
     # Initially no open span
-    span = await get_open_span_async("new-session")
+    span = await get_open_span("new-session")
     assert span is None
 
     # Create a span
-    await create_span_async(
+    await create_span(
         session="new-session",
         name="Open Topic",
         start_line=1
     )
 
-    span = await get_open_span_async("new-session")
+    span = await get_open_span("new-session")
     assert span is not None
     assert span["name"] == "Open Topic"
 
 
 @pytest.mark.asyncio
-async def test_add_relation_async(mock_openai_response):
+async def test_add_relation(mock_openai_response):
     """Test adding a relation between ideas."""
-    from async_executor import store_idea_async, add_relation_async
+    from async_executor import store_idea, add_relation
     import uuid
 
     unique_id = uuid.uuid4()
@@ -238,18 +238,18 @@ async def test_add_relation_async(mock_openai_response):
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            idea1_id = await store_idea_async(
+            idea1_id = await store_idea(
                 content="First idea for relation test",
                 source_file=f"/test/relation-{unique_id}.py",
                 source_line=1
             )
-            idea2_id = await store_idea_async(
+            idea2_id = await store_idea(
                 content="Second idea for relation test",
                 source_file=f"/test/relation-{unique_id}.py",
                 source_line=2
             )
 
-            await add_relation_async(
+            await add_relation(
                 from_id=idea1_id,
                 to_id=idea2_id,
                 relation_type="builds_on"
@@ -270,9 +270,9 @@ async def test_add_relation_async(mock_openai_response):
 
 
 @pytest.mark.asyncio
-async def test_update_span_embedding_async(mock_openai_response):
+async def test_update_span_embedding(mock_openai_response):
     """Test updating span embedding."""
-    from async_executor import create_span_async, update_span_embedding_async
+    from async_executor import create_span, update_span_embedding
     import uuid
 
     with patch('embeddings.openai.AsyncOpenAI') as mock_client_class:
@@ -281,13 +281,13 @@ async def test_update_span_embedding_async(mock_openai_response):
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            span_id = await create_span_async(
+            span_id = await create_span(
                 session=f"embedding-test-{uuid.uuid4()}",
                 name="Test Topic for Embedding",
                 start_line=1
             )
 
-            await update_span_embedding_async(span_id, include_ideas=False)
+            await update_span_embedding(span_id, include_ideas=False)
 
             # Verify embedding exists
             from db.async_connection import get_async_db
@@ -304,9 +304,9 @@ async def test_update_span_embedding_async(mock_openai_response):
 
 
 @pytest.mark.asyncio
-async def test_flush_all_async():
+async def test_flush_all():
     """Test flushing all pending writes."""
-    from async_executor import flush_all_async
+    from async_executor import flush_all
 
     # Should complete without error
-    await flush_all_async()
+    await flush_all()

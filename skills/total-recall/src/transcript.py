@@ -273,6 +273,10 @@ def is_indexable(message: dict) -> bool:
     if _SYSTEM_RE.match(content_lower):
         return False
 
+    # Check for warmup/ready patterns (assistant boilerplate intros)
+    if _WARMUP_RE.match(content_lower):
+        return False
+
     # Check for short user instructions (< 50 chars and matches pattern)
     if len(content) < 50 and _SHORT_INSTRUCTION_RE.match(content_lower):
         return False

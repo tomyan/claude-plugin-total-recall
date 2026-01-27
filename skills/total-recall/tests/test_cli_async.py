@@ -36,7 +36,7 @@ def test_run_async_executes_coroutine():
 
 def test_run_async_with_async_search():
     """Test run_async with actual async search function."""
-    from cli_async import run_async, search_ideas_async
+    from cli_async import run_async, search_ideas
 
     class MockData:
         def __init__(self):
@@ -52,13 +52,13 @@ def test_run_async_with_async_search():
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            results = run_async(search_ideas_async("test query", limit=5))
+            results = run_async(search_ideas("test query", limit=5))
             assert isinstance(results, list)
 
 
 def test_run_async_with_hybrid_search():
     """Test run_async with hybrid search."""
-    from cli_async import run_async, hybrid_search_async
+    from cli_async import run_async, hybrid_search
 
     class MockData:
         def __init__(self):
@@ -74,13 +74,13 @@ def test_run_async_with_hybrid_search():
         mock_client_class.return_value = mock_client
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
-            results = run_async(hybrid_search_async("test query", limit=5))
+            results = run_async(hybrid_search("test query", limit=5))
             assert isinstance(results, list)
 
 
 def test_run_async_with_hyde_search():
     """Test run_async with HyDE search."""
-    from cli_async import run_async, hyde_search_async
+    from cli_async import run_async, hyde_search
 
     class MockData:
         def __init__(self):
@@ -97,7 +97,7 @@ def test_run_async_with_hyde_search():
 
         with patch('embeddings.openai.get_openai_api_key', return_value='test-key'):
             with patch('search.hyde.claude_complete', return_value="A hypothetical"):
-                results = run_async(hyde_search_async("test query", limit=5))
+                results = run_async(hyde_search("test query", limit=5))
                 assert isinstance(results, list)
 
 
@@ -129,10 +129,10 @@ def test_exports_are_available():
     assert hasattr(cli_async, 'shutdown')
 
     # Search functions
-    assert hasattr(cli_async, 'search_ideas_async')
-    assert hasattr(cli_async, 'find_similar_ideas_async')
-    assert hasattr(cli_async, 'hybrid_search_async')
-    assert hasattr(cli_async, 'hyde_search_async')
+    assert hasattr(cli_async, 'search_ideas')
+    assert hasattr(cli_async, 'find_similar_ideas')
+    assert hasattr(cli_async, 'hybrid_search')
+    assert hasattr(cli_async, 'hyde_search')
 
     # Cache
     assert hasattr(cli_async, 'get_embedding_cache_stats')

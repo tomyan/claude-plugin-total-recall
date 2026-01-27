@@ -3,14 +3,14 @@
 from typing import Optional
 
 from db.async_connection import get_async_db
-from embeddings.openai import get_embedding_async
+from embeddings.openai import get_embedding
 from embeddings.cache import cache_source
 from embeddings.serialize import serialize_embedding
-from search.vector import _update_access_tracking_async
+from search.vector import _update_access_tracking
 from utils.async_retry import retry_with_backoff
 
 
-async def hybrid_search_async(
+async def hybrid_search(
     query: str,
     limit: int = 10,
     session: Optional[str] = None,
@@ -30,7 +30,7 @@ async def hybrid_search_async(
         List of matching idea dicts
     """
     async with cache_source("search"):
-        query_embedding = await get_embedding_async(query)
+        query_embedding = await get_embedding(query)
 
     async def do_search():
         db = await get_async_db()
@@ -116,7 +116,7 @@ async def hybrid_search_async(
 
             # Update access tracking for returned results
             if final_results:
-                await _update_access_tracking_async(
+                await _update_access_tracking(
                     [r['id'] for r in final_results], db, session=session
                 )
 

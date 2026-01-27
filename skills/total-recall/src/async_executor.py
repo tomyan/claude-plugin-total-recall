@@ -10,12 +10,12 @@ from typing import Optional
 
 from db.async_connection import get_async_db
 from embeddings.cache import cache_source, flush_write_queue
-from embeddings.openai import get_embedding_async, get_embeddings_batch_async
+from embeddings.openai import get_embedding, get_embeddings_batch
 from embeddings.serialize import serialize_embedding
 from utils.async_retry import retry_with_backoff
 
 
-async def store_idea_async(
+async def store_idea(
     content: str,
     source_file: str,
     source_line: int,
@@ -42,7 +42,7 @@ async def store_idea_async(
     """
     # Get embedding asynchronously with cache
     async with cache_source("indexing"):
-        embedding = await get_embedding_async(content)
+        embedding = await get_embedding(content)
 
     async def do_store():
         db = await get_async_db()
@@ -95,7 +95,7 @@ async def store_idea_async(
     return await retry_with_backoff(do_store)
 
 
-async def store_ideas_batch_async(
+async def store_ideas_batch(
     ideas: list[dict]
 ) -> list[int]:
     """Store multiple ideas in a batch with batch embedding.
@@ -114,7 +114,7 @@ async def store_ideas_batch_async(
     # Get all embeddings in a batch
     contents = [idea["content"] for idea in ideas]
     async with cache_source("indexing"):
-        embeddings = await get_embeddings_batch_async(contents)
+        embeddings = await get_embeddings_batch(contents)
 
     async def do_store_batch():
         db = await get_async_db()
@@ -179,7 +179,7 @@ async def store_ideas_batch_async(
     return await retry_with_backoff(do_store_batch)
 
 
-async def create_span_async(
+async def create_span(
     session: str,
     name: str,
     start_line: int,
@@ -218,7 +218,7 @@ async def create_span_async(
     return await retry_with_backoff(do_create)
 
 
-async def close_span_async(
+async def close_span(
     span_id: int,
     end_line: int,
     summary: str = "",
@@ -247,7 +247,7 @@ async def close_span_async(
     await retry_with_backoff(do_close)
 
 
-async def update_span_embedding_async(
+async def update_span_embedding(
     span_id: int,
     include_ideas: bool = True
 ) -> None:
@@ -288,7 +288,7 @@ async def update_span_embedding_async(
             # Generate embedding
             combined = "\n".join(content_parts)
             async with cache_source("indexing"):
-                embedding = await get_embedding_async(combined)
+                embedding = await get_embedding(combined)
 
             embedding_blob = serialize_embedding(embedding)
 
@@ -309,7 +309,7 @@ async def update_span_embedding_async(
     await retry_with_backoff(do_update)
 
 
-async def add_relation_async(
+async def add_relation(
     from_id: int,
     to_id: int,
     relation_type: str
@@ -335,7 +335,7 @@ async def add_relation_async(
     await retry_with_backoff(do_add)
 
 
-async def get_open_span_async(session: str) -> Optional[dict]:
+async def get_open_span(session: str) -> Optional[dict]:
     """Get the currently open span for a session.
 
     Args:
@@ -362,7 +362,7 @@ async def get_open_span_async(session: str) -> Optional[dict]:
     return await retry_with_backoff(do_get)
 
 
-async def detect_semantic_topic_shift_async(
+async def detect_semantic_topic_shift(
     span_id: int,
     content: str,
     threshold: float = 0.55,
@@ -395,7 +395,7 @@ async def detect_semantic_topic_shift_async(
 
             # Get content embedding
             async with cache_source("indexing"):
-                content_embedding = await get_embedding_async(content)
+                content_embedding = await get_embedding(content)
 
             # Deserialize span embedding
             import struct
@@ -435,7 +435,7 @@ def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     return dot_product / (norm1 * norm2)
 
 
-async def flush_all_async():
+async def flush_all():
     """Flush all pending writes and close connections.
 
     Call this at the end of indexing to ensure all data is persisted.

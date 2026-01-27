@@ -113,7 +113,7 @@ class ProcessingContext:
 # Async File Processing
 # =============================================================================
 
-async def process_single_file_async(file_path: str) -> dict:
+async def process_single_file(file_path: str) -> dict:
     """Process a single transcript file asynchronously."""
     from batch_processor import process_transcript_async, ProcessingError
     from backfill import session_from_path
@@ -139,7 +139,7 @@ async def process_single_file_async(file_path: str) -> dict:
         return {"file_path": file_path, "batches_processed": 0, "ideas_stored": 0, "error": str(e)}
 
 
-async def process_queue_batch_async(ctx: ProcessingContext, max_workers: int = PARALLEL_WORKERS) -> bool:
+async def process_queue_batch(ctx: ProcessingContext, max_workers: int = PARALLEL_WORKERS) -> bool:
     """Process multiple queue items in parallel using asyncio.
 
     Returns:
@@ -157,7 +157,7 @@ async def process_queue_batch_async(ctx: ProcessingContext, max_workers: int = P
 
     async def process_with_semaphore(fp: str) -> dict:
         async with sem:
-            return await process_single_file_async(fp)
+            return await process_single_file(fp)
 
     # Process all files concurrently
     results = await asyncio.gather(*[process_with_semaphore(fp) for fp in file_paths])
@@ -225,7 +225,7 @@ class AsyncIndexingDaemon:
             )
             self.last_heartbeat = now
 
-    async def run_async(self):
+    async def run(self):
         """Main async daemon loop."""
         logger.info("=" * 60)
         logger.info("Total Recall Async Daemon starting")
@@ -252,7 +252,7 @@ class AsyncIndexingDaemon:
                         break
 
                     # Process queue items in parallel
-                    had_work = await process_queue_batch_async(self.ctx)
+                    had_work = await process_queue_batch(self.ctx)
 
                     if had_work:
                         self.last_activity = time.time()
@@ -320,7 +320,7 @@ def main():
         sys.exit(1)
 
     daemon = AsyncIndexingDaemon()
-    asyncio.run(daemon.run_async())
+    asyncio.run(daemon.run())
 
 
 if __name__ == "__main__":

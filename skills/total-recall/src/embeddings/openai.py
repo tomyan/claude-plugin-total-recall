@@ -179,7 +179,7 @@ def _reset_async_provider() -> None:
 
 
 # Convenience functions
-async def get_embedding_async(text: str, use_cache: bool = True) -> list[float]:
+async def get_embedding(text: str, use_cache: bool = True) -> list[float]:
     """Get embedding from OpenAI with async caching.
 
     Args:
@@ -195,10 +195,10 @@ async def get_embedding_async(text: str, use_cache: bool = True) -> list[float]:
     return await _get_async_provider().get_embedding(text, use_cache)
 
 
-async def get_embeddings_batch_async(texts: list[str], use_cache: bool = True) -> list[list[float]]:
+async def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
     """Get embeddings for multiple texts in a single async API call.
 
-    More efficient than calling get_embedding_async() for each text separately.
+    More efficient than calling get_embedding() for each text separately.
 
     Args:
         texts: List of texts to embed

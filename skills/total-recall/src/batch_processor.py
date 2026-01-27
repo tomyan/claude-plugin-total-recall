@@ -8,7 +8,7 @@ from typing import Any, Optional
 from batcher import collect_batches, BatcherError
 from context import build_context
 from db.async_connection import get_async_db
-from embeddings.openai import get_embedding_async
+from embeddings.openai import get_embedding
 from embeddings.cache import cache_source
 from llm.claude import claude_complete
 from protocol import format_llm_input, parse_llm_output, ProtocolError
@@ -181,7 +181,7 @@ async def search_related_ideas(batch_content: str, limit: int = 10) -> list[dict
 
         # Use async embedding with cache
         async with cache_source("indexing"):
-            embedding = await get_embedding_async(query)
+            embedding = await get_embedding(query)
 
         async def do_search():
             db = await get_async_db()
@@ -217,7 +217,7 @@ async def search_related_ideas(batch_content: str, limit: int = 10) -> list[dict
         return []
 
 
-async def call_llm_async(prompt: dict[str, Any], session: str = None, related_ideas: list[dict] = None) -> dict[str, Any]:
+async def call_llm(prompt: dict[str, Any], session: str = None, related_ideas: list[dict] = None) -> dict[str, Any]:
     """Call Claude CLI with formatted prompt (async wrapper).
 
     Args:
@@ -297,7 +297,7 @@ RULES:
         return {"items": []}
 
 
-async def execute_ideas_async(
+async def execute_ideas(
     items: list[dict[str, Any]],
     span_id: int | None,
     source_file: str
@@ -359,7 +359,7 @@ async def execute_ideas_async(
     return await retry_with_backoff(do_execute)
 
 
-async def execute_topic_update_async(topic_update: dict[str, str], span_id: int) -> None:
+async def execute_topic_update(topic_update: dict[str, str], span_id: int) -> None:
     """Update span name/summary and link to topic."""
     async def do_update():
         db = await get_async_db()
@@ -402,7 +402,7 @@ async def execute_topic_update_async(topic_update: dict[str, str], span_id: int)
     await retry_with_backoff(do_update)
 
 
-async def execute_new_span_async(
+async def execute_new_span(
     new_span: dict[str, str],
     session: str,
     parent_id: int | None,
@@ -436,7 +436,7 @@ async def execute_new_span_async(
     return await retry_with_backoff(do_create)
 
 
-async def execute_relations_async(relations: list[dict[str, Any]], source_file: str) -> int:
+async def execute_relations(relations: list[dict[str, Any]], source_file: str) -> int:
     """Create relations between ideas."""
     async def do_create():
         db = await get_async_db()
@@ -481,7 +481,7 @@ async def execute_relations_async(relations: list[dict[str, Any]], source_file: 
     return await retry_with_backoff(do_create)
 
 
-async def embed_ideas_async(idea_ids: list[int]) -> int:
+async def embed_ideas(idea_ids: list[int]) -> int:
     """Generate embeddings for ideas asynchronously."""
     if not idea_ids:
         return 0
@@ -518,7 +518,7 @@ async def embed_ideas_async(idea_ids: list[int]) -> int:
 
             # Generate embedding
             async with cache_source("indexing"):
-                embedding = await get_embedding_async(content)
+                embedding = await get_embedding(content)
 
             # Store embedding
             async def store_embedding():
@@ -542,7 +542,7 @@ async def embed_ideas_async(idea_ids: list[int]) -> int:
     return embedded
 
 
-async def embed_messages_async(message_ids: list[int]) -> int:
+async def embed_messages(message_ids: list[int]) -> int:
     """Generate embeddings for messages asynchronously."""
     if not message_ids:
         return 0
@@ -576,7 +576,7 @@ async def embed_messages_async(message_ids: list[int]) -> int:
                 continue
 
             async with cache_source("indexing"):
-                embedding = await get_embedding_async(content)
+                embedding = await get_embedding(content)
 
             async def store_embedding():
                 db = await get_async_db()
@@ -599,7 +599,7 @@ async def embed_messages_async(message_ids: list[int]) -> int:
     return embedded
 
 
-async def process_transcript_async(
+async def _process_transcript_impl(
     file_path: str,
     session: str,
     span_id: Optional[int] = None,
@@ -695,7 +695,7 @@ async def process_transcript_async(
 
         # Call LLM with related ideas context
         try:
-            llm_response = await call_llm_async(llm_input, session=session, related_ideas=related_ideas)
+            llm_response = await call_llm(llm_input, session=session, related_ideas=related_ideas)
         except ProcessingError:
             raise
 
@@ -707,10 +707,10 @@ async def process_transcript_async(
 
         # Execute actions
         if parsed.topic_update and current_span_id:
-            await execute_topic_update_async(parsed.topic_update, span_id=current_span_id)
+            await execute_topic_update(parsed.topic_update, span_id=current_span_id)
 
         if parsed.new_span:
-            current_span_id = await execute_new_span_async(
+            current_span_id = await execute_new_span(
                 parsed.new_span,
                 session=session,
                 parent_id=current_span_id,
@@ -718,17 +718,17 @@ async def process_transcript_async(
             )
 
         if parsed.items:
-            idea_ids = await execute_ideas_async(parsed.items, span_id=current_span_id, source_file=file_path)
+            idea_ids = await execute_ideas(parsed.items, span_id=current_span_id, source_file=file_path)
             ideas_stored += len(idea_ids)
             # Generate embeddings for new ideas
-            await embed_ideas_async(idea_ids)
+            await embed_ideas(idea_ids)
 
         if parsed.relations:
-            relations_created += await execute_relations_async(parsed.relations, source_file=file_path)
+            relations_created += await execute_relations(parsed.relations, source_file=file_path)
 
         # Store raw messages for FTS/RAG and generate embeddings
         message_ids = await store_messages(batch.messages, session=session, source_file=file_path)
-        await embed_messages_async(message_ids)
+        await embed_messages(message_ids)
 
         # Update recent messages for next batch
         for msg in batch.messages:
@@ -751,7 +751,11 @@ async def process_transcript_async(
     }
 
 
-# Keep sync wrapper for backwards compatibility with existing daemon
+# Alias for async callers (like daemon)
+process_transcript_async = _process_transcript_impl
+
+
+# Sync wrapper for simple use cases (CLI, scripts)
 def process_transcript(
     file_path: str,
     session: str,
@@ -759,7 +763,7 @@ def process_transcript(
     window_seconds: float = 300.0,
     target_tokens: int = 30000
 ) -> dict[str, Any]:
-    """Sync wrapper for process_transcript_async."""
-    return asyncio.run(process_transcript_async(
+    """Sync wrapper for process_transcript."""
+    return asyncio.run(_process_transcript_impl(
         file_path, session, span_id, window_seconds, target_tokens
     ))

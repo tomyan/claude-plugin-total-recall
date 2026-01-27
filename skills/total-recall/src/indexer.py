@@ -14,9 +14,16 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import asyncio
 import memory_db
-from memory_db import DB_PATH, TotalRecallError, get_embedding, logger
+from memory_db import DB_PATH, TotalRecallError, logger
 from transcript import get_indexable_messages
+from embeddings import get_embedding
+
+
+def get_embedding(text: str) -> list[float]:
+    """Sync wrapper for async embedding function."""
+    return asyncio.run(get_embedding(text))
 
 try:
     from openai import OpenAI
@@ -320,6 +327,7 @@ _DECISION_PATTERNS = [
     r"^going with",
     r"^i'?ll use",
     r"^we'?ll use",
+    r"^let'?s use",
     r"^using\b",
     r"^chose\b",
     r"^choosing\b",

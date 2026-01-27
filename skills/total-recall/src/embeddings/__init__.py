@@ -15,8 +15,8 @@ from embeddings.cache import (
     get_cache_max_size,
 )
 from embeddings.openai import (
-    get_embedding_async,
-    get_embeddings_batch_async,
+    get_embedding,
+    get_embeddings_batch,
     AsyncOpenAIEmbeddings,
     _get_async_provider,
     _reset_async_provider,
@@ -35,8 +35,8 @@ __all__ = [
     "shutdown",
     "get_cache_max_size",
     # OpenAI functions (async)
-    "get_embedding_async",
-    "get_embeddings_batch_async",
+    "get_embedding",
+    "get_embeddings_batch",
     "AsyncOpenAIEmbeddings",
     "_get_async_provider",
     "_reset_async_provider",

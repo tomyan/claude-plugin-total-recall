@@ -11,12 +11,14 @@ from errors import TotalRecallError
 from llm.tools import INDEXING_TOOLS, execute_tool
 
 
-async def claude_complete_async(
+async def claude_complete(
     prompt: str,
     system: Optional[str] = None,
     model: str = "haiku"
 ) -> str:
-    """Async wrapper for claude_complete - runs in thread pool.
+    """Call Claude CLI non-interactively for LLM tasks (async).
+
+    Runs the sync implementation in a thread pool for async compatibility.
 
     Args:
         prompt: The user prompt
@@ -26,10 +28,10 @@ async def claude_complete_async(
     Returns:
         The response text
     """
-    return await asyncio.to_thread(claude_complete, prompt, system, model)
+    return await asyncio.to_thread(_claude_complete_sync, prompt, system, model)
 
 
-def claude_complete(
+def _claude_complete_sync(
     prompt: str,
     system: Optional[str] = None,
     model: str = "haiku"

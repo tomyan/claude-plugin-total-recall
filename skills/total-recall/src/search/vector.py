@@ -4,13 +4,13 @@ from datetime import datetime
 from typing import Optional
 
 from db.async_connection import get_async_db
-from embeddings.openai import get_embedding_async
+from embeddings.openai import get_embedding
 from embeddings.cache import cache_source
 from embeddings.serialize import serialize_embedding
 from utils.async_retry import retry_with_backoff
 
 
-async def _update_access_tracking_async(
+async def _update_access_tracking(
     idea_ids: list[int],
     db=None,
     session: str = None
@@ -63,7 +63,7 @@ async def _update_access_tracking_async(
     await retry_with_backoff(do_update)
 
 
-async def search_ideas_async(
+async def search_ideas(
     query: str,
     limit: int = 10,
     session: Optional[str] = None,
@@ -87,7 +87,7 @@ async def search_ideas_async(
         List of matching idea dicts
     """
     async with cache_source("search"):
-        query_embedding = await get_embedding_async(query)
+        query_embedding = await get_embedding(query)
 
     async def do_search():
         db = await get_async_db()
@@ -128,7 +128,7 @@ async def search_ideas_async(
 
             # Update access tracking for returned results
             if results:
-                await _update_access_tracking_async(
+                await _update_access_tracking(
                     [r['id'] for r in results], db, session=session
                 )
 
@@ -139,7 +139,7 @@ async def search_ideas_async(
     return await retry_with_backoff(do_search)
 
 
-async def find_similar_ideas_async(
+async def find_similar_ideas(
     idea_id: int,
     limit: int = 5,
     exclude_related: bool = True,
@@ -238,7 +238,7 @@ async def find_similar_ideas_async(
             if results:
                 # Use explicit session if provided, otherwise use source idea's session
                 track_session = session if session else source_session
-                await _update_access_tracking_async(
+                await _update_access_tracking(
                     [r['id'] for r in results], db, session=track_session
                 )
 
@@ -249,7 +249,7 @@ async def find_similar_ideas_async(
     return await retry_with_backoff(do_find)
 
 
-async def enrich_with_relations_async(
+async def enrich_with_relations(
     results: list[dict],
     max_related: int = 3
 ) -> list[dict]:
@@ -324,7 +324,7 @@ async def enrich_with_relations_async(
     return await retry_with_backoff(do_enrich)
 
 
-async def search_spans_async(query: str, limit: int = 5) -> list[dict]:
+async def search_spans(query: str, limit: int = 5) -> list[dict]:
     """Search for similar topic spans (async).
 
     Args:
@@ -335,7 +335,7 @@ async def search_spans_async(query: str, limit: int = 5) -> list[dict]:
         List of matching span dicts
     """
     async with cache_source("search"):
-        query_embedding = await get_embedding_async(query)
+        query_embedding = await get_embedding(query)
 
     async def do_search():
         db = await get_async_db()

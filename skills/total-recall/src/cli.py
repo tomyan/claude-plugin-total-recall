@@ -352,7 +352,7 @@ def run_command(args):
                 'solutions': 'solution',
             }
 
-            async def run_strategy_async(strategy: str) -> tuple[str, list[dict]]:
+            async def run_strategy(strategy: str) -> tuple[str, list[dict]]:
                 """Run a single search strategy and return (strategy_name, results)."""
                 try:
                     if strategy == 'hybrid':
@@ -389,7 +389,7 @@ def run_command(args):
                     return (strategy, [])
 
             async def run_all_strategies():
-                tasks = [run_strategy_async(s) for s in strategies]
+                tasks = [run_strategy(s) for s in strategies]
                 return await asyncio.gather(*tasks)
 
             # Run all strategies in parallel

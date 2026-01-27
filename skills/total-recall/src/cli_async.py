@@ -22,12 +22,12 @@ def run_async(coro: Coroutine[Any, Any, T]) -> T:
         The result of the coroutine
 
     Example:
-        results = run_async(hybrid_search_async(query, limit=10))
+        results = run_async(hybrid_search(query, limit=10))
     """
     return asyncio.run(coro)
 
 
-async def shutdown_async_modules():
+async def shutdown_modules():
     """Shutdown all async modules gracefully.
 
     Should be called before program exit to ensure clean shutdown
@@ -39,20 +39,20 @@ async def shutdown_async_modules():
 
 def shutdown():
     """Synchronous wrapper to shutdown async modules."""
-    run_async(shutdown_async_modules())
+    run_async(shutdown_modules())
 
 
 # Re-export async search functions for convenience
 from search.vector import (
-    search_ideas_async,
-    find_similar_ideas_async,
-    enrich_with_relations_async,
-    search_spans_async,
+    search_ideas,
+    find_similar_ideas,
+    enrich_with_relations,
+    search_spans,
 )
-from search.hybrid import hybrid_search_async
+from search.hybrid import hybrid_search
 from search.hyde import (
-    generate_hypothetical_doc_async,
-    hyde_search_async,
+    generate_hypothetical_doc,
+    hyde_search,
 )
 from embeddings.cache import (
     get_embedding_cache_stats,
@@ -61,29 +61,29 @@ from embeddings.cache import (
     cache_source,
 )
 from embeddings.openai import (
-    get_embedding_async,
-    get_embeddings_batch_async,
+    get_embedding,
+    get_embeddings_batch,
 )
 
 __all__ = [
     # Core async runner
     "run_async",
     "shutdown",
-    "shutdown_async_modules",
+    "shutdown_modules",
     # Async search functions
-    "search_ideas_async",
-    "find_similar_ideas_async",
-    "enrich_with_relations_async",
-    "search_spans_async",
-    "hybrid_search_async",
-    "generate_hypothetical_doc_async",
-    "hyde_search_async",
+    "search_ideas",
+    "find_similar_ideas",
+    "enrich_with_relations",
+    "search_spans",
+    "hybrid_search",
+    "generate_hypothetical_doc",
+    "hyde_search",
     # Cache operations
     "get_embedding_cache_stats",
     "clear_embedding_cache",
     "flush_write_queue",
     "cache_source",
     # Embedding operations
-    "get_embedding_async",
-    "get_embeddings_batch_async",
+    "get_embedding",
+    "get_embeddings_batch",
 ]

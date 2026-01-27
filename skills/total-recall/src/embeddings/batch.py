@@ -4,12 +4,12 @@ import asyncio
 from typing import Any
 
 from db.connection import get_db
-from embeddings.openai import get_embeddings_batch_async
+from embeddings.openai import get_embeddings_batch as get_embeddings_batch_async
 from embeddings.serialize import serialize_embedding
 
 
-def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
-    """Sync wrapper for get_embeddings_batch_async."""
+def get_embeddings_batch_sync(texts: list[str], use_cache: bool = True) -> list[list[float]]:
+    """Sync wrapper for async get_embeddings_batch."""
     return asyncio.run(get_embeddings_batch_async(texts, use_cache))
 
 
@@ -72,7 +72,7 @@ def embed_ideas(idea_ids: list[int], force: bool = False) -> int:
             texts = [content for _, content in batch]
 
             # Get embeddings from API
-            embeddings = get_embeddings_batch(texts, use_cache=False)
+            embeddings = get_embeddings_batch_sync(texts, use_cache=False)
 
             # Store in database
             for (idea_id, _), embedding in zip(batch, embeddings):
@@ -138,7 +138,7 @@ def embed_span(span_id: int, force: bool = False) -> bool:
     text = f"{row['name']}: {row['summary'] or ''}"
 
     try:
-        embeddings = get_embeddings_batch([text], use_cache=False)
+        embeddings = get_embeddings_batch_sync([text], use_cache=False)
         embedding = embeddings[0]
         serialized = serialize_embedding(embedding)
 
