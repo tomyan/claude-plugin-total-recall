@@ -51,7 +51,7 @@ SCHEMA_SQL = """
         content TEXT NOT NULL,
         intent TEXT CHECK(intent IN (
             'decision', 'conclusion', 'question', 'problem',
-            'solution', 'todo', 'context'
+            'solution', 'todo', 'context', 'observation'
         )),
         confidence REAL DEFAULT 0.5 CHECK(confidence >= 0 AND confidence <= 1),
         answered BOOLEAN,

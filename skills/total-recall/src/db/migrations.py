@@ -130,6 +130,30 @@ def migrate_schema(db):
         db.execute("ALTER TABLE ideas ADD COLUMN is_consolidated BOOLEAN DEFAULT FALSE")
         db.commit()
 
+    # Add session column for efficient session-based queries (denormalized from span)
+    if "session" not in idea_columns:
+        config.logger.info("Adding session column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN session TEXT")
+        # Backfill from spans
+        db.execute("""
+            UPDATE ideas SET session = (
+                SELECT s.session FROM spans s WHERE s.id = ideas.span_id
+            ) WHERE session IS NULL AND span_id IS NOT NULL
+        """)
+        db.commit()
+
+    # Add completed column for todos
+    if "completed" not in idea_columns:
+        config.logger.info("Adding completed column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN completed BOOLEAN DEFAULT FALSE")
+        db.commit()
+
+    # Add importance column for idea prioritization
+    if "importance" not in idea_columns:
+        config.logger.info("Adding importance column to ideas table")
+        db.execute("ALTER TABLE ideas ADD COLUMN importance REAL DEFAULT 0.5")
+        db.commit()
+
     # Create indexes that depend on migrated columns
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_spans_topic ON spans(topic_id)")
@@ -139,6 +163,8 @@ def migrate_schema(db):
         db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_message_time ON ideas(message_time)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_forgotten ON ideas(forgotten)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_session ON ideas(session)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_completed ON ideas(completed)")
         db.commit()
     except sqlite3.OperationalError:
         pass  # Index already exists
