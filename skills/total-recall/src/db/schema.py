@@ -64,7 +64,7 @@ SCHEMA_SQL = """
     CREATE INDEX IF NOT EXISTS idx_ideas_intent ON ideas(intent);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ideas_source_unique ON ideas(source_file, source_line);
 
-    -- Named entities
+    -- Named entities (legacy - kept for compatibility)
     CREATE TABLE IF NOT EXISTS entities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -76,6 +76,32 @@ SCHEMA_SQL = """
 
     CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
     CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+
+    -- Golden entities (canonical/master records) - MDM pattern
+    CREATE TABLE IF NOT EXISTS golden_entities (
+        id TEXT PRIMARY KEY,
+        canonical_name TEXT NOT NULL UNIQUE,
+        metadata JSON,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_golden_entities_name ON golden_entities(canonical_name);
+
+    -- Entity mentions (interim records) - MDM pattern
+    CREATE TABLE IF NOT EXISTS entity_mentions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        metadata JSON,
+        source_file TEXT,
+        source_line INTEGER,
+        golden_id TEXT REFERENCES golden_entities(id),
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_entity_mentions_name ON entity_mentions(name);
+    CREATE INDEX IF NOT EXISTS idx_entity_mentions_golden ON entity_mentions(golden_id);
+    CREATE INDEX IF NOT EXISTS idx_entity_mentions_source ON entity_mentions(source_file, source_line);
 
     -- Idea-entity links
     CREATE TABLE IF NOT EXISTS idea_entities (
