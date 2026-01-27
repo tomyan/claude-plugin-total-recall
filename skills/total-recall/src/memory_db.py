@@ -3,10 +3,12 @@
 Memory database for Claude memory graph skill.
 Uses SQLite + sqlite-vec for vector similarity search.
 Uses OpenAI for embeddings, Claude CLI for LLM tasks.
+
+All database functions are async for better concurrency.
 """
 
+import asyncio
 import json
-import os
 import sqlite3
 import struct
 import sys
@@ -14,7 +16,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import sqlite_vec
-from openai import OpenAI
 
 # Import config - constants and logger
 from config import DB_PATH, EMBEDDING_MODEL, EMBEDDING_DIM, LOG_PATH, logger  # noqa: E402
@@ -31,10 +32,11 @@ from errors import TotalRecallError  # noqa: E402
 # Claude CLI Integration
 # =============================================================================
 
-from llm.claude import claude_complete  # noqa: E402 - imported here for backward compatibility
+from llm.claude import claude_complete, claude_complete_async  # noqa: E402
 
 # Import database operations from db module
 from db.connection import get_db  # noqa: E402
+from db.async_connection import get_async_db  # noqa: E402
 from db.schema import init_db  # noqa: E402
 from db.migrations import migrate_timestamps_from_transcripts  # noqa: E402
 
@@ -42,38 +44,46 @@ from db.migrations import migrate_timestamps_from_transcripts  # noqa: E402
 # Import serialization from embeddings module
 from embeddings.serialize import serialize_embedding, deserialize_embedding  # noqa: E402
 
+# Import async retry utility
+from utils.async_retry import retry_with_backoff  # noqa: E402
 
-# Import cache functions from embeddings module
+# Import async embedding and search functions
 from embeddings.cache import (  # noqa: E402
-    CACHE_PATH,
-    clear_embedding_cache,
+    cache_source,
     get_embedding_cache_stats,
-    save_embedding_cache,
-    load_embedding_cache,
-    get_cache,
+    clear_embedding_cache,
 )
-# Re-export cache for backward compatibility (tests access this directly)
-_embedding_cache = get_cache()
-
-# Import embedding functions from embeddings module
-from embeddings.openai import get_embedding, get_embeddings_batch, _reset_provider  # noqa: E402
-
-# Import search functions from search module
+from embeddings.openai import (  # noqa: E402
+    get_embedding_async,
+    get_embeddings_batch_async,
+    _reset_async_provider,
+)
 from search.vector import (  # noqa: E402
-    search_ideas,
-    find_similar_ideas,
-    enrich_with_relations,
-    search_spans,
+    search_ideas_async,
+    find_similar_ideas_async,
+    enrich_with_relations_async,
+    search_spans_async,
 )
-from search.hybrid import hybrid_search  # noqa: E402
-from search.hyde import generate_hypothetical_doc, hyde_search  # noqa: E402
+from search.hybrid import hybrid_search_async  # noqa: E402
+from search.hyde import generate_hypothetical_doc_async, hyde_search_async  # noqa: E402
+
+
+# =============================================================================
+# Async helper for running sync code in thread pool (for LLM calls)
+# =============================================================================
+
+async def run_in_thread(func, *args, **kwargs):
+    """Run a sync function in a thread pool."""
+    import functools
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
 
 # =============================================================================
 # Project Operations
 # =============================================================================
 
-def create_project(name: str, description: Optional[str] = None) -> int:
+async def create_project(name: str, description: Optional[str] = None) -> int:
     """Create a new project.
 
     Args:
@@ -83,70 +93,88 @@ def create_project(name: str, description: Optional[str] = None) -> int:
     Returns:
         Project ID
     """
-    db = get_db()
-    try:
-        cursor = db.execute(
-            "INSERT INTO projects (name, description) VALUES (?, ?)",
-            (name, description)
-        )
-        project_id = cursor.lastrowid
-        db.commit()
-    except sqlite3.IntegrityError:
-        db.close()
-        raise TotalRecallError(
-            f"Project '{name}' already exists",
-            "duplicate_project",
-            {"name": name}
-        )
-    db.close()
-    return project_id
+    async def do_create():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "INSERT INTO projects (name, description) VALUES (?, ?)",
+                (name, description)
+            )
+            project_id = cursor.lastrowid
+            await db.commit()
+            return project_id
+        except sqlite3.IntegrityError:
+            raise TotalRecallError(
+                f"Project '{name}' already exists",
+                "duplicate_project",
+                {"name": name}
+            )
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_create)
 
 
-def get_project(project_id: int) -> Optional[dict]:
+async def get_project(project_id: int) -> Optional[dict]:
     """Get project by ID."""
-    db = get_db()
-    cursor = db.execute(
-        "SELECT id, name, description, created_at FROM projects WHERE id = ?",
-        (project_id,)
-    )
-    row = cursor.fetchone()
-    db.close()
-    return dict(row) if row else None
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "SELECT id, name, description, created_at FROM projects WHERE id = ?",
+                (project_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
-def get_project_by_name(name: str) -> Optional[dict]:
+async def get_project_by_name(name: str) -> Optional[dict]:
     """Get project by name."""
-    db = get_db()
-    cursor = db.execute(
-        "SELECT id, name, description, created_at FROM projects WHERE name = ?",
-        (name,)
-    )
-    row = cursor.fetchone()
-    db.close()
-    return dict(row) if row else None
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "SELECT id, name, description, created_at FROM projects WHERE name = ?",
+                (name,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
-def list_projects() -> list[dict]:
+async def list_projects() -> list[dict]:
     """List all projects with topic counts."""
-    db = get_db()
-    cursor = db.execute("""
-        SELECT p.id, p.name, p.description, p.created_at,
-               COUNT(DISTINCT t.id) as topic_count,
-               (SELECT COUNT(*) FROM ideas i
-                JOIN spans s ON s.id = i.span_id
-                JOIN topics t2 ON t2.id = s.topic_id
-                WHERE t2.project_id = p.id) as idea_count
-        FROM projects p
-        LEFT JOIN topics t ON t.project_id = p.id
-        GROUP BY p.id
-        ORDER BY p.name
-    """)
-    projects = [dict(row) for row in cursor]
-    db.close()
-    return projects
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT p.id, p.name, p.description, p.created_at,
+                       COUNT(DISTINCT t.id) as topic_count,
+                       (SELECT COUNT(*) FROM ideas i
+                        JOIN spans s ON s.id = i.span_id
+                        JOIN topics t2 ON t2.id = s.topic_id
+                        WHERE t2.project_id = p.id) as idea_count
+                FROM projects p
+                LEFT JOIN topics t ON t.project_id = p.id
+                GROUP BY p.id
+                ORDER BY p.name
+            """)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
-def assign_topic_to_project(topic_id: int, project_id: Optional[int]) -> bool:
+async def assign_topic_to_project(topic_id: int, project_id: Optional[int]) -> bool:
     """Assign a topic to a project (or remove from project if None).
 
     Args:
@@ -156,17 +184,22 @@ def assign_topic_to_project(topic_id: int, project_id: Optional[int]) -> bool:
     Returns:
         True if successful
     """
-    db = get_db()
-    db.execute(
-        "UPDATE topics SET project_id = ? WHERE id = ?",
-        (project_id, topic_id)
-    )
-    db.commit()
-    db.close()
-    return True
+    async def do_update():
+        db = await get_async_db()
+        try:
+            await db.execute(
+                "UPDATE topics SET project_id = ? WHERE id = ?",
+                (project_id, topic_id)
+            )
+            await db.commit()
+            return True
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_update)
 
 
-def unparent_topic(topic_id: int) -> bool:
+async def unparent_topic(topic_id: int) -> bool:
     """Remove a topic from its parent, making it a top-level topic.
 
     Args:
@@ -175,17 +208,22 @@ def unparent_topic(topic_id: int) -> bool:
     Returns:
         True if updated
     """
-    db = get_db()
-    db.execute(
-        "UPDATE topics SET parent_id = NULL WHERE id = ?",
-        (topic_id,)
-    )
-    db.commit()
-    db.close()
-    return True
+    async def do_update():
+        db = await get_async_db()
+        try:
+            await db.execute(
+                "UPDATE topics SET parent_id = NULL WHERE id = ?",
+                (topic_id,)
+            )
+            await db.commit()
+            return True
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_update)
 
 
-def reparent_topic(topic_id: int, parent_id: int) -> bool:
+async def reparent_topic(topic_id: int, parent_id: int) -> bool:
     """Set a topic's parent, creating a hierarchy.
 
     Args:
@@ -198,44 +236,48 @@ def reparent_topic(topic_id: int, parent_id: int) -> bool:
     Raises:
         TotalRecallError: If topic or parent not found, or would create cycle
     """
-    db = get_db()
+    async def do_reparent():
+        db = await get_async_db()
+        try:
+            # Verify both topics exist
+            cursor = await db.execute("SELECT id FROM topics WHERE id = ?", (topic_id,))
+            topic = await cursor.fetchone()
+            cursor = await db.execute("SELECT id, parent_id FROM topics WHERE id = ?", (parent_id,))
+            parent = await cursor.fetchone()
 
-    # Verify both topics exist
-    topic = db.execute("SELECT id FROM topics WHERE id = ?", (topic_id,)).fetchone()
-    parent = db.execute("SELECT id, parent_id FROM topics WHERE id = ?", (parent_id,)).fetchone()
+            if not topic:
+                raise TotalRecallError(f"Topic {topic_id} not found", "topic_not_found")
+            if not parent:
+                raise TotalRecallError(f"Parent topic {parent_id} not found", "topic_not_found")
 
-    if not topic:
-        db.close()
-        raise TotalRecallError(f"Topic {topic_id} not found", "topic_not_found")
-    if not parent:
-        db.close()
-        raise TotalRecallError(f"Parent topic {parent_id} not found", "topic_not_found")
+            # Check for cycles - walk up the parent chain
+            current = parent_id
+            visited = {topic_id}
+            while current:
+                if current in visited:
+                    raise TotalRecallError(
+                        f"Cannot reparent: would create cycle",
+                        "cycle_detected",
+                        {"topic_id": topic_id, "parent_id": parent_id}
+                    )
+                visited.add(current)
+                cursor = await db.execute("SELECT parent_id FROM topics WHERE id = ?", (current,))
+                row = await cursor.fetchone()
+                current = row["parent_id"] if row else None
 
-    # Check for cycles - walk up the parent chain
-    current = parent_id
-    visited = {topic_id}
-    while current:
-        if current in visited:
-            db.close()
-            raise TotalRecallError(
-                f"Cannot reparent: would create cycle",
-                "cycle_detected",
-                {"topic_id": topic_id, "parent_id": parent_id}
+            await db.execute(
+                "UPDATE topics SET parent_id = ? WHERE id = ?",
+                (parent_id, topic_id)
             )
-        visited.add(current)
-        row = db.execute("SELECT parent_id FROM topics WHERE id = ?", (current,)).fetchone()
-        current = row["parent_id"] if row else None
+            await db.commit()
+            return True
+        finally:
+            await db.close()
 
-    db.execute(
-        "UPDATE topics SET parent_id = ? WHERE id = ?",
-        (parent_id, topic_id)
-    )
-    db.commit()
-    db.close()
-    return True
+    return await retry_with_backoff(do_reparent)
 
 
-def delete_topic(topic_id: int, delete_ideas: bool = False) -> dict:
+async def delete_topic(topic_id: int, delete_ideas: bool = False) -> dict:
     """Delete a topic and optionally its ideas.
 
     Args:
@@ -245,109 +287,117 @@ def delete_topic(topic_id: int, delete_ideas: bool = False) -> dict:
     Returns:
         Dict with counts of deleted items
     """
-    db = get_db()
+    async def do_delete():
+        db = await get_async_db()
+        try:
+            ideas_deleted = 0
+            spans_deleted = 0
 
-    ideas_deleted = 0
-    spans_deleted = 0
+            if delete_ideas:
+                # Get all idea IDs in this topic
+                cursor = await db.execute("""
+                    SELECT i.id FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    WHERE s.topic_id = ?
+                """, (topic_id,))
+                rows = await cursor.fetchall()
+                idea_ids = [row["id"] for row in rows]
 
-    if delete_ideas:
-        # Get all idea IDs in this topic
-        cursor = db.execute("""
-            SELECT i.id FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            WHERE s.topic_id = ?
-        """, (topic_id,))
-        idea_ids = [row["id"] for row in cursor]
+                if idea_ids:
+                    placeholders = ",".join("?" * len(idea_ids))
+                    await db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+                    await db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                                    idea_ids + idea_ids)
+                    await db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+                    try:
+                        await db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+                    except Exception:
+                        pass  # FTS might not have these rows
+                    await db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+                    ideas_deleted = len(idea_ids)
 
-        if idea_ids:
-            placeholders = ",".join("?" * len(idea_ids))
-            db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
-            db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
-                      idea_ids + idea_ids)
-            db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
-            try:
-                db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
-            except Exception:
-                pass  # FTS might not have these rows
-            db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
-            ideas_deleted = len(idea_ids)
+            # Delete spans
+            cursor = await db.execute("DELETE FROM spans WHERE topic_id = ?", (topic_id,))
+            spans_deleted = cursor.rowcount
 
-    # Delete spans
-    cursor = db.execute("DELETE FROM spans WHERE topic_id = ?", (topic_id,))
-    spans_deleted = cursor.rowcount
+            # Update any child topics to have no parent
+            await db.execute("UPDATE topics SET parent_id = NULL WHERE parent_id = ?", (topic_id,))
 
-    # Update any child topics to have no parent
-    db.execute("UPDATE topics SET parent_id = NULL WHERE parent_id = ?", (topic_id,))
+            # Delete topic
+            await db.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
 
-    # Delete topic
-    db.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+            await db.commit()
+            return {
+                "ideas_deleted": ideas_deleted,
+                "spans_deleted": spans_deleted,
+            }
+        finally:
+            await db.close()
 
-    db.commit()
-    db.close()
-
-    return {
-        "ideas_deleted": ideas_deleted,
-        "spans_deleted": spans_deleted,
-    }
+    return await retry_with_backoff(do_delete)
 
 
-def get_project_tree() -> list[dict]:
+async def get_project_tree() -> list[dict]:
     """Get hierarchical view of projects -> topics (with nested children).
 
     Returns:
         List of projects with nested topics (topics can have children)
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get all projects
+            cursor = await db.execute("""
+                SELECT id, name, description FROM projects ORDER BY name
+            """)
+            projects = [dict(row) for row in await cursor.fetchall()]
 
-    # Get all projects
-    cursor = db.execute("""
-        SELECT id, name, description FROM projects ORDER BY name
-    """)
-    projects = [dict(row) for row in cursor]
+            # Get topics with parent_id for hierarchy
+            cursor = await db.execute("""
+                SELECT t.id, t.name, t.project_id, t.parent_id,
+                       COUNT(DISTINCT s.id) as span_count,
+                       COUNT(DISTINCT i.id) as idea_count
+                FROM topics t
+                LEFT JOIN spans s ON s.topic_id = t.id
+                LEFT JOIN ideas i ON i.span_id = s.id
+                GROUP BY t.id
+                ORDER BY t.name
+            """)
+            topics = [dict(row) for row in await cursor.fetchall()]
 
-    # Get topics with parent_id for hierarchy
-    cursor = db.execute("""
-        SELECT t.id, t.name, t.project_id, t.parent_id,
-               COUNT(DISTINCT s.id) as span_count,
-               COUNT(DISTINCT i.id) as idea_count
-        FROM topics t
-        LEFT JOIN spans s ON s.topic_id = t.id
-        LEFT JOIN ideas i ON i.span_id = s.id
-        GROUP BY t.id
-        ORDER BY t.name
-    """)
-    topics = [dict(row) for row in cursor]
-    db.close()
+            # Build topic hierarchy
+            topic_map = {t["id"]: {**t, "children": []} for t in topics}
 
-    # Build topic hierarchy
-    topic_map = {t["id"]: {**t, "children": []} for t in topics}
+            # Link children to parents
+            root_topics = []
+            for topic in topics:
+                if topic["parent_id"] and topic["parent_id"] in topic_map:
+                    topic_map[topic["parent_id"]]["children"].append(topic_map[topic["id"]])
+                else:
+                    root_topics.append(topic_map[topic["id"]])
 
-    # Link children to parents
-    root_topics = []
-    for topic in topics:
-        if topic["parent_id"] and topic["parent_id"] in topic_map:
-            topic_map[topic["parent_id"]]["children"].append(topic_map[topic["id"]])
-        else:
-            root_topics.append(topic_map[topic["id"]])
+            # Build project tree with hierarchical topics
+            project_map = {p["id"]: {**p, "topics": []} for p in projects}
+            unassigned = {"id": None, "name": "(Unassigned)", "description": None, "topics": []}
 
-    # Build project tree with hierarchical topics
-    project_map = {p["id"]: {**p, "topics": []} for p in projects}
-    unassigned = {"id": None, "name": "(Unassigned)", "description": None, "topics": []}
+            for topic in root_topics:
+                if topic["project_id"] and topic["project_id"] in project_map:
+                    project_map[topic["project_id"]]["topics"].append(topic)
+                else:
+                    unassigned["topics"].append(topic)
 
-    for topic in root_topics:
-        if topic["project_id"] and topic["project_id"] in project_map:
-            project_map[topic["project_id"]]["topics"].append(topic)
-        else:
-            unassigned["topics"].append(topic)
+            result = list(project_map.values())
+            if unassigned["topics"]:
+                result.append(unassigned)
 
-    result = list(project_map.values())
-    if unassigned["topics"]:
-        result.append(unassigned)
+            return result
+        finally:
+            await db.close()
 
-    return result
+    return await retry_with_backoff(do_query)
 
 
-def auto_categorize_topics(dry_run: bool = True) -> dict:
+async def auto_categorize_topics(dry_run: bool = True) -> dict:
     """Automatically categorize unassigned topics and fix mismatched ones.
 
     Uses LLM to analyze topic content and match to existing projects.
@@ -358,29 +408,38 @@ def auto_categorize_topics(dry_run: bool = True) -> dict:
     Returns:
         Dict with categorization results
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get all projects
+            cursor = await db.execute("SELECT id, name, description FROM projects")
+            rows = await cursor.fetchall()
+            projects = {row["id"]: dict(row) for row in rows}
 
-    # Get all projects
-    cursor = db.execute("SELECT id, name, description FROM projects")
-    projects = {row["id"]: dict(row) for row in cursor}
+            if not projects:
+                return {"error": "No projects defined. Create projects first."}
 
-    if not projects:
-        db.close()
-        return {"error": "No projects defined. Create projects first."}
+            # Get unassigned topics with sample content
+            cursor = await db.execute("""
+                SELECT t.id, t.name, t.summary,
+                       (SELECT GROUP_CONCAT(i.content, ' | ')
+                        FROM ideas i
+                        JOIN spans s ON s.id = i.span_id
+                        WHERE s.topic_id = t.id
+                        LIMIT 10) as sample_content
+                FROM topics t
+                WHERE t.project_id IS NULL
+            """)
+            unassigned = [dict(row) for row in await cursor.fetchall()]
+            return projects, unassigned
+        finally:
+            await db.close()
 
-    # Get unassigned topics with sample content
-    cursor = db.execute("""
-        SELECT t.id, t.name, t.summary,
-               (SELECT GROUP_CONCAT(i.content, ' | ')
-                FROM ideas i
-                JOIN spans s ON s.id = i.span_id
-                WHERE s.topic_id = t.id
-                LIMIT 10) as sample_content
-        FROM topics t
-        WHERE t.project_id IS NULL
-    """)
-    unassigned = [dict(row) for row in cursor]
-    db.close()
+    result = await retry_with_backoff(do_query)
+    if isinstance(result, dict) and "error" in result:
+        return result
+
+    projects, unassigned = result
 
     if not unassigned:
         return {"message": "No unassigned topics", "changes": []}
@@ -405,7 +464,7 @@ Sample content: {content_sample}
 Reply with ONLY the project name that best matches, or "NONE" if no good match."""
 
         try:
-            suggested = claude_complete(prompt).strip()
+            suggested = (await claude_complete_async(prompt)).strip()
 
             # Find matching project
             matched_project = None
@@ -423,7 +482,7 @@ Reply with ONLY the project name that best matches, or "NONE" if no good match."
                 })
 
                 if not dry_run:
-                    assign_topic_to_project(topic["id"], matched_project["id"])
+                    await assign_topic_to_project(topic["id"], matched_project["id"])
 
         except TotalRecallError:
             raise  # Re-raise TotalRecallError as-is
@@ -442,7 +501,7 @@ Reply with ONLY the project name that best matches, or "NONE" if no good match."
     }
 
 
-def improve_categorization() -> dict:
+async def improve_categorization() -> dict:
     """Run all categorization improvements.
 
     1. Auto-assign unassigned topics to projects
@@ -455,18 +514,18 @@ def improve_categorization() -> dict:
     results = {}
 
     # Auto-categorize unassigned topics
-    cat_result = auto_categorize_topics(dry_run=False)
+    cat_result = await auto_categorize_topics(dry_run=False)
     results["categorization"] = cat_result
 
     # Review topic names
-    review_result = review_topics()
+    review_result = await review_topics()
     if review_result.get("bad_names"):
         # Auto-rename bad topics
         renamed = []
         for bad in review_result["bad_names"][:10]:  # Limit to 10
-            suggested = suggest_topic_name(bad["topic_id"])
+            suggested = await suggest_topic_name(bad["topic_id"])
             if suggested:
-                rename_topic(bad["topic_id"], suggested)
+                await rename_topic(bad["topic_id"], suggested)
                 renamed.append({
                     "topic_id": bad["topic_id"],
                     "old_name": bad["name"],
@@ -501,7 +560,7 @@ def canonicalize_topic_name(name: str) -> str:
     return canonical[:50]
 
 
-def find_or_create_topic(name: str, summary: Optional[str] = None) -> int:
+async def find_or_create_topic(name: str, summary: Optional[str] = None) -> int:
     """Find existing topic by canonical name or create new one.
 
     Args:
@@ -511,69 +570,83 @@ def find_or_create_topic(name: str, summary: Optional[str] = None) -> int:
     Returns:
         Topic ID
     """
-    db = get_db()
-    canonical = canonicalize_topic_name(name)
-
-    # Try to find existing topic
-    cursor = db.execute(
-        "SELECT id FROM topics WHERE canonical_name = ?",
-        (canonical,)
-    )
-    row = cursor.fetchone()
-
-    if row:
-        topic_id = row["id"]
-        # Update summary if provided and current is empty
-        if summary:
-            db.execute(
-                "UPDATE topics SET summary = COALESCE(summary, ?) WHERE id = ?",
-                (summary, topic_id)
+    async def do_find_or_create():
+        db = await get_async_db()
+        canonical = canonicalize_topic_name(name)
+        try:
+            # Try to find existing topic
+            cursor = await db.execute(
+                "SELECT id FROM topics WHERE canonical_name = ?",
+                (canonical,)
             )
-            db.commit()
-    else:
-        # Create new topic
-        cursor = db.execute(
-            "INSERT INTO topics (name, canonical_name, summary) VALUES (?, ?, ?)",
-            (name[:100], canonical, summary)
-        )
-        topic_id = cursor.lastrowid
-        db.commit()
+            row = await cursor.fetchone()
 
-    db.close()
-    return topic_id
+            if row:
+                topic_id = row["id"]
+                # Update summary if provided and current is empty
+                if summary:
+                    await db.execute(
+                        "UPDATE topics SET summary = COALESCE(summary, ?) WHERE id = ?",
+                        (summary, topic_id)
+                    )
+                    await db.commit()
+            else:
+                # Create new topic
+                cursor = await db.execute(
+                    "INSERT INTO topics (name, canonical_name, summary) VALUES (?, ?, ?)",
+                    (name[:100], canonical, summary)
+                )
+                topic_id = cursor.lastrowid
+                await db.commit()
+
+            return topic_id
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_find_or_create)
 
 
-def get_topic(topic_id: int) -> Optional[dict]:
+async def get_topic(topic_id: int) -> Optional[dict]:
     """Get topic by ID."""
-    db = get_db()
-    cursor = db.execute(
-        "SELECT id, name, canonical_name, summary, created_at FROM topics WHERE id = ?",
-        (topic_id,)
-    )
-    row = cursor.fetchone()
-    db.close()
-    return dict(row) if row else None
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "SELECT id, name, canonical_name, summary, created_at FROM topics WHERE id = ?",
+                (topic_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
-def list_topics() -> list[dict]:
+async def list_topics() -> list[dict]:
     """List all topics with span counts."""
-    db = get_db()
-    cursor = db.execute("""
-        SELECT t.id, t.name, t.summary, t.created_at,
-               COUNT(DISTINCT s.id) as span_count,
-               COUNT(DISTINCT i.id) as idea_count
-        FROM topics t
-        LEFT JOIN spans s ON s.topic_id = t.id
-        LEFT JOIN ideas i ON i.span_id = s.id
-        GROUP BY t.id
-        ORDER BY t.created_at DESC
-    """)
-    topics = [dict(row) for row in cursor]
-    db.close()
-    return topics
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT t.id, t.name, t.summary, t.created_at,
+                       COUNT(DISTINCT s.id) as span_count,
+                       COUNT(DISTINCT i.id) as idea_count
+                FROM topics t
+                LEFT JOIN spans s ON s.topic_id = t.id
+                LEFT JOIN ideas i ON i.span_id = s.id
+                GROUP BY t.id
+                ORDER BY t.created_at DESC
+            """)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
-def merge_topics(source_topic_id: int, target_topic_id: int) -> dict:
+async def merge_topics(source_topic_id: int, target_topic_id: int) -> dict:
     """Merge one topic into another, moving all spans.
 
     Args:
@@ -583,28 +656,31 @@ def merge_topics(source_topic_id: int, target_topic_id: int) -> dict:
     Returns:
         Dict with merge stats
     """
-    db = get_db()
+    async def do_merge():
+        db = await get_async_db()
+        try:
+            # Move spans to target topic
+            cursor = await db.execute(
+                "UPDATE spans SET topic_id = ? WHERE topic_id = ?",
+                (target_topic_id, source_topic_id)
+            )
+            spans_moved = cursor.rowcount
 
-    # Move spans to target topic
-    cursor = db.execute(
-        "UPDATE spans SET topic_id = ? WHERE topic_id = ?",
-        (target_topic_id, source_topic_id)
-    )
-    spans_moved = cursor.rowcount
+            # Delete source topic
+            await db.execute("DELETE FROM topics WHERE id = ?", (source_topic_id,))
+            await db.commit()
+            return {"spans_moved": spans_moved, "source_deleted": source_topic_id}
+        finally:
+            await db.close()
 
-    # Delete source topic
-    db.execute("DELETE FROM topics WHERE id = ?", (source_topic_id,))
-    db.commit()
-    db.close()
-
-    return {"spans_moved": spans_moved, "source_deleted": source_topic_id}
+    return await retry_with_backoff(do_merge)
 
 
 # =============================================================================
 # Topic Linking (Cross-Session)
 # =============================================================================
 
-def find_related_topics(
+async def find_related_topics(
     topic_id: int,
     exclude_sessions: list[str] = None,
     min_similarity: float = None,  # Uses config.topic_similarity_threshold if None
@@ -626,68 +702,71 @@ def find_related_topics(
         from config import get_config
         min_similarity = get_config().topic_similarity_threshold
 
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get the topic's embedding (average of its span embeddings)
+            cursor = await db.execute("""
+                SELECT se.embedding
+                FROM span_embeddings se
+                JOIN spans s ON s.id = se.span_id
+                WHERE s.topic_id = ?
+                LIMIT 1
+            """, (topic_id,))
+            row = await cursor.fetchone()
 
-    # Get the topic's embedding (average of its span embeddings)
-    cursor = db.execute("""
-        SELECT se.embedding
-        FROM span_embeddings se
-        JOIN spans s ON s.id = se.span_id
-        WHERE s.topic_id = ?
-        LIMIT 1
-    """, (topic_id,))
-    row = cursor.fetchone()
+            if not row:
+                return []
 
-    if not row:
-        db.close()
-        return []
+            topic_embedding = deserialize_embedding(row['embedding'])
 
-    topic_embedding = deserialize_embedding(row['embedding'])
+            # Convert similarity threshold to distance (lower distance = more similar)
+            # For normalized embeddings, distance ≈ 2*(1-similarity)
+            max_distance = 2 * (1 - min_similarity)
 
-    # Convert similarity threshold to distance (lower distance = more similar)
-    # For normalized embeddings, distance ≈ 2*(1-similarity)
-    max_distance = 2 * (1 - min_similarity)
+            # Find similar topics via their span embeddings
+            sql = """
+                SELECT DISTINCT
+                    t.id, t.name, t.summary, t.first_seen, t.last_seen,
+                    s.session,
+                    MIN(se.distance) as distance
+                FROM span_embeddings se
+                JOIN spans s ON s.id = se.span_id
+                JOIN topics t ON t.id = s.topic_id
+                WHERE se.embedding MATCH ? AND k = ?
+                  AND t.id != ?
+            """
+            params = [serialize_embedding(topic_embedding), limit * 3, topic_id]
 
-    # Find similar topics via their span embeddings
-    sql = """
-        SELECT DISTINCT
-            t.id, t.name, t.summary, t.first_seen, t.last_seen,
-            s.session,
-            MIN(se.distance) as distance
-        FROM span_embeddings se
-        JOIN spans s ON s.id = se.span_id
-        JOIN topics t ON t.id = s.topic_id
-        WHERE se.embedding MATCH ? AND k = ?
-          AND t.id != ?
-    """
-    params = [serialize_embedding(topic_embedding), limit * 3, topic_id]
+            if exclude_sessions:
+                placeholders = ','.join('?' * len(exclude_sessions))
+                sql += f" AND s.session NOT IN ({placeholders})"
+                params.extend(exclude_sessions)
 
-    if exclude_sessions:
-        placeholders = ','.join('?' * len(exclude_sessions))
-        sql += f" AND s.session NOT IN ({placeholders})"
-        params.extend(exclude_sessions)
+            sql += """
+                GROUP BY t.id
+                HAVING MIN(se.distance) <= ?
+                ORDER BY MIN(se.distance)
+                LIMIT ?
+            """
+            params.extend([max_distance, limit])
 
-    sql += """
-        GROUP BY t.id
-        HAVING MIN(se.distance) <= ?
-        ORDER BY MIN(se.distance)
-        LIMIT ?
-    """
-    params.extend([max_distance, limit])
+            cursor = await db.execute(sql, params)
+            results = []
+            for row in await cursor.fetchall():
+                r = dict(row)
+                # Convert distance to similarity
+                r['similarity'] = 1 - (r['distance'] / 2)
+                results.append(r)
 
-    cursor = db.execute(sql, params)
-    results = []
-    for row in cursor:
-        r = dict(row)
-        # Convert distance to similarity
-        r['similarity'] = 1 - (r['distance'] / 2)
-        results.append(r)
+            return results
+        finally:
+            await db.close()
 
-    db.close()
-    return results
+    return await retry_with_backoff(do_query)
 
 
-def link_topics(
+async def link_topics(
     topic_id: int,
     related_topic_id: int,
     similarity: float,
@@ -706,19 +785,24 @@ def link_topics(
     Returns:
         Link ID
     """
-    db = get_db()
-    cursor = db.execute("""
-        INSERT OR REPLACE INTO topic_links
-            (topic_id, related_topic_id, similarity, time_overlap, link_type)
-        VALUES (?, ?, ?, ?, ?)
-    """, (topic_id, related_topic_id, similarity, time_overlap, link_type))
-    link_id = cursor.lastrowid
-    db.commit()
-    db.close()
-    return link_id
+    async def do_link():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                INSERT OR REPLACE INTO topic_links
+                    (topic_id, related_topic_id, similarity, time_overlap, link_type)
+                VALUES (?, ?, ?, ?, ?)
+            """, (topic_id, related_topic_id, similarity, time_overlap, link_type))
+            link_id = cursor.lastrowid
+            await db.commit()
+            return link_id
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_link)
 
 
-def get_topic_links(topic_id: int, include_reverse: bool = True) -> list[dict]:
+async def get_topic_links(topic_id: int, include_reverse: bool = True) -> list[dict]:
     """Get all links for a topic.
 
     Args:
@@ -728,50 +812,54 @@ def get_topic_links(topic_id: int, include_reverse: bool = True) -> list[dict]:
     Returns:
         List of link dicts with related topic info
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            if include_reverse:
+                cursor = await db.execute("""
+                    SELECT
+                        tl.id as link_id,
+                        tl.similarity,
+                        tl.time_overlap,
+                        tl.link_type,
+                        tl.created_at as linked_at,
+                        CASE WHEN tl.topic_id = ? THEN tl.related_topic_id ELSE tl.topic_id END as other_topic_id,
+                        t.name as other_topic_name,
+                        t.summary as other_topic_summary,
+                        t.first_seen,
+                        t.last_seen,
+                        (SELECT DISTINCT session FROM spans WHERE topic_id = t.id LIMIT 1) as session
+                    FROM topic_links tl
+                    JOIN topics t ON t.id = CASE WHEN tl.topic_id = ? THEN tl.related_topic_id ELSE tl.topic_id END
+                    WHERE tl.topic_id = ? OR tl.related_topic_id = ?
+                    ORDER BY tl.similarity DESC
+                """, (topic_id, topic_id, topic_id, topic_id))
+            else:
+                cursor = await db.execute("""
+                    SELECT
+                        tl.id as link_id,
+                        tl.related_topic_id as other_topic_id,
+                        tl.similarity,
+                        tl.time_overlap,
+                        tl.link_type,
+                        tl.created_at as linked_at,
+                        t.name as other_topic_name,
+                        t.summary as other_topic_summary,
+                        t.first_seen,
+                        t.last_seen,
+                        (SELECT DISTINCT session FROM spans WHERE topic_id = t.id LIMIT 1) as session
+                    FROM topic_links tl
+                    JOIN topics t ON t.id = tl.related_topic_id
+                    WHERE tl.topic_id = ?
+                    ORDER BY tl.similarity DESC
+                """, (topic_id,))
 
-    if include_reverse:
-        cursor = db.execute("""
-            SELECT
-                tl.id as link_id,
-                tl.similarity,
-                tl.time_overlap,
-                tl.link_type,
-                tl.created_at as linked_at,
-                CASE WHEN tl.topic_id = ? THEN tl.related_topic_id ELSE tl.topic_id END as other_topic_id,
-                t.name as other_topic_name,
-                t.summary as other_topic_summary,
-                t.first_seen,
-                t.last_seen,
-                (SELECT DISTINCT session FROM spans WHERE topic_id = t.id LIMIT 1) as session
-            FROM topic_links tl
-            JOIN topics t ON t.id = CASE WHEN tl.topic_id = ? THEN tl.related_topic_id ELSE tl.topic_id END
-            WHERE tl.topic_id = ? OR tl.related_topic_id = ?
-            ORDER BY tl.similarity DESC
-        """, (topic_id, topic_id, topic_id, topic_id))
-    else:
-        cursor = db.execute("""
-            SELECT
-                tl.id as link_id,
-                tl.related_topic_id as other_topic_id,
-                tl.similarity,
-                tl.time_overlap,
-                tl.link_type,
-                tl.created_at as linked_at,
-                t.name as other_topic_name,
-                t.summary as other_topic_summary,
-                t.first_seen,
-                t.last_seen,
-                (SELECT DISTINCT session FROM spans WHERE topic_id = t.id LIMIT 1) as session
-            FROM topic_links tl
-            JOIN topics t ON t.id = tl.related_topic_id
-            WHERE tl.topic_id = ?
-            ORDER BY tl.similarity DESC
-        """, (topic_id,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    results = [dict(row) for row in cursor]
-    db.close()
-    return results
+    return await retry_with_backoff(do_query)
 
 
 def check_time_overlap(
@@ -796,7 +884,7 @@ def check_time_overlap(
     return start1 <= end2 and start2 <= end1
 
 
-def auto_link_topic(topic_id: int, current_session: str, min_similarity: float = None) -> list[dict]:
+async def auto_link_topic(topic_id: int, current_session: str, min_similarity: float = None) -> list[dict]:
     """Automatically link a topic to similar topics in other sessions.
 
     Args:
@@ -813,7 +901,7 @@ def auto_link_topic(topic_id: int, current_session: str, min_similarity: float =
         min_similarity = get_config().topic_similarity_threshold
 
     # Find related topics
-    related = find_related_topics(
+    related = await find_related_topics(
         topic_id,
         exclude_sessions=[current_session],
         min_similarity=min_similarity
@@ -823,13 +911,18 @@ def auto_link_topic(topic_id: int, current_session: str, min_similarity: float =
         return []
 
     # Get current topic's time range
-    db = get_db()
-    cursor = db.execute("""
-        SELECT MIN(start_time) as start_time, MAX(end_time) as end_time
-        FROM spans WHERE topic_id = ?
-    """, (topic_id,))
-    current_times = cursor.fetchone()
-    db.close()
+    async def get_time_range():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT MIN(start_time) as start_time, MAX(end_time) as end_time
+                FROM spans WHERE topic_id = ?
+            """, (topic_id,))
+            return await cursor.fetchone()
+        finally:
+            await db.close()
+
+    current_times = await retry_with_backoff(get_time_range)
 
     created_links = []
     for rel in related:
@@ -840,7 +933,7 @@ def auto_link_topic(topic_id: int, current_session: str, min_similarity: float =
         )
 
         # Create bidirectional link
-        link_id = link_topics(
+        link_id = await link_topics(
             topic_id, rel['id'],
             similarity=rel['similarity'],
             time_overlap=overlap,
@@ -863,7 +956,7 @@ def auto_link_topic(topic_id: int, current_session: str, min_similarity: float =
 # Timeline Functions
 # =============================================================================
 
-def get_topic_timeline(topic_id: int = None, topic_name: str = None) -> dict:
+async def get_topic_timeline(topic_id: int = None, topic_name: str = None) -> dict:
     """Get timeline for a topic showing activity across sessions.
 
     Args:
@@ -873,82 +966,84 @@ def get_topic_timeline(topic_id: int = None, topic_name: str = None) -> dict:
     Returns:
         Dict with topic info and timeline entries grouped by date
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Find topic
+            if topic_id:
+                cursor = await db.execute(
+                    "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE id = ?",
+                    (topic_id,)
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE name LIKE ?",
+                    (f"%{topic_name}%",)
+                )
+            topic = await cursor.fetchone()
+            if not topic:
+                return {"error": "Topic not found"}
 
-    # Find topic
-    if topic_id:
-        cursor = db.execute(
-            "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE id = ?",
-            (topic_id,)
-        )
-    else:
-        cursor = db.execute(
-            "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE name LIKE ?",
-            (f"%{topic_name}%",)
-        )
-    topic = cursor.fetchone()
-    if not topic:
-        db.close()
-        return {"error": "Topic not found"}
+            tid = topic['id']
 
-    topic_id = topic['id']
+            # Get all spans for this topic with their time ranges and idea counts
+            cursor = await db.execute("""
+                SELECT
+                    s.id as span_id,
+                    s.session,
+                    s.name as span_name,
+                    s.start_time,
+                    s.end_time,
+                    COUNT(i.id) as idea_count
+                FROM spans s
+                LEFT JOIN ideas i ON i.span_id = s.id
+                WHERE s.topic_id = ?
+                GROUP BY s.id
+                ORDER BY COALESCE(s.start_time, s.created_at)
+            """, (tid,))
+            spans = [dict(r) for r in await cursor.fetchall()]
 
-    # Get all spans for this topic with their time ranges and idea counts
-    cursor = db.execute("""
-        SELECT
-            s.id as span_id,
-            s.session,
-            s.name as span_name,
-            s.start_time,
-            s.end_time,
-            COUNT(i.id) as idea_count
-        FROM spans s
-        LEFT JOIN ideas i ON i.span_id = s.id
-        WHERE s.topic_id = ?
-        GROUP BY s.id
-        ORDER BY COALESCE(s.start_time, s.created_at)
-    """, (topic_id,))
-    spans = [dict(r) for r in cursor]
+            # Get key ideas (decisions, conclusions) for each span
+            for span in spans:
+                cursor = await db.execute("""
+                    SELECT content, intent, message_time
+                    FROM ideas
+                    WHERE span_id = ? AND intent IN ('decision', 'conclusion')
+                    ORDER BY COALESCE(message_time, created_at)
+                    LIMIT 3
+                """, (span['span_id'],))
+                span['key_ideas'] = [dict(r) for r in await cursor.fetchall()]
 
-    # Get key ideas (decisions, conclusions) for each span
-    for span in spans:
-        cursor = db.execute("""
-            SELECT content, intent, message_time
-            FROM ideas
-            WHERE span_id = ? AND intent IN ('decision', 'conclusion')
-            ORDER BY COALESCE(message_time, created_at)
-            LIMIT 3
-        """, (span['span_id'],))
-        span['key_ideas'] = [dict(r) for r in cursor]
+            # Group by date
+            from datetime import datetime
+            timeline = {}
+            for span in spans:
+                if span['start_time']:
+                    try:
+                        dt = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
+                        date_key = dt.strftime('%Y-%m-%d')
+                    except:
+                        date_key = 'unknown'
+                else:
+                    date_key = 'unknown'
 
-    db.close()
+                if date_key not in timeline:
+                    timeline[date_key] = []
+                timeline[date_key].append(span)
 
-    # Group by date
-    from datetime import datetime
-    timeline = {}
-    for span in spans:
-        if span['start_time']:
-            try:
-                dt = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
-                date_key = dt.strftime('%Y-%m-%d')
-            except:
-                date_key = 'unknown'
-        else:
-            date_key = 'unknown'
+            return {
+                "topic": dict(topic),
+                "timeline": timeline,
+                "total_spans": len(spans),
+                "total_ideas": sum(s['idea_count'] for s in spans)
+            }
+        finally:
+            await db.close()
 
-        if date_key not in timeline:
-            timeline[date_key] = []
-        timeline[date_key].append(span)
-
-    return {
-        "topic": dict(topic),
-        "timeline": timeline,
-        "total_spans": len(spans),
-        "total_ideas": sum(s['idea_count'] for s in spans)
-    }
+    return await retry_with_backoff(do_query)
 
 
-def get_project_timeline(session: str, days: int = 7) -> dict:
+async def get_project_timeline(session: str, days: int = 7) -> dict:
     """Get activity timeline for a project/session.
 
     Args:
@@ -960,70 +1055,74 @@ def get_project_timeline(session: str, days: int = 7) -> dict:
     """
     from datetime import datetime, timedelta
 
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Calculate date range
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=days)
+            start_iso = start_date.isoformat() + 'Z'
 
-    # Calculate date range
-    end_date = datetime.utcnow()
-    start_date = end_date - timedelta(days=days)
-    start_iso = start_date.isoformat() + 'Z'
+            # Get spans with their topics and idea counts
+            cursor = await db.execute("""
+                SELECT
+                    s.id as span_id,
+                    s.name as span_name,
+                    s.start_time,
+                    s.end_time,
+                    t.id as topic_id,
+                    t.name as topic_name,
+                    COUNT(i.id) as idea_count
+                FROM spans s
+                LEFT JOIN topics t ON t.id = s.topic_id
+                LEFT JOIN ideas i ON i.span_id = s.id
+                WHERE s.session = ?
+                  AND COALESCE(s.start_time, s.created_at) >= ?
+                GROUP BY s.id
+                ORDER BY COALESCE(s.start_time, s.created_at)
+            """, (session, start_iso))
+            spans = [dict(r) for r in await cursor.fetchall()]
 
-    # Get spans with their topics and idea counts
-    cursor = db.execute("""
-        SELECT
-            s.id as span_id,
-            s.name as span_name,
-            s.start_time,
-            s.end_time,
-            t.id as topic_id,
-            t.name as topic_name,
-            COUNT(i.id) as idea_count
-        FROM spans s
-        LEFT JOIN topics t ON t.id = s.topic_id
-        LEFT JOIN ideas i ON i.span_id = s.id
-        WHERE s.session = ?
-          AND COALESCE(s.start_time, s.created_at) >= ?
-        GROUP BY s.id
-        ORDER BY COALESCE(s.start_time, s.created_at)
-    """, (session, start_iso))
-    spans = [dict(r) for r in cursor]
-    db.close()
+            # Group by date
+            timeline = {}
+            for span in spans:
+                if span['start_time']:
+                    try:
+                        dt = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
+                        date_key = dt.strftime('%Y-%m-%d')
+                    except:
+                        date_key = 'unknown'
+                else:
+                    date_key = 'unknown'
 
-    # Group by date
-    timeline = {}
-    for span in spans:
-        if span['start_time']:
-            try:
-                dt = datetime.fromisoformat(span['start_time'].replace('Z', '+00:00'))
-                date_key = dt.strftime('%Y-%m-%d')
-            except:
-                date_key = 'unknown'
-        else:
-            date_key = 'unknown'
+                if date_key not in timeline:
+                    timeline[date_key] = {
+                        "topics": set(),
+                        "idea_count": 0,
+                        "spans": []
+                    }
+                timeline[date_key]["topics"].add(span['topic_name'] or span['span_name'][:30])
+                timeline[date_key]["idea_count"] += span['idea_count']
+                timeline[date_key]["spans"].append(span)
 
-        if date_key not in timeline:
-            timeline[date_key] = {
-                "topics": set(),
-                "idea_count": 0,
-                "spans": []
+            # Convert sets to lists for JSON
+            for date_key in timeline:
+                timeline[date_key]["topics"] = list(timeline[date_key]["topics"])
+
+            return {
+                "session": session,
+                "days": days,
+                "timeline": timeline,
+                "total_spans": len(spans),
+                "total_ideas": sum(s['idea_count'] for s in spans)
             }
-        timeline[date_key]["topics"].add(span['topic_name'] or span['span_name'][:30])
-        timeline[date_key]["idea_count"] += span['idea_count']
-        timeline[date_key]["spans"].append(span)
+        finally:
+            await db.close()
 
-    # Convert sets to lists for JSON
-    for date_key in timeline:
-        timeline[date_key]["topics"] = list(timeline[date_key]["topics"])
-
-    return {
-        "session": session,
-        "days": days,
-        "timeline": timeline,
-        "total_spans": len(spans),
-        "total_ideas": sum(s['idea_count'] for s in spans)
-    }
+    return await retry_with_backoff(do_query)
 
 
-def get_activity_by_period(
+async def get_activity_by_period(
     period: str = "day",
     days: int = 7,
     session: str = None
@@ -1040,98 +1139,102 @@ def get_activity_by_period(
     """
     from datetime import datetime, timedelta
 
-    db = get_db()
-
-    # Calculate date range
-    end_date = datetime.utcnow()
-    start_date = end_date - timedelta(days=days)
-    start_iso = start_date.isoformat() + 'Z'
-
-    # Build query
-    sql = """
-        SELECT
-            i.id,
-            COALESCE(i.message_time, i.created_at) as idea_time,
-            i.intent,
-            s.session
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        WHERE COALESCE(i.message_time, i.created_at) >= ?
-    """
-    params = [start_iso]
-
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
-
-    sql += " ORDER BY idea_time"
-
-    cursor = db.execute(sql, params)
-    ideas = list(cursor)
-    db.close()
-
-    # Aggregate by period
-    period_counts = {}
-    intent_counts = {}
-
-    for idea in ideas:
-        idea_time = idea['idea_time']
-        intent = idea['intent']
-
-        # Parse time and determine period key
+    async def do_query():
+        db = await get_async_db()
         try:
-            dt = datetime.fromisoformat(idea_time.replace('Z', '+00:00'))
-            if period == "day":
-                period_key = dt.strftime('%Y-%m-%d')
-            elif period == "week":
-                # ISO week
-                period_key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
-            elif period == "month":
-                period_key = dt.strftime('%Y-%m')
-            else:
-                period_key = dt.strftime('%Y-%m-%d')
-        except:
-            period_key = 'unknown'
+            # Calculate date range
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=days)
+            start_iso = start_date.isoformat() + 'Z'
 
-        # Count by period
-        if period_key not in period_counts:
-            period_counts[period_key] = {
-                "total": 0,
-                "decisions": 0,
-                "questions": 0,
-                "conclusions": 0,
-                "sessions": set()
+            # Build query
+            sql = """
+                SELECT
+                    i.id,
+                    COALESCE(i.message_time, i.created_at) as idea_time,
+                    i.intent,
+                    s.session
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                WHERE COALESCE(i.message_time, i.created_at) >= ?
+            """
+            params = [start_iso]
+
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
+
+            sql += " ORDER BY idea_time"
+
+            cursor = await db.execute(sql, params)
+            ideas = await cursor.fetchall()
+
+            # Aggregate by period
+            period_counts = {}
+            intent_counts = {}
+
+            for idea in ideas:
+                idea_time = idea['idea_time']
+                intent = idea['intent']
+
+                # Parse time and determine period key
+                try:
+                    dt = datetime.fromisoformat(idea_time.replace('Z', '+00:00'))
+                    if period == "day":
+                        period_key = dt.strftime('%Y-%m-%d')
+                    elif period == "week":
+                        # ISO week
+                        period_key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
+                    elif period == "month":
+                        period_key = dt.strftime('%Y-%m')
+                    else:
+                        period_key = dt.strftime('%Y-%m-%d')
+                except:
+                    period_key = 'unknown'
+
+                # Count by period
+                if period_key not in period_counts:
+                    period_counts[period_key] = {
+                        "total": 0,
+                        "decisions": 0,
+                        "questions": 0,
+                        "conclusions": 0,
+                        "sessions": set()
+                    }
+                period_counts[period_key]["total"] += 1
+                period_counts[period_key]["sessions"].add(idea['session'])
+                if intent == 'decision':
+                    period_counts[period_key]["decisions"] += 1
+                elif intent == 'question':
+                    period_counts[period_key]["questions"] += 1
+                elif intent == 'conclusion':
+                    period_counts[period_key]["conclusions"] += 1
+
+                # Count by intent
+                if intent not in intent_counts:
+                    intent_counts[intent] = 0
+                intent_counts[intent] += 1
+
+            # Convert sets to counts for JSON
+            for pk in period_counts:
+                period_counts[pk]["session_count"] = len(period_counts[pk]["sessions"])
+                del period_counts[pk]["sessions"]
+
+            return {
+                "period": period,
+                "days": days,
+                "session": session,
+                "total_ideas": len(ideas),
+                "by_period": period_counts,
+                "by_intent": intent_counts
             }
-        period_counts[period_key]["total"] += 1
-        period_counts[period_key]["sessions"].add(idea['session'])
-        if intent == 'decision':
-            period_counts[period_key]["decisions"] += 1
-        elif intent == 'question':
-            period_counts[period_key]["questions"] += 1
-        elif intent == 'conclusion':
-            period_counts[period_key]["conclusions"] += 1
+        finally:
+            await db.close()
 
-        # Count by intent
-        if intent not in intent_counts:
-            intent_counts[intent] = 0
-        intent_counts[intent] += 1
-
-    # Convert sets to counts for JSON
-    for pk in period_counts:
-        period_counts[pk]["session_count"] = len(period_counts[pk]["sessions"])
-        del period_counts[pk]["sessions"]
-
-    return {
-        "period": period,
-        "days": days,
-        "session": session,
-        "total_ideas": len(ideas),
-        "by_period": period_counts,
-        "by_intent": intent_counts
-    }
+    return await retry_with_backoff(do_query)
 
 
-def get_topic_activity(
+async def get_topic_activity(
     topic_id: int,
     period: str = "week",
     days: int = 90
@@ -1148,86 +1251,89 @@ def get_topic_activity(
     """
     from datetime import datetime, timedelta
 
-    db = get_db()
-
-    # Get topic info
-    cursor = db.execute(
-        "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE id = ?",
-        (topic_id,)
-    )
-    topic = cursor.fetchone()
-    if not topic:
-        db.close()
-        return {"error": "Topic not found"}
-
-    # Calculate date range
-    end_date = datetime.utcnow()
-    start_date = end_date - timedelta(days=days)
-    start_iso = start_date.isoformat() + 'Z'
-
-    # Get ideas for this topic
-    cursor = db.execute("""
-        SELECT
-            i.id,
-            COALESCE(i.message_time, i.created_at) as idea_time,
-            i.intent,
-            i.content,
-            s.session
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        WHERE s.topic_id = ?
-          AND COALESCE(i.message_time, i.created_at) >= ?
-        ORDER BY idea_time
-    """, (topic_id, start_iso))
-    ideas = list(cursor)
-    db.close()
-
-    # Aggregate by period
-    period_activity = {}
-
-    for idea in ideas:
-        idea_time = idea['idea_time']
-
+    async def do_query():
+        db = await get_async_db()
         try:
-            dt = datetime.fromisoformat(idea_time.replace('Z', '+00:00'))
-            if period == "day":
-                period_key = dt.strftime('%Y-%m-%d')
-            elif period == "week":
-                period_key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
-            elif period == "month":
-                period_key = dt.strftime('%Y-%m')
-            else:
-                period_key = dt.strftime('%Y-%m-%d')
-        except:
-            period_key = 'unknown'
+            # Get topic info
+            cursor = await db.execute(
+                "SELECT id, name, summary, first_seen, last_seen FROM topics WHERE id = ?",
+                (topic_id,)
+            )
+            topic = await cursor.fetchone()
+            if not topic:
+                return {"error": "Topic not found"}
 
-        if period_key not in period_activity:
-            period_activity[period_key] = {
-                "total": 0,
-                "sessions": set(),
-                "key_ideas": []
+            # Calculate date range
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=days)
+            start_iso = start_date.isoformat() + 'Z'
+
+            # Get ideas for this topic
+            cursor = await db.execute("""
+                SELECT
+                    i.id,
+                    COALESCE(i.message_time, i.created_at) as idea_time,
+                    i.intent,
+                    i.content,
+                    s.session
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                WHERE s.topic_id = ?
+                  AND COALESCE(i.message_time, i.created_at) >= ?
+                ORDER BY idea_time
+            """, (topic_id, start_iso))
+            ideas = await cursor.fetchall()
+
+            # Aggregate by period
+            period_activity = {}
+
+            for idea in ideas:
+                idea_time = idea['idea_time']
+
+                try:
+                    dt = datetime.fromisoformat(idea_time.replace('Z', '+00:00'))
+                    if period == "day":
+                        period_key = dt.strftime('%Y-%m-%d')
+                    elif period == "week":
+                        period_key = f"{dt.year}-W{dt.isocalendar()[1]:02d}"
+                    elif period == "month":
+                        period_key = dt.strftime('%Y-%m')
+                    else:
+                        period_key = dt.strftime('%Y-%m-%d')
+                except:
+                    period_key = 'unknown'
+
+                if period_key not in period_activity:
+                    period_activity[period_key] = {
+                        "total": 0,
+                        "sessions": set(),
+                        "key_ideas": []
+                    }
+                period_activity[period_key]["total"] += 1
+                period_activity[period_key]["sessions"].add(idea['session'])
+
+                # Track key ideas (decisions/conclusions)
+                if idea['intent'] in ('decision', 'conclusion') and len(period_activity[period_key]["key_ideas"]) < 3:
+                    period_activity[period_key]["key_ideas"].append({
+                        "content": idea['content'][:100],
+                        "intent": idea['intent']
+                    })
+
+            # Convert sets to lists for JSON
+            for pk in period_activity:
+                period_activity[pk]["sessions"] = list(period_activity[pk]["sessions"])
+
+            return {
+                "topic": dict(topic),
+                "period": period,
+                "days": days,
+                "total_ideas": len(ideas),
+                "by_period": period_activity
             }
-        period_activity[period_key]["total"] += 1
-        period_activity[period_key]["sessions"].add(idea['session'])
+        finally:
+            await db.close()
 
-        # Track key ideas (decisions/conclusions)
-        if idea['intent'] in ('decision', 'conclusion') and len(period_activity[period_key]["key_ideas"]) < 3:
-            period_activity[period_key]["key_ideas"].append({
-                "content": idea['content'][:100],
-                "intent": idea['intent']
-            })
-
-    # Convert sets to lists for JSON
-    for pk in period_activity:
-        period_activity[pk]["sessions"] = list(period_activity[pk]["sessions"])
-
-    return {
-        "topic": dict(topic),
-        "period": period,
-        "days": days,
-        "total_ideas": len(ideas),
-        "by_period": period_activity
-    }
+    return await retry_with_backoff(do_query)
 
 
 # Bad topic name patterns (matched case-insensitively)
@@ -1254,7 +1360,7 @@ _BAD_NAME_PATTERNS_CASE_SENSITIVE = [
 ]
 
 
-def review_topics() -> dict:
+async def review_topics() -> dict:
     """Review topics for quality issues.
 
     Returns:
@@ -1262,26 +1368,32 @@ def review_topics() -> dict:
     """
     import re
 
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get all topics with counts
+            cursor = await db.execute("""
+                SELECT t.id, t.name, t.summary, t.canonical_name,
+                       COUNT(DISTINCT s.id) as span_count,
+                       COUNT(DISTINCT i.id) as idea_count
+                FROM topics t
+                LEFT JOIN spans s ON s.topic_id = t.id
+                LEFT JOIN ideas i ON i.span_id = s.id
+                GROUP BY t.id
+            """)
+            topics = [dict(row) for row in await cursor.fetchall()]
+            return topics
+        finally:
+            await db.close()
+
+    topics = await retry_with_backoff(do_query)
+
     issues = {
         "catch_all": [],      # Topics with too many ideas
         "bad_names": [],      # Poorly named topics
         "duplicates": [],     # Potential duplicate topics
         "empty": [],          # Topics with no ideas
     }
-
-    # Get all topics with counts
-    cursor = db.execute("""
-        SELECT t.id, t.name, t.summary, t.canonical_name,
-               COUNT(DISTINCT s.id) as span_count,
-               COUNT(DISTINCT i.id) as idea_count
-        FROM topics t
-        LEFT JOIN spans s ON s.topic_id = t.id
-        LEFT JOIN ideas i ON i.span_id = s.id
-        GROUP BY t.id
-    """)
-    topics = [dict(row) for row in cursor]
-    db.close()
 
     # Check each topic
     for topic in topics:
@@ -1331,7 +1443,7 @@ def review_topics() -> dict:
             })
 
     # Duplicate detection using embedding similarity
-    duplicates = find_duplicate_topics(threshold=0.85)
+    duplicates = await find_duplicate_topics(threshold=0.85)
     issues["duplicates"] = duplicates
 
     # Summary
@@ -1352,7 +1464,7 @@ def review_topics() -> dict:
     return issues
 
 
-def find_duplicate_topics(threshold: float = None) -> list[dict]:
+async def find_duplicate_topics(threshold: float = None) -> list[dict]:
     """Find topics that are semantically similar.
 
     Args:
@@ -1367,14 +1479,18 @@ def find_duplicate_topics(threshold: float = None) -> list[dict]:
         from config import get_config
         threshold = get_config().duplicate_topic_threshold
 
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get topics with their embeddings (from their name + summary)
+            cursor = await db.execute("""
+                SELECT id, name, summary FROM topics
+            """)
+            return await cursor.fetchall()
+        finally:
+            await db.close()
 
-    # Get topics with their embeddings (from their name + summary)
-    cursor = db.execute("""
-        SELECT id, name, summary FROM topics
-    """)
-    topics = list(cursor)
-    db.close()
+    topics = await retry_with_backoff(do_query)
 
     if len(topics) < 2:
         return []
@@ -1384,7 +1500,7 @@ def find_duplicate_topics(threshold: float = None) -> list[dict]:
     for topic in topics:
         text = f"{topic['name']}: {topic['summary'] or ''}"
         try:
-            embedding = get_embedding(text)
+            embedding = await get_embedding_async(text)
             topic_embeddings[topic["id"]] = {
                 "name": topic["name"],
                 "embedding": embedding
@@ -1422,7 +1538,7 @@ def find_duplicate_topics(threshold: float = None) -> list[dict]:
     return duplicates
 
 
-def cluster_topics(min_cluster_size: int = 5) -> dict:
+async def cluster_topics(min_cluster_size: int = 5) -> dict:
     """Analyze idea embeddings to suggest topic reorganization.
 
     Uses agglomerative clustering on idea embeddings to find natural groupings,
@@ -1437,29 +1553,34 @@ def cluster_topics(min_cluster_size: int = 5) -> dict:
     Returns:
         Dict with clustering analysis and suggestions
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get all ideas with embeddings and topic info
+            cursor = await db.execute("""
+                SELECT i.id, i.content, i.span_id, s.topic_id, t.name as topic_name,
+                       e.embedding
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                JOIN topics t ON t.id = s.topic_id
+                JOIN idea_embeddings e ON e.idea_id = i.id
+            """)
+            ideas = []
+            for row in await cursor.fetchall():
+                emb_bytes = row["embedding"]
+                embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
+                ideas.append({
+                    "id": row["id"],
+                    "content": row["content"][:100],
+                    "topic_id": row["topic_id"],
+                    "topic_name": row["topic_name"],
+                    "embedding": embedding,
+                })
+            return ideas
+        finally:
+            await db.close()
 
-    # Get all ideas with embeddings and topic info
-    cursor = db.execute("""
-        SELECT i.id, i.content, i.span_id, s.topic_id, t.name as topic_name,
-               e.embedding
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        JOIN topics t ON t.id = s.topic_id
-        JOIN idea_embeddings e ON e.idea_id = i.id
-    """)
-    ideas = []
-    for row in cursor:
-        emb_bytes = row["embedding"]
-        embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
-        ideas.append({
-            "id": row["id"],
-            "content": row["content"][:100],
-            "topic_id": row["topic_id"],
-            "topic_name": row["topic_name"],
-            "embedding": embedding,
-        })
-    db.close()
+    ideas = await retry_with_backoff(do_query)
 
     if len(ideas) < 10:
         return {"error": "Not enough ideas for clustering", "idea_count": len(ideas)}
@@ -1590,7 +1711,7 @@ def cluster_topics(min_cluster_size: int = 5) -> dict:
     }
 
 
-def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
+async def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
     """Analyze a single topic and suggest how to split it.
 
     Uses k-means style clustering on the topic's ideas to find natural sub-groups.
@@ -1602,35 +1723,42 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
     Returns:
         Dict with cluster analysis and suggested splits
     """
-    db = get_db()
+    async def get_topic_data():
+        db = await get_async_db()
+        try:
+            # Get topic info
+            cursor = await db.execute("SELECT name, summary FROM topics WHERE id = ?", (topic_id,))
+            topic_row = await cursor.fetchone()
+            if not topic_row:
+                return None, []
 
-    # Get topic info
-    cursor = db.execute("SELECT name, summary FROM topics WHERE id = ?", (topic_id,))
-    topic_row = cursor.fetchone()
+            # Get ideas with embeddings
+            cursor = await db.execute("""
+                SELECT i.id, i.content, i.intent, e.embedding
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                JOIN idea_embeddings e ON e.idea_id = i.id
+                WHERE s.topic_id = ?
+            """, (topic_id,))
+
+            ideas = []
+            async for row in cursor:
+                emb_bytes = row["embedding"]
+                embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
+                ideas.append({
+                    "id": row["id"],
+                    "content": row["content"],
+                    "intent": row["intent"],
+                    "embedding": embedding,
+                })
+            return topic_row, ideas
+        finally:
+            await db.close()
+
+    topic_row, ideas = await retry_with_backoff(get_topic_data)
+
     if not topic_row:
-        db.close()
         return {"error": f"Topic {topic_id} not found"}
-
-    # Get ideas with embeddings
-    cursor = db.execute("""
-        SELECT i.id, i.content, i.intent, e.embedding
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        JOIN idea_embeddings e ON e.idea_id = i.id
-        WHERE s.topic_id = ?
-    """, (topic_id,))
-
-    ideas = []
-    for row in cursor:
-        emb_bytes = row["embedding"]
-        embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
-        ideas.append({
-            "id": row["id"],
-            "content": row["content"],
-            "intent": row["intent"],
-            "embedding": embedding,
-        })
-    db.close()
 
     if len(ideas) < 4:
         return {"error": "Not enough ideas to cluster", "idea_count": len(ideas)}
@@ -1696,7 +1824,7 @@ def recluster_topic(topic_id: int, num_clusters: int = None) -> dict:
 {sample_content}
 
 Reply with ONLY the topic name, nothing else."""
-            suggested_name = claude_complete(prompt).strip()
+            suggested_name = (await claude_complete_async(prompt)).strip()
         except TotalRecallError:
             raise  # Re-raise TotalRecallError as-is
         except Exception as e:
@@ -1726,7 +1854,7 @@ Reply with ONLY the topic name, nothing else."""
     }
 
 
-def split_topic(topic_id: int, num_clusters: int = None, min_cluster_size: int = 3,
+async def split_topic(topic_id: int, num_clusters: int = None, min_cluster_size: int = 3,
                 delete_original: bool = False, delete_junk: bool = True) -> dict:
     """Split a topic into sub-topics based on clustering.
 
@@ -1743,65 +1871,66 @@ def split_topic(topic_id: int, num_clusters: int = None, min_cluster_size: int =
         Dict with split results
     """
     # First run clustering
-    cluster_result = recluster_topic(topic_id, num_clusters)
+    cluster_result = await recluster_topic(topic_id, num_clusters)
     if "error" in cluster_result:
         return cluster_result
 
-    db = get_db()
+    async def create_child_topics():
+        db = await get_async_db()
+        try:
+            # Get original topic info
+            cursor = await db.execute(
+                "SELECT id, name, project_id FROM topics WHERE id = ?",
+                (topic_id,)
+            )
+            original = await cursor.fetchone()
+            if not original:
+                return None, None, []
 
-    # Get original topic info
-    cursor = db.execute(
-        "SELECT id, name, project_id FROM topics WHERE id = ?",
-        (topic_id,)
-    )
-    original = cursor.fetchone()
-    if not original:
-        db.close()
+            project_id = original["project_id"]
+            original_name = original["name"]
+
+            created_topics = []
+            junk_ideas = []
+
+            for cluster in cluster_result["clusters"]:
+                if cluster["idea_count"] == 0:
+                    continue
+
+                idea_ids = [i["id"] for i in cluster["sample_ideas"]]
+
+                if cluster["idea_count"] < min_cluster_size:
+                    # Too small - mark as junk
+                    junk_ideas.extend(idea_ids)
+                    continue
+
+                # Create new child topic
+                new_name = cluster["suggested_name"] or f"{original_name} - Cluster {cluster['cluster_id']+1}"
+                canonical = canonicalize_topic_name(new_name)
+
+                cursor = await db.execute("""
+                    INSERT INTO topics (name, canonical_name, parent_id, project_id)
+                    VALUES (?, ?, ?, ?)
+                """, (new_name, canonical, topic_id, project_id))
+                new_topic_id = cursor.lastrowid
+
+                created_topics.append({
+                    "id": new_topic_id,
+                    "name": new_name,
+                    "idea_count": cluster["idea_count"],
+                })
+
+            await db.commit()
+            return original_name, project_id, created_topics
+        finally:
+            await db.close()
+
+    original_name, project_id, created_topics = await retry_with_backoff(create_child_topics)
+    if original_name is None:
         return {"error": f"Topic {topic_id} not found"}
 
-    project_id = original["project_id"]
-    original_name = original["name"]
-
-    created_topics = []
-    moved_ideas = 0
-    deleted_ideas = 0
-    junk_ideas = []
-
-    for cluster in cluster_result["clusters"]:
-        if cluster["idea_count"] == 0:
-            continue
-
-        idea_ids = [i["id"] for i in cluster["sample_ideas"]]
-        # Get ALL idea IDs for this cluster (sample_ideas only has 5)
-        # We need to re-run clustering to get full assignments
-        # For now, use the sample - we'll fix this properly
-
-        if cluster["idea_count"] < min_cluster_size:
-            # Too small - mark as junk
-            junk_ideas.extend(idea_ids)
-            continue
-
-        # Create new child topic
-        new_name = cluster["suggested_name"] or f"{original_name} - Cluster {cluster['cluster_id']+1}"
-        canonical = canonicalize_topic_name(new_name)
-
-        cursor = db.execute("""
-            INSERT INTO topics (name, canonical_name, parent_id, project_id)
-            VALUES (?, ?, ?, ?)
-        """, (new_name, canonical, topic_id, project_id))
-        new_topic_id = cursor.lastrowid
-
-        created_topics.append({
-            "id": new_topic_id,
-            "name": new_name,
-            "idea_count": cluster["idea_count"],
-        })
-
-    db.commit()
-    db.close()
-
     # Now we need to actually move the ideas - re-run clustering with full assignments
-    result = _execute_topic_split(topic_id, created_topics, min_cluster_size, delete_junk)
+    result = await _execute_topic_split(topic_id, created_topics, min_cluster_size, delete_junk)
 
     return {
         "original_topic_id": topic_id,
@@ -1813,134 +1942,137 @@ def split_topic(topic_id: int, num_clusters: int = None, min_cluster_size: int =
     }
 
 
-def _execute_topic_split(topic_id: int, created_topics: list, min_cluster_size: int,
+async def _execute_topic_split(topic_id: int, created_topics: list, min_cluster_size: int,
                          delete_junk: bool) -> dict:
     """Execute the actual idea movement for a topic split."""
     import random
     random.seed(42)
 
-    db = get_db()
+    async def do_split():
+        db = await get_async_db()
+        try:
+            # Get all ideas with embeddings for this topic
+            cursor = await db.execute("""
+                SELECT i.id, i.span_id, e.embedding
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                JOIN idea_embeddings e ON e.idea_id = i.id
+                WHERE s.topic_id = ?
+            """, (topic_id,))
 
-    # Get all ideas with embeddings for this topic
-    cursor = db.execute("""
-        SELECT i.id, i.span_id, e.embedding
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        JOIN idea_embeddings e ON e.idea_id = i.id
-        WHERE s.topic_id = ?
-    """, (topic_id,))
+            ideas = []
+            async for row in cursor:
+                emb_bytes = row["embedding"]
+                embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
+                ideas.append({
+                    "id": row["id"],
+                    "span_id": row["span_id"],
+                    "embedding": embedding,
+                })
 
-    ideas = []
-    for row in cursor:
-        emb_bytes = row["embedding"]
-        embedding = list(struct.unpack(f'{EMBEDDING_DIM}f', emb_bytes))
-        ideas.append({
-            "id": row["id"],
-            "span_id": row["span_id"],
-            "embedding": embedding,
-        })
+            if not ideas or not created_topics:
+                return {"created_topics": created_topics, "moved_ideas": 0, "deleted_ideas": 0, "kept_in_original": len(ideas)}
 
-    if not ideas or not created_topics:
-        db.close()
-        return {"created_topics": created_topics, "moved_ideas": 0, "deleted_ideas": 0, "kept_in_original": len(ideas)}
+            num_clusters = len(created_topics)
 
-    num_clusters = len(created_topics)
+            # K-means clustering
+            centroid_indices = random.sample(range(len(ideas)), min(num_clusters, len(ideas)))
+            centroids = [ideas[i]["embedding"][:] for i in centroid_indices]
 
-    # K-means clustering
-    centroid_indices = random.sample(range(len(ideas)), min(num_clusters, len(ideas)))
-    centroids = [ideas[i]["embedding"][:] for i in centroid_indices]
+            for _ in range(20):
+                assignments = []
+                for idea in ideas:
+                    emb = idea["embedding"]
+                    best_cluster = 0
+                    best_dist = float('inf')
+                    for ci, centroid in enumerate(centroids):
+                        dist = sum((a-b)**2 for a, b in zip(emb, centroid))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_cluster = ci
+                    assignments.append(best_cluster)
 
-    for _ in range(20):
-        assignments = []
-        for idea in ideas:
-            emb = idea["embedding"]
-            best_cluster = 0
-            best_dist = float('inf')
-            for ci, centroid in enumerate(centroids):
-                dist = sum((a-b)**2 for a, b in zip(emb, centroid))
-                if dist < best_dist:
-                    best_dist = dist
-                    best_cluster = ci
-            assignments.append(best_cluster)
+                new_centroids = []
+                for ci in range(len(centroids)):
+                    cluster_embs = [ideas[i]["embedding"] for i, a in enumerate(assignments) if a == ci]
+                    if cluster_embs:
+                        new_centroid = [sum(e[d] for e in cluster_embs) / len(cluster_embs)
+                                       for d in range(EMBEDDING_DIM)]
+                        new_centroids.append(new_centroid)
+                    else:
+                        new_centroids.append(centroids[ci])
+                centroids = new_centroids
 
-        new_centroids = []
-        for ci in range(len(centroids)):
-            cluster_embs = [ideas[i]["embedding"] for i, a in enumerate(assignments) if a == ci]
-            if cluster_embs:
-                new_centroid = [sum(e[d] for e in cluster_embs) / len(cluster_embs)
-                               for d in range(EMBEDDING_DIM)]
-                new_centroids.append(new_centroid)
-            else:
-                new_centroids.append(centroids[ci])
-        centroids = new_centroids
+            # Group ideas by cluster
+            clusters = {i: [] for i in range(num_clusters)}
+            for i, cluster_id in enumerate(assignments):
+                clusters[cluster_id].append(ideas[i])
 
-    # Group ideas by cluster
-    clusters = {i: [] for i in range(num_clusters)}
-    for i, cluster_id in enumerate(assignments):
-        clusters[cluster_id].append(ideas[i])
+            # Match clusters to created topics by size (largest cluster -> first topic)
+            cluster_sizes = [(ci, len(ideas_list)) for ci, ideas_list in clusters.items()]
+            cluster_sizes.sort(key=lambda x: x[1], reverse=True)
 
-    # Match clusters to created topics by size (largest cluster -> first topic)
-    cluster_sizes = [(ci, len(ideas_list)) for ci, ideas_list in clusters.items()]
-    cluster_sizes.sort(key=lambda x: x[1], reverse=True)
+            moved_ideas = 0
+            deleted_ideas = 0
 
-    moved_ideas = 0
-    deleted_ideas = 0
+            for idx, (cluster_id, size) in enumerate(cluster_sizes):
+                if idx >= len(created_topics):
+                    break
 
-    for idx, (cluster_id, size) in enumerate(cluster_sizes):
-        if idx >= len(created_topics):
-            break
+                new_topic = created_topics[idx]
+                cluster_ideas = clusters[cluster_id]
 
-        new_topic = created_topics[idx]
-        cluster_ideas = clusters[cluster_id]
+                if size < min_cluster_size:
+                    # Junk cluster
+                    if delete_junk:
+                        idea_ids = [i["id"] for i in cluster_ideas]
+                        if idea_ids:
+                            placeholders = ",".join("?" * len(idea_ids))
+                            await db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+                            await db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                                      idea_ids + idea_ids)
+                            await db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+                            await db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+                            await db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+                            deleted_ideas += len(idea_ids)
+                    continue
 
-        if size < min_cluster_size:
-            # Junk cluster
-            if delete_junk:
+                # Create a new span for this topic
+                # Get a representative span from the ideas
+                first_idea = cluster_ideas[0]
+                cursor = await db.execute("SELECT session, source_file FROM spans s JOIN ideas i ON i.span_id = s.id WHERE i.id = ?",
+                               (first_idea["id"],))
+                span_info = await cursor.fetchone()
+
+                cursor = await db.execute("""
+                    INSERT INTO spans (session, topic_id, name, start_line, end_line, depth)
+                    VALUES (?, ?, ?, 0, 0, 0)
+                """, (span_info["session"] if span_info else "unknown", new_topic["id"], new_topic["name"]))
+                new_span_id = cursor.lastrowid
+
+                # Move ideas to new span
                 idea_ids = [i["id"] for i in cluster_ideas]
-                if idea_ids:
-                    placeholders = ",".join("?" * len(idea_ids))
-                    db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
-                    db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
-                              idea_ids + idea_ids)
-                    db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
-                    db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
-                    db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
-                    deleted_ideas += len(idea_ids)
-            continue
+                placeholders = ",".join("?" * len(idea_ids))
+                await db.execute(f"UPDATE ideas SET span_id = ? WHERE id IN ({placeholders})",
+                          [new_span_id] + idea_ids)
+                moved_ideas += len(idea_ids)
+                new_topic["idea_count"] = len(idea_ids)
 
-        # Create a new span for this topic
-        # Get a representative span from the ideas
-        first_idea = cluster_ideas[0]
-        cursor = db.execute("SELECT session, source_file FROM spans s JOIN ideas i ON i.span_id = s.id WHERE i.id = ?",
-                           (first_idea["id"],))
-        span_info = cursor.fetchone()
+            await db.commit()
 
-        cursor = db.execute("""
-            INSERT INTO spans (session, topic_id, name, start_line, end_line, depth)
-            VALUES (?, ?, ?, 0, 0, 0)
-        """, (span_info["session"] if span_info else "unknown", new_topic["id"], new_topic["name"]))
-        new_span_id = cursor.lastrowid
+            return {
+                "created_topics": created_topics,
+                "moved_ideas": moved_ideas,
+                "deleted_ideas": deleted_ideas,
+                "kept_in_original": len(ideas) - moved_ideas - deleted_ideas,
+            }
+        finally:
+            await db.close()
 
-        # Move ideas to new span
-        idea_ids = [i["id"] for i in cluster_ideas]
-        placeholders = ",".join("?" * len(idea_ids))
-        db.execute(f"UPDATE ideas SET span_id = ? WHERE id IN ({placeholders})",
-                  [new_span_id] + idea_ids)
-        moved_ideas += len(idea_ids)
-        new_topic["idea_count"] = len(idea_ids)
-
-    db.commit()
-    db.close()
-
-    return {
-        "created_topics": created_topics,
-        "moved_ideas": moved_ideas,
-        "deleted_ideas": deleted_ideas,
-        "kept_in_original": len(ideas) - moved_ideas - deleted_ideas,
-    }
+    return await retry_with_backoff(do_split)
 
 
-def rename_topic(topic_id: int, new_name: str) -> bool:
+async def rename_topic(topic_id: int, new_name: str) -> bool:
     """Rename a topic.
 
     Args:
@@ -1950,18 +2082,22 @@ def rename_topic(topic_id: int, new_name: str) -> bool:
     Returns:
         True if renamed, False if topic not found
     """
-    db = get_db()
-    cursor = db.execute(
-        "UPDATE topics SET name = ?, canonical_name = ? WHERE id = ?",
-        (new_name, canonicalize_topic_name(new_name), topic_id)
-    )
-    db.commit()
-    updated = cursor.rowcount > 0
-    db.close()
-    return updated
+    async def do_rename():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "UPDATE topics SET name = ?, canonical_name = ? WHERE id = ?",
+                (new_name, canonicalize_topic_name(new_name), topic_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_rename)
 
 
-def suggest_topic_name(topic_id: int) -> Optional[str]:
+async def suggest_topic_name(topic_id: int) -> Optional[str]:
     """Use LLM to suggest a better name for a topic.
 
     Args:
@@ -1970,30 +2106,34 @@ def suggest_topic_name(topic_id: int) -> Optional[str]:
     Returns:
         Suggested name or None if failed
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get topic and sample ideas
+            cursor = await db.execute("""
+                SELECT t.name, t.summary FROM topics t WHERE t.id = ?
+            """, (topic_id,))
+            topic = await cursor.fetchone()
 
-    # Get topic and sample ideas
-    cursor = db.execute("""
-        SELECT t.name, t.summary FROM topics t WHERE t.id = ?
-    """, (topic_id,))
-    topic = cursor.fetchone()
+            if not topic:
+                return None, None
 
-    if not topic:
-        db.close()
-        return None
+            # Get sample ideas from this topic
+            cursor = await db.execute("""
+                SELECT i.content FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                WHERE s.topic_id = ?
+                ORDER BY i.created_at
+                LIMIT 10
+            """, (topic_id,))
+            ideas = [row["content"] for row in await cursor.fetchall()]
+            return topic, ideas
+        finally:
+            await db.close()
 
-    # Get sample ideas from this topic
-    cursor = db.execute("""
-        SELECT i.content FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        WHERE s.topic_id = ?
-        ORDER BY i.created_at
-        LIMIT 10
-    """, (topic_id,))
-    ideas = [row["content"] for row in cursor]
-    db.close()
+    topic, ideas = await retry_with_backoff(do_query)
 
-    if not ideas:
+    if not topic or not ideas:
         return None
 
     # Use Claude CLI to generate name
@@ -2008,7 +2148,7 @@ Sample content:
 
 Reply with ONLY the suggested topic name, nothing else."""
 
-        name = claude_complete(prompt).strip()
+        name = (await claude_complete_async(prompt)).strip()
         # Clean the output - strip markdown and quotes
         import re
         name = re.sub(r'^\*\*(.+)\*\*$', r'\1', name)  # Remove bold
@@ -2030,7 +2170,7 @@ Reply with ONLY the suggested topic name, nothing else."""
 # Span Operations
 # =============================================================================
 
-def create_span(
+async def create_span(
     session: str,
     name: str,
     start_line: int,
@@ -2055,29 +2195,34 @@ def create_span(
     """
     # Find or create topic if not provided
     if topic_id is None:
-        topic_id = find_or_create_topic(name)
+        topic_id = await find_or_create_topic(name)
 
-    db = get_db()
-    cursor = db.execute("""
-        INSERT INTO spans (topic_id, session, parent_id, name, start_line, depth, start_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (topic_id, session, parent_id, name, start_line, depth, start_time))
-    span_id = cursor.lastrowid
+    async def do_create():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                INSERT INTO spans (topic_id, session, parent_id, name, start_line, depth, start_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (topic_id, session, parent_id, name, start_line, depth, start_time))
+            span_id = cursor.lastrowid
 
-    # Update topic first_seen if this is earlier
-    if start_time and topic_id:
-        db.execute("""
-            UPDATE topics
-            SET first_seen = ?
-            WHERE id = ? AND (first_seen IS NULL OR first_seen > ?)
-        """, (start_time, topic_id, start_time))
+            # Update topic first_seen if this is earlier
+            if start_time and topic_id:
+                await db.execute("""
+                    UPDATE topics
+                    SET first_seen = ?
+                    WHERE id = ? AND (first_seen IS NULL OR first_seen > ?)
+                """, (start_time, topic_id, start_time))
 
-    db.commit()
-    db.close()
-    return span_id
+            await db.commit()
+            return span_id
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_create)
 
 
-def close_span(span_id: int, end_line: int, summary: str, end_time: Optional[str] = None):
+async def close_span(span_id: int, end_line: int, summary: str, end_time: Optional[str] = None):
     """Close a span with summary and embed it.
 
     Args:
@@ -2086,60 +2231,64 @@ def close_span(span_id: int, end_line: int, summary: str, end_time: Optional[str
         summary: Summary of the span content
         end_time: ISO timestamp when span ended (from last message)
     """
-    db = get_db()
     topic_id = None
     session = None
 
-    try:
-        # Update span with end_line, summary, and end_time
-        db.execute("""
-            UPDATE spans SET end_line = ?, summary = ?, end_time = ? WHERE id = ?
-        """, (end_line, summary, end_time, span_id))
+    async def do_close():
+        nonlocal topic_id, session
+        db = await get_async_db()
+        try:
+            # Update span with end_line, summary, and end_time
+            await db.execute("""
+                UPDATE spans SET end_line = ?, summary = ?, end_time = ? WHERE id = ?
+            """, (end_line, summary, end_time, span_id))
 
-        # Get span for embedding and topic update
-        cursor = db.execute("SELECT name, summary, topic_id, session FROM spans WHERE id = ?", (span_id,))
-        row = cursor.fetchone()
-        topic_id = row['topic_id']
-        session = row['session']
+            # Get span for embedding and topic update
+            cursor = await db.execute("SELECT name, summary, topic_id, session FROM spans WHERE id = ?", (span_id,))
+            row = await cursor.fetchone()
+            topic_id = row['topic_id']
+            session = row['session']
 
-        # Update topic last_seen if this is later
-        if end_time and topic_id:
-            db.execute("""
-                UPDATE topics
-                SET last_seen = ?
-                WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)
-            """, (end_time, topic_id, end_time))
+            # Update topic last_seen if this is later
+            if end_time and topic_id:
+                await db.execute("""
+                    UPDATE topics
+                    SET last_seen = ?
+                    WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)
+                """, (end_time, topic_id, end_time))
 
-        # Embed and store - delete first for sqlite-vec compatibility
-        embed_text = f"{row['name']}: {row['summary']}"
-        embedding = get_embedding(embed_text)
-        db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
-        db.execute("""
-            INSERT INTO span_embeddings (span_id, embedding)
-            VALUES (?, ?)
-        """, (span_id, serialize_embedding(embedding)))
+            # Embed and store - delete first for sqlite-vec compatibility
+            embed_text = f"{row['name']}: {row['summary']}"
+            embedding = await get_embedding_async(embed_text)
+            await db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
+            await db.execute("""
+                INSERT INTO span_embeddings (span_id, embedding)
+                VALUES (?, ?)
+            """, (span_id, serialize_embedding(embedding)))
 
-        # Update FTS - use INSERT OR REPLACE for safety
-        db.execute("""
-            INSERT OR REPLACE INTO spans_fts (rowid, name, summary)
-            VALUES (?, ?, ?)
-        """, (span_id, row['name'], row['summary']))
+            # Update FTS - use INSERT OR REPLACE for safety
+            await db.execute("""
+                INSERT OR REPLACE INTO spans_fts (rowid, name, summary)
+                VALUES (?, ?, ?)
+            """, (span_id, row['name'], row['summary']))
 
-        db.commit()
-    finally:
-        db.close()
+            await db.commit()
+        finally:
+            await db.close()
+
+    await retry_with_backoff(do_close)
 
     # Auto-link topic to similar topics in other sessions (after db is closed)
     if topic_id:
         try:
-            links = auto_link_topic(topic_id, session, min_similarity=0.8)
+            links = await auto_link_topic(topic_id, session, min_similarity=0.8)
             if links:
                 logger.info(f"Auto-linked topic {topic_id} to {len(links)} related topics")
         except Exception as e:
             logger.warning(f"Auto-link failed for topic {topic_id}: {e}")
 
 
-def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
+async def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
     """Update span embedding incrementally.
 
     Can be called during indexing to keep embeddings fresh without waiting
@@ -2152,93 +2301,103 @@ def update_span_embedding(span_id: int, include_ideas: bool = True) -> bool:
     Returns:
         True if embedding was updated
     """
-    db = get_db()
     span = None
 
-    try:
-        # Get span info
-        cursor = db.execute(
-            "SELECT name, summary, topic_id, session FROM spans WHERE id = ?",
-            (span_id,)
-        )
-        span = cursor.fetchone()
-        if not span:
-            return False
+    async def do_update():
+        nonlocal span
+        db = await get_async_db()
+        try:
+            # Get span info
+            cursor = await db.execute(
+                "SELECT name, summary, topic_id, session FROM spans WHERE id = ?",
+                (span_id,)
+            )
+            span = await cursor.fetchone()
+            if not span:
+                return False
 
-        # Build embedding text from span name + summary + sample ideas
-        parts = [span['name']]
-        if span['summary']:
-            parts.append(span['summary'])
+            # Build embedding text from span name + summary + sample ideas
+            parts = [span['name']]
+            if span['summary']:
+                parts.append(span['summary'])
 
-        if include_ideas:
-            # Get a sample of ideas (first few + most recent, exclude forgotten)
-            cursor = db.execute("""
-                SELECT content FROM ideas
-                WHERE span_id = ?
-                    AND (forgotten = FALSE OR forgotten IS NULL)
-                ORDER BY id ASC
-                LIMIT 3
-            """, (span_id,))
-            first_ideas = [r['content'][:200] for r in cursor]
+            if include_ideas:
+                # Get a sample of ideas (first few + most recent, exclude forgotten)
+                cursor = await db.execute("""
+                    SELECT content FROM ideas
+                    WHERE span_id = ?
+                        AND (forgotten = FALSE OR forgotten IS NULL)
+                    ORDER BY id ASC
+                    LIMIT 3
+                """, (span_id,))
+                first_ideas = [r['content'][:200] for r in await cursor.fetchall()]
 
-            cursor = db.execute("""
-                SELECT content FROM ideas
-                WHERE span_id = ?
-                    AND (forgotten = FALSE OR forgotten IS NULL)
-                ORDER BY id DESC
-                LIMIT 3
-            """, (span_id,))
-            recent_ideas = [r['content'][:200] for r in cursor]
+                cursor = await db.execute("""
+                    SELECT content FROM ideas
+                    WHERE span_id = ?
+                        AND (forgotten = FALSE OR forgotten IS NULL)
+                    ORDER BY id DESC
+                    LIMIT 3
+                """, (span_id,))
+                recent_ideas = [r['content'][:200] for r in await cursor.fetchall()]
 
-            # Combine unique ideas
-            all_ideas = first_ideas + [i for i in recent_ideas if i not in first_ideas]
-            if all_ideas:
-                parts.append("Key points: " + "; ".join(all_ideas[:5]))
+                # Combine unique ideas
+                all_ideas = first_ideas + [i for i in recent_ideas if i not in first_ideas]
+                if all_ideas:
+                    parts.append("Key points: " + "; ".join(all_ideas[:5]))
 
-        embed_text = " | ".join(parts)[:2000]  # Limit length
-        embedding = get_embedding(embed_text)
+            embed_text = " | ".join(parts)[:2000]  # Limit length
+            embedding = await get_embedding_async(embed_text)
 
-        # Delete first for sqlite-vec compatibility
-        db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
-        db.execute("""
-            INSERT INTO span_embeddings (span_id, embedding)
-            VALUES (?, ?)
-        """, (span_id, serialize_embedding(embedding)))
-        db.commit()
-    finally:
-        db.close()
+            # Delete first for sqlite-vec compatibility
+            await db.execute("DELETE FROM span_embeddings WHERE span_id = ?", (span_id,))
+            await db.execute("""
+                INSERT INTO span_embeddings (span_id, embedding)
+                VALUES (?, ?)
+            """, (span_id, serialize_embedding(embedding)))
+            await db.commit()
+            return True
+        finally:
+            await db.close()
+
+    result = await retry_with_backoff(do_update)
 
     # Try to auto-link if we have a topic (after db is closed)
-    if span and span['topic_id']:
+    if result and span and span['topic_id']:
         try:
-            links = auto_link_topic(span['topic_id'], span['session'], min_similarity=0.8)
+            links = await auto_link_topic(span['topic_id'], span['session'], min_similarity=0.8)
             if links:
                 logger.info(f"Auto-linked topic {span['topic_id']} to {len(links)} related topics")
         except Exception as e:
             logger.debug(f"Auto-link check: {e}")
 
-    return True
+    return result
 
 
-def get_open_span(session: str) -> Optional[dict]:
+async def get_open_span(session: str) -> Optional[dict]:
     """Get the current open span for a session."""
-    db = get_db()
-    cursor = db.execute("""
-        SELECT * FROM spans
-        WHERE session = ? AND end_line IS NULL
-        ORDER BY depth DESC, id DESC
-        LIMIT 1
-    """, (session,))
-    row = cursor.fetchone()
-    db.close()
-    return dict(row) if row else None
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT * FROM spans
+                WHERE session = ? AND end_line IS NULL
+                ORDER BY depth DESC, id DESC
+                LIMIT 1
+            """, (session,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
 # =============================================================================
 # Semantic Topic Shift Detection
 # =============================================================================
 
-def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
+async def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
     """Check how similar a message is to the current span's topic.
 
     Args:
@@ -2248,21 +2407,26 @@ def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
     Returns:
         Similarity score (0-1), or None if span has no embedding
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get span embedding
+            cursor = await db.execute(
+                "SELECT embedding FROM span_embeddings WHERE span_id = ?",
+                (span_id,)
+            )
+            row = await cursor.fetchone()
+            return row
+        finally:
+            await db.close()
 
-    # Get span embedding
-    cursor = db.execute(
-        "SELECT embedding FROM span_embeddings WHERE span_id = ?",
-        (span_id,)
-    )
-    row = cursor.fetchone()
-    db.close()
+    row = await retry_with_backoff(do_query)
 
     if not row:
         return None
 
     span_embedding = deserialize_embedding(row['embedding'])
-    message_embedding = get_embedding(message[:1000])  # Limit message length
+    message_embedding = await get_embedding_async(message[:1000])  # Limit message length
 
     # Compute cosine similarity directly for accuracy
     import math
@@ -2277,7 +2441,7 @@ def check_topic_similarity(span_id: int, message: str) -> Optional[float]:
     return similarity
 
 
-def detect_semantic_topic_shift(
+async def detect_semantic_topic_shift(
     span_id: int,
     message: str,
     threshold: float = None,  # Uses config.topic_shift_threshold if None
@@ -2305,7 +2469,7 @@ def detect_semantic_topic_shift(
         from config import get_config
         threshold = get_config().topic_shift_threshold
 
-    similarity = check_topic_similarity(span_id, message)
+    similarity = await check_topic_similarity(span_id, message)
 
     if similarity is None:
         # No embedding yet, can't detect shift semantically
@@ -2337,7 +2501,7 @@ def detect_semantic_topic_shift(
 # Idea Operations
 # =============================================================================
 
-def store_idea(
+async def store_idea(
     content: str,
     source_file: str,
     source_line: int,
@@ -2364,83 +2528,99 @@ def store_idea(
         from config import get_config
         confidence = get_config().default_confidence
 
-    db = get_db()
-    cursor = db.cursor()
+    # Get embedding first (outside of transaction)
+    embedding = await get_embedding_async(content)
 
-    # Insert idea with message_time (OR IGNORE for idempotency)
-    cursor.execute("""
-        INSERT OR IGNORE INTO ideas (span_id, content, intent, confidence, source_file, source_line, message_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (span_id, content, intent, confidence, source_file, source_line, message_time))
-    idea_id = cursor.lastrowid
+    async def do_store():
+        db = await get_async_db()
+        try:
+            # Insert idea with message_time (OR IGNORE for idempotency)
+            cursor = await db.execute("""
+                INSERT OR IGNORE INTO ideas (span_id, content, intent, confidence, source_file, source_line, message_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (span_id, content, intent, confidence, source_file, source_line, message_time))
+            idea_id = cursor.lastrowid
 
-    # If insert was ignored (duplicate), skip embedding/FTS/entities
-    if not idea_id:
-        db.commit()
-        return None
+            # If insert was ignored (duplicate), skip embedding/FTS/entities
+            if not idea_id:
+                await db.commit()
+                return None
 
-    # Get and store embedding
-    embedding = get_embedding(content)
-    cursor.execute("""
-        INSERT INTO idea_embeddings (idea_id, embedding)
-        VALUES (?, ?)
-    """, (idea_id, serialize_embedding(embedding)))
-
-    # Update FTS
-    cursor.execute("""
-        INSERT INTO ideas_fts (rowid, content)
-        VALUES (?, ?)
-    """, (idea_id, content))
-
-    # Store entities
-    if entities:
-        for name, etype in entities:
-            # Get or create entity
-            cursor.execute("""
-                INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)
-            """, (name, etype))
-            cursor.execute("""
-                SELECT id FROM entities WHERE name = ? AND type = ?
-            """, (name, etype))
-            entity_id = cursor.fetchone()[0]
-
-            # Link to idea
-            cursor.execute("""
-                INSERT OR IGNORE INTO idea_entities (idea_id, entity_id)
+            # Store embedding
+            await db.execute("""
+                INSERT INTO idea_embeddings (idea_id, embedding)
                 VALUES (?, ?)
-            """, (idea_id, entity_id))
+            """, (idea_id, serialize_embedding(embedding)))
 
-    db.commit()
-    db.close()
-    return idea_id
+            # Update FTS
+            await db.execute("""
+                INSERT INTO ideas_fts (rowid, content)
+                VALUES (?, ?)
+            """, (idea_id, content))
+
+            # Store entities
+            if entities:
+                for name, etype in entities:
+                    # Get or create entity
+                    await db.execute("""
+                        INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)
+                    """, (name, etype))
+                    cursor = await db.execute("""
+                        SELECT id FROM entities WHERE name = ? AND type = ?
+                    """, (name, etype))
+                    entity_row = await cursor.fetchone()
+                    entity_id = entity_row[0]
+
+                    # Link to idea
+                    await db.execute("""
+                        INSERT OR IGNORE INTO idea_entities (idea_id, entity_id)
+                        VALUES (?, ?)
+                    """, (idea_id, entity_id))
+
+            await db.commit()
+            return idea_id
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_store)
 
 
-def add_relation(from_id: int, to_id: int, relation_type: str):
+async def add_relation(from_id: int, to_id: int, relation_type: str):
     """Add a relation between ideas."""
-    db = get_db()
-    db.execute("""
-        INSERT OR IGNORE INTO relations (from_id, to_id, relation_type)
-        VALUES (?, ?, ?)
-    """, (from_id, to_id, relation_type))
-    db.commit()
-    db.close()
+    async def do_add():
+        db = await get_async_db()
+        try:
+            await db.execute("""
+                INSERT OR IGNORE INTO relations (from_id, to_id, relation_type)
+                VALUES (?, ?, ?)
+            """, (from_id, to_id, relation_type))
+            await db.commit()
+        finally:
+            await db.close()
+
+    await retry_with_backoff(do_add)
 
 
-def mark_question_answered(idea_id: int):
+async def mark_question_answered(idea_id: int):
     """Mark a question idea as answered.
 
     Args:
         idea_id: ID of the question to mark
     """
-    db = get_db()
-    db.execute("""
-        UPDATE ideas SET answered = 1 WHERE id = ? AND intent = 'question'
-    """, (idea_id,))
-    db.commit()
-    db.close()
+    async def do_mark():
+        db = await get_async_db()
+        try:
+            await db.execute("""
+                UPDATE ideas SET answered = 1 WHERE id = ? AND intent = 'question'
+            """, (idea_id,))
+            await db.commit()
+        finally:
+            await db.close()
+
+    await retry_with_backoff(do_mark)
 
 
-def get_unanswered_questions(session: Optional[str] = None) -> list[dict]:
+async def get_unanswered_questions(session: Optional[str] = None) -> list[dict]:
     """Get list of unanswered questions.
 
     Args:
@@ -2449,31 +2629,34 @@ def get_unanswered_questions(session: Optional[str] = None) -> list[dict]:
     Returns:
         List of question idea dicts
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            sql = """
+                SELECT i.id, i.content, i.source_file, i.source_line, i.created_at,
+                       s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.intent = 'question' AND (i.answered IS NULL OR i.answered = 0)
+            """
+            params = []
 
-    sql = """
-        SELECT i.id, i.content, i.source_file, i.source_line, i.created_at,
-               s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.intent = 'question' AND (i.answered IS NULL OR i.answered = 0)
-    """
-    params = []
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
 
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
+            sql += " ORDER BY i.created_at DESC"
 
-    sql += " ORDER BY i.created_at DESC"
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    cursor = db.execute(sql, params)
-    results = [dict(row) for row in cursor]
-    db.close()
-
-    return results
+    return await retry_with_backoff(do_query)
 
 
-def search_with_topic_expansion(
+async def search_with_topic_expansion(
     query: str,
     limit: int = 10,
     session: str = None,
@@ -2498,9 +2681,9 @@ def search_with_topic_expansion(
     """
     # First do regular search
     if session:
-        primary_results = search_ideas(query, limit=limit, session=session)
+        primary_results = await search_ideas_async(query, limit=limit, session=session)
     else:
-        primary_results = search_ideas(query, limit=limit)
+        primary_results = await search_ideas_async(query, limit=limit)
 
     if not primary_results:
         return {
@@ -2514,15 +2697,20 @@ def search_with_topic_expansion(
     for r in primary_results:
         if r.get('span_id'):
             # Get topic for this span
-            db = get_db()
-            cursor = db.execute(
-                "SELECT topic_id FROM spans WHERE id = ?",
-                (r['span_id'],)
-            )
-            row = cursor.fetchone()
-            db.close()
-            if row and row['topic_id']:
-                topic_ids.add(row['topic_id'])
+            async def get_topic_id(span_id):
+                db = await get_async_db()
+                try:
+                    cursor = await db.execute(
+                        "SELECT topic_id FROM spans WHERE id = ?",
+                        (span_id,)
+                    )
+                    row = await cursor.fetchone()
+                    return row['topic_id'] if row else None
+                finally:
+                    await db.close()
+            tid = await retry_with_backoff(lambda: get_topic_id(r['span_id']))
+            if tid:
+                topic_ids.add(tid)
 
     if not topic_ids:
         return {
@@ -2535,7 +2723,7 @@ def search_with_topic_expansion(
     all_links = []
     linked_topic_ids = set()
     for topic_id in topic_ids:
-        links = get_topic_links(topic_id)
+        links = await get_topic_links(topic_id)
         for link in links:
             if link['other_topic_id'] not in topic_ids:
                 all_links.append(link)
@@ -2553,30 +2741,34 @@ def search_with_topic_expansion(
         }
 
     # Search within linked topics
-    db = get_db()
-    query_embedding = get_embedding(query)
+    query_embedding = await get_embedding_async(query)
 
-    # Get ideas from linked topics
-    placeholders = ','.join('?' * len(linked_topic_ids))
-    cursor = db.execute(f"""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            i.message_time,
-            s.session, s.name as topic,
-            s.topic_id,
-            e.distance
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        JOIN spans s ON s.id = i.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-          AND s.topic_id IN ({placeholders})
-        ORDER BY e.distance
-        LIMIT ?
-    """, [serialize_embedding(query_embedding), limit * 2] + list(linked_topic_ids) + [limit])
+    async def do_linked_search():
+        db = await get_async_db()
+        try:
+            # Get ideas from linked topics
+            placeholders = ','.join('?' * len(linked_topic_ids))
+            cursor = await db.execute(f"""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    i.message_time,
+                    s.session, s.name as topic,
+                    s.topic_id,
+                    e.distance
+                FROM idea_embeddings e
+                JOIN ideas i ON i.id = e.idea_id
+                JOIN spans s ON s.id = i.span_id
+                WHERE e.embedding MATCH ? AND k = ?
+                  AND s.topic_id IN ({placeholders})
+                ORDER BY e.distance
+                LIMIT ?
+            """, [serialize_embedding(query_embedding), limit * 2] + list(linked_topic_ids) + [limit])
+            return [dict(row) for row in await cursor.fetchall()]
+        finally:
+            await db.close()
 
-    linked_results_raw = [dict(row) for row in cursor]
-    db.close()
+    linked_results_raw = await retry_with_backoff(do_linked_search)
 
     # Group by session
     linked_results = {}
@@ -2593,7 +2785,7 @@ def search_with_topic_expansion(
     }
 
 
-def expand_with_relations(idea_ids: list[int]) -> list[int]:
+async def expand_with_relations(idea_ids: list[int]) -> list[int]:
     """Expand a set of idea IDs by following relations.
 
     Args:
@@ -2605,31 +2797,36 @@ def expand_with_relations(idea_ids: list[int]) -> list[int]:
     if not idea_ids:
         return []
 
-    db = get_db()
-    expanded = set(idea_ids)
+    async def do_expand():
+        db = await get_async_db()
+        try:
+            expanded = set(idea_ids)
 
-    # Follow relations in both directions
-    placeholders = ','.join('?' * len(idea_ids))
+            # Follow relations in both directions
+            placeholders = ','.join('?' * len(idea_ids))
 
-    # Ideas that the input ideas relate to
-    cursor = db.execute(f"""
-        SELECT to_id FROM relations WHERE from_id IN ({placeholders})
-    """, idea_ids)
-    for row in cursor:
-        expanded.add(row['to_id'])
+            # Ideas that the input ideas relate to
+            cursor = await db.execute(f"""
+                SELECT to_id FROM relations WHERE from_id IN ({placeholders})
+            """, idea_ids)
+            for row in await cursor.fetchall():
+                expanded.add(row['to_id'])
 
-    # Ideas that relate to the input ideas
-    cursor = db.execute(f"""
-        SELECT from_id FROM relations WHERE to_id IN ({placeholders})
-    """, idea_ids)
-    for row in cursor:
-        expanded.add(row['from_id'])
+            # Ideas that relate to the input ideas
+            cursor = await db.execute(f"""
+                SELECT from_id FROM relations WHERE to_id IN ({placeholders})
+            """, idea_ids)
+            for row in await cursor.fetchall():
+                expanded.add(row['from_id'])
 
-    db.close()
-    return list(expanded)
+            return list(expanded)
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_expand)
 
 
-def get_idea_context(idea_id: int) -> dict:
+async def get_idea_context(idea_id: int) -> dict:
     """Get context for an idea including its span.
 
     Args:
@@ -2638,26 +2835,28 @@ def get_idea_context(idea_id: int) -> dict:
     Returns:
         Dict with idea and span context
     """
-    db = get_db()
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.id as span_id, s.name as span_name, s.summary as span_summary,
-            s.session
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.id = ?
-    """, (idea_id,))
-    row = cursor.fetchone()
-    db.close()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    s.id as span_id, s.name as span_name, s.summary as span_summary,
+                    s.session
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.id = ?
+            """, (idea_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else {}
+        finally:
+            await db.close()
 
-    if row:
-        return dict(row)
-    return {}
+    return await retry_with_backoff(do_query)
 
 
-def get_idea_with_relations(idea_id: int) -> dict:
+async def get_idea_with_relations(idea_id: int) -> dict:
     """Get an idea with all its relations.
 
     Args:
@@ -2666,66 +2865,69 @@ def get_idea_with_relations(idea_id: int) -> dict:
     Returns:
         Dict with idea content and lists of related ideas by type
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get the idea itself
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.id = ?
+            """, (idea_id,))
+            row = await cursor.fetchone()
 
-    # Get the idea itself
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.id = ?
-    """, (idea_id,))
-    row = cursor.fetchone()
+            if not row:
+                return {}
 
-    if not row:
-        db.close()
-        return {}
+            result = dict(row)
+            result["relations"] = {}
 
-    result = dict(row)
-    result["relations"] = {}
+            # Get outgoing relations (this idea -> others)
+            cursor = await db.execute("""
+                SELECT r.relation_type, r.to_id, i.content
+                FROM relations r
+                JOIN ideas i ON i.id = r.to_id
+                WHERE r.from_id = ?
+            """, (idea_id,))
+            for rel_row in await cursor.fetchall():
+                rel_type = rel_row["relation_type"]
+                if rel_type not in result["relations"]:
+                    result["relations"][rel_type] = []
+                result["relations"][rel_type].append({
+                    "id": rel_row["to_id"],
+                    "content": rel_row["content"],
+                    "direction": "outgoing"
+                })
 
-    # Get outgoing relations (this idea -> others)
-    cursor = db.execute("""
-        SELECT r.relation_type, r.to_id, i.content
-        FROM relations r
-        JOIN ideas i ON i.id = r.to_id
-        WHERE r.from_id = ?
-    """, (idea_id,))
-    for rel_row in cursor:
-        rel_type = rel_row["relation_type"]
-        if rel_type not in result["relations"]:
-            result["relations"][rel_type] = []
-        result["relations"][rel_type].append({
-            "id": rel_row["to_id"],
-            "content": rel_row["content"],
-            "direction": "outgoing"
-        })
+            # Get incoming relations (others -> this idea)
+            cursor = await db.execute("""
+                SELECT r.relation_type, r.from_id, i.content
+                FROM relations r
+                JOIN ideas i ON i.id = r.from_id
+                WHERE r.to_id = ?
+            """, (idea_id,))
+            for rel_row in await cursor.fetchall():
+                rel_type = rel_row["relation_type"]
+                if rel_type not in result["relations"]:
+                    result["relations"][rel_type] = []
+                result["relations"][rel_type].append({
+                    "id": rel_row["from_id"],
+                    "content": rel_row["content"],
+                    "direction": "incoming"
+                })
 
-    # Get incoming relations (others -> this idea)
-    cursor = db.execute("""
-        SELECT r.relation_type, r.from_id, i.content
-        FROM relations r
-        JOIN ideas i ON i.id = r.from_id
-        WHERE r.to_id = ?
-    """, (idea_id,))
-    for rel_row in cursor:
-        rel_type = rel_row["relation_type"]
-        if rel_type not in result["relations"]:
-            result["relations"][rel_type] = []
-        result["relations"][rel_type].append({
-            "id": rel_row["from_id"],
-            "content": rel_row["content"],
-            "direction": "incoming"
-        })
+            return result
+        finally:
+            await db.close()
 
-    db.close()
-    return result
+    return await retry_with_backoff(do_query)
 
 
-def trace_idea(
+async def trace_idea(
     idea_id: int,
     direction: str = "both",
     hops: int = 1,
@@ -2744,99 +2946,102 @@ def trace_idea(
     """
     hops = min(max(hops, 1), 3)  # Clamp to 1-3
 
-    db = get_db()
+    async def do_trace():
+        db = await get_async_db()
+        try:
+            # Get starting idea
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.id = ?
+            """, (idea_id,))
+            row = await cursor.fetchone()
 
-    # Get starting idea
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.id = ?
-    """, (idea_id,))
-    row = cursor.fetchone()
+            if not row:
+                return {"error": f"Idea {idea_id} not found"}
 
-    if not row:
-        db.close()
-        return {"error": f"Idea {idea_id} not found"}
+            result = {
+                "idea": dict(row),
+                "hops": {},
+                "direction": direction,
+            }
 
-    result = {
-        "idea": dict(row),
-        "hops": {},
-        "direction": direction,
-    }
+            visited = {idea_id}
+            current_ids = [idea_id]
 
-    visited = {idea_id}
-    current_ids = [idea_id]
+            for hop in range(1, hops + 1):
+                hop_results = []
+                next_ids = []
 
-    for hop in range(1, hops + 1):
-        hop_results = []
-        next_ids = []
+                for current_id in current_ids:
+                    # Get relations based on direction
+                    if direction in ("forward", "both"):
+                        cursor = await db.execute("""
+                            SELECT r.relation_type, r.to_id as related_id, i.content, i.intent,
+                                   s.session, s.name as topic
+                            FROM relations r
+                            JOIN ideas i ON i.id = r.to_id
+                            LEFT JOIN spans s ON s.id = i.span_id
+                            WHERE r.from_id = ?
+                                AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                        """, (current_id,))
+                        async for rel in cursor:
+                            if rel["related_id"] not in visited:
+                                hop_results.append({
+                                    "id": rel["related_id"],
+                                    "content": rel["content"],
+                                    "intent": rel["intent"],
+                                    "topic": rel["topic"],
+                                    "relation": rel["relation_type"],
+                                    "direction": "forward",
+                                    "from_id": current_id,
+                                })
+                                next_ids.append(rel["related_id"])
+                                visited.add(rel["related_id"])
 
-        for current_id in current_ids:
-            # Get relations based on direction
-            if direction in ("forward", "both"):
-                cursor = db.execute("""
-                    SELECT r.relation_type, r.to_id as related_id, i.content, i.intent,
-                           s.session, s.name as topic
-                    FROM relations r
-                    JOIN ideas i ON i.id = r.to_id
-                    LEFT JOIN spans s ON s.id = i.span_id
-                    WHERE r.from_id = ?
-                        AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-                """, (current_id,))
-                for rel in cursor:
-                    if rel["related_id"] not in visited:
-                        hop_results.append({
-                            "id": rel["related_id"],
-                            "content": rel["content"],
-                            "intent": rel["intent"],
-                            "topic": rel["topic"],
-                            "relation": rel["relation_type"],
-                            "direction": "forward",
-                            "from_id": current_id,
-                        })
-                        next_ids.append(rel["related_id"])
-                        visited.add(rel["related_id"])
+                    if direction in ("backward", "both"):
+                        cursor = await db.execute("""
+                            SELECT r.relation_type, r.from_id as related_id, i.content, i.intent,
+                                   s.session, s.name as topic
+                            FROM relations r
+                            JOIN ideas i ON i.id = r.from_id
+                            LEFT JOIN spans s ON s.id = i.span_id
+                            WHERE r.to_id = ?
+                                AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                        """, (current_id,))
+                        async for rel in cursor:
+                            if rel["related_id"] not in visited:
+                                hop_results.append({
+                                    "id": rel["related_id"],
+                                    "content": rel["content"],
+                                    "intent": rel["intent"],
+                                    "topic": rel["topic"],
+                                    "relation": rel["relation_type"],
+                                    "direction": "backward",
+                                    "from_id": current_id,
+                                })
+                                next_ids.append(rel["related_id"])
+                                visited.add(rel["related_id"])
 
-            if direction in ("backward", "both"):
-                cursor = db.execute("""
-                    SELECT r.relation_type, r.from_id as related_id, i.content, i.intent,
-                           s.session, s.name as topic
-                    FROM relations r
-                    JOIN ideas i ON i.id = r.from_id
-                    LEFT JOIN spans s ON s.id = i.span_id
-                    WHERE r.to_id = ?
-                        AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-                """, (current_id,))
-                for rel in cursor:
-                    if rel["related_id"] not in visited:
-                        hop_results.append({
-                            "id": rel["related_id"],
-                            "content": rel["content"],
-                            "intent": rel["intent"],
-                            "topic": rel["topic"],
-                            "relation": rel["relation_type"],
-                            "direction": "backward",
-                            "from_id": current_id,
-                        })
-                        next_ids.append(rel["related_id"])
-                        visited.add(rel["related_id"])
+                if hop_results:
+                    result["hops"][str(hop)] = hop_results[:limit]
+                current_ids = next_ids[:limit]
 
-        if hop_results:
-            result["hops"][str(hop)] = hop_results[:limit]
-        current_ids = next_ids[:limit]
+                if not current_ids:
+                    break
 
-        if not current_ids:
-            break
+            return result
+        finally:
+            await db.close()
 
-    db.close()
-    return result
+    return await retry_with_backoff(do_trace)
 
 
-def find_path(
+async def find_path(
     from_id: int,
     to_id: int,
     max_hops: int = 4
@@ -2855,69 +3060,72 @@ def find_path(
     """
     max_hops = min(max(max_hops, 1), 6)  # Clamp to 1-6
 
-    db = get_db()
+    async def do_find():
+        db = await get_async_db()
+        try:
+            # Verify both ideas exist
+            cursor = await db.execute("SELECT id FROM ideas WHERE id IN (?, ?)", (from_id, to_id))
+            rows = await cursor.fetchall()
+            found = [row["id"] for row in rows]
+            if from_id not in found:
+                return {"error": f"Idea {from_id} not found"}
+            if to_id not in found:
+                return {"error": f"Idea {to_id} not found"}
 
-    # Verify both ideas exist
-    cursor = db.execute("SELECT id FROM ideas WHERE id IN (?, ?)", (from_id, to_id))
-    found = [row["id"] for row in cursor]
-    if from_id not in found:
-        db.close()
-        return {"error": f"Idea {from_id} not found"}
-    if to_id not in found:
-        db.close()
-        return {"error": f"Idea {to_id} not found"}
+            # BFS
+            queue = [(from_id, [from_id])]
+            visited = {from_id}
 
-    # BFS
-    queue = [(from_id, [from_id])]
-    visited = {from_id}
+            while queue:
+                current_id, path = queue.pop(0)
 
-    while queue:
-        current_id, path = queue.pop(0)
+                if len(path) > max_hops + 1:
+                    break
 
-        if len(path) > max_hops + 1:
-            break
+                if current_id == to_id:
+                    # Found path - get idea details
+                    placeholders = ",".join("?" * len(path))
+                    cursor = await db.execute(f"""
+                        SELECT
+                            i.id, i.content, i.intent, i.confidence,
+                            s.session, s.name as topic
+                        FROM ideas i
+                        LEFT JOIN spans s ON s.id = i.span_id
+                        WHERE i.id IN ({placeholders})
+                    """, path)
+                    rows = await cursor.fetchall()
+                    ideas_by_id = {row["id"]: dict(row) for row in rows}
 
-        if current_id == to_id:
-            # Found path - get idea details
-            placeholders = ",".join("?" * len(path))
-            cursor = db.execute(f"""
-                SELECT
-                    i.id, i.content, i.intent, i.confidence,
-                    s.session, s.name as topic
-                FROM ideas i
-                LEFT JOIN spans s ON s.id = i.span_id
-                WHERE i.id IN ({placeholders})
-            """, path)
-            ideas_by_id = {row["id"]: dict(row) for row in cursor}
+                    return {
+                        "path": [ideas_by_id.get(id, {"id": id}) for id in path],
+                        "hops": len(path) - 1,
+                    }
 
-            db.close()
+                # Get neighbors (both directions)
+                cursor = await db.execute("""
+                    SELECT to_id as neighbor, relation_type FROM relations WHERE from_id = ?
+                    UNION
+                    SELECT from_id as neighbor, relation_type FROM relations WHERE to_id = ?
+                """, (current_id, current_id))
+
+                async for row in cursor:
+                    neighbor = row["neighbor"]
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append((neighbor, path + [neighbor]))
+
             return {
-                "path": [ideas_by_id.get(id, {"id": id}) for id in path],
-                "hops": len(path) - 1,
+                "error": f"No path found between {from_id} and {to_id} within {max_hops} hops",
+                "from_id": from_id,
+                "to_id": to_id,
             }
+        finally:
+            await db.close()
 
-        # Get neighbors (both directions)
-        cursor = db.execute("""
-            SELECT to_id as neighbor, relation_type FROM relations WHERE from_id = ?
-            UNION
-            SELECT from_id as neighbor, relation_type FROM relations WHERE to_id = ?
-        """, (current_id, current_id))
-
-        for row in cursor:
-            neighbor = row["neighbor"]
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append((neighbor, path + [neighbor]))
-
-    db.close()
-    return {
-        "error": f"No path found between {from_id} and {to_id} within {max_hops} hops",
-        "from_id": from_id,
-        "to_id": to_id,
-    }
+    return await retry_with_backoff(do_find)
 
 
-def search_ideas_temporal(
+async def search_ideas_temporal(
     query: str,
     limit: int = 10,
     since: Optional[str] = None,
@@ -2944,46 +3152,51 @@ def search_ideas_temporal(
     if relative:
         since, until = resolve_temporal_qualifier(relative)
 
-    db = get_db()
-    query_embedding = get_embedding(query)
+    query_embedding = await get_embedding_async(query)
 
-    # Build query with temporal filter - use message_time with fallback to created_at
-    forgotten_filter = "" if include_forgotten else "AND (i.forgotten = FALSE OR i.forgotten IS NULL)"
-    sql = f"""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            i.message_time,
-            s.session, s.name as topic,
-            e.distance
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-            {forgotten_filter}
-    """
-    params = [serialize_embedding(query_embedding), limit * 2]
+    async def do_search():
+        db = await get_async_db()
+        try:
+            # Build query with temporal filter - use message_time with fallback to created_at
+            forgotten_filter = "" if include_forgotten else "AND (i.forgotten = FALSE OR i.forgotten IS NULL)"
+            sql = f"""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    i.message_time,
+                    s.session, s.name as topic,
+                    e.distance
+                FROM idea_embeddings e
+                JOIN ideas i ON i.id = e.idea_id
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE e.embedding MATCH ? AND k = ?
+                    {forgotten_filter}
+            """
+            params = [serialize_embedding(query_embedding), limit * 2]
 
-    if since:
-        sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
-        params.append(since)
-    if until:
-        sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
-        params.append(until)
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
+            if since:
+                sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
+                params.append(since)
+            if until:
+                sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
+                params.append(until)
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
 
-    sql += " ORDER BY e.distance LIMIT ?"
-    params.append(limit)
+            sql += " ORDER BY e.distance LIMIT ?"
+            params.append(limit)
 
-    cursor = db.execute(sql, params)
-    results = [dict(row) for row in cursor]
-    db.close()
-    return results
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_search)
 
 
-def search_messages(
+async def search_messages(
     query: str,
     limit: int = 20,
     session: Optional[str] = None,
@@ -3000,42 +3213,44 @@ def search_messages(
     Returns:
         List of matching message dicts
     """
-    db = get_db()
+    async def do_search():
+        db = await get_async_db()
+        try:
+            # Build query with optional filters
+            sql = """
+                SELECT m.id, m.session, m.line_num, m.role, m.content,
+                       m.timestamp, m.source_file,
+                       highlight(messages_fts, 0, '[', ']') as highlight
+                FROM messages_fts f
+                JOIN messages m ON m.id = f.rowid
+                WHERE messages_fts MATCH ?
+            """
+            params = [query]
 
-    # Build query with optional filters
-    sql = """
-        SELECT m.id, m.session, m.line_num, m.role, m.content,
-               m.timestamp, m.source_file,
-               highlight(messages_fts, 0, '[', ']') as highlight
-        FROM messages_fts f
-        JOIN messages m ON m.id = f.rowid
-        WHERE messages_fts MATCH ?
-    """
-    params = [query]
+            if session:
+                sql += " AND m.session = ?"
+                params.append(session)
+            if role:
+                sql += " AND m.role = ?"
+                params.append(role)
 
-    if session:
-        sql += " AND m.session = ?"
-        params.append(session)
-    if role:
-        sql += " AND m.role = ?"
-        params.append(role)
+            sql += " ORDER BY rank LIMIT ?"
+            params.append(limit)
 
-    sql += " ORDER BY rank LIMIT ?"
-    params.append(limit)
+            try:
+                cursor = await db.execute(sql, params)
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+            except Exception as e:
+                # FTS table might not exist yet
+                return []
+        finally:
+            await db.close()
 
-    try:
-        cursor = db.execute(sql, params)
-        results = [dict(row) for row in cursor]
-    except Exception as e:
-        # FTS table might not exist yet
-        db.close()
-        return []
-
-    db.close()
-    return results
+    return await retry_with_backoff(do_search)
 
 
-def get_message_context(
+async def get_message_context(
     message_id: int,
     before: int = 3,
     after: int = 3
@@ -3050,45 +3265,49 @@ def get_message_context(
     Returns:
         Dict with target message and context messages
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            # Get the target message
+            cursor = await db.execute("""
+                SELECT id, session, line_num, role, content, timestamp, source_file
+                FROM messages WHERE id = ?
+            """, (message_id,))
+            target = await cursor.fetchone()
+            if not target:
+                return {"error": f"Message {message_id} not found"}
 
-    # Get the target message
-    cursor = db.execute("""
-        SELECT id, session, line_num, role, content, timestamp, source_file
-        FROM messages WHERE id = ?
-    """, (message_id,))
-    target = cursor.fetchone()
-    if not target:
-        db.close()
-        return {"error": f"Message {message_id} not found"}
+            target = dict(target)
 
-    target = dict(target)
+            # Get context messages from same source file
+            cursor = await db.execute("""
+                SELECT id, session, line_num, role, content, timestamp
+                FROM messages
+                WHERE source_file = ? AND line_num >= ? AND line_num <= ?
+                ORDER BY line_num
+            """, (
+                target["source_file"],
+                target["line_num"] - before * 10,  # Approximate - messages aren't every line
+                target["line_num"] + after * 10
+            ))
 
-    # Get context messages from same source file
-    cursor = db.execute("""
-        SELECT id, session, line_num, role, content, timestamp
-        FROM messages
-        WHERE source_file = ? AND line_num >= ? AND line_num <= ?
-        ORDER BY line_num
-    """, (
-        target["source_file"],
-        target["line_num"] - before * 10,  # Approximate - messages aren't every line
-        target["line_num"] + after * 10
-    ))
+            rows = await cursor.fetchall()
+            context_msgs = [dict(row) for row in rows]
 
-    context_msgs = [dict(row) for row in cursor]
-    db.close()
+            # Find target index and extract surrounding
+            target_idx = next((i for i, m in enumerate(context_msgs) if m["id"] == message_id), 0)
+            start = max(0, target_idx - before)
+            end = min(len(context_msgs), target_idx + after + 1)
 
-    # Find target index and extract surrounding
-    target_idx = next((i for i, m in enumerate(context_msgs) if m["id"] == message_id), 0)
-    start = max(0, target_idx - before)
-    end = min(len(context_msgs), target_idx + after + 1)
+            return {
+                "target": target,
+                "before": context_msgs[start:target_idx],
+                "after": context_msgs[target_idx + 1:end]
+            }
+        finally:
+            await db.close()
 
-    return {
-        "target": target,
-        "before": context_msgs[start:target_idx],
-        "after": context_msgs[target_idx + 1:end]
-    }
+    return await retry_with_backoff(do_query)
 
 
 # Synonym mappings for query expansion
@@ -3577,126 +3796,149 @@ Respond with ONLY a JSON object like:
 # Index State
 # =============================================================================
 
-def get_byte_position(file_path: str) -> int:
+async def get_byte_position(file_path: str) -> int:
     """Get the last indexed byte position for a file."""
-    db = get_db()
-    cursor = db.execute(
-        "SELECT byte_position FROM index_state WHERE file_path = ?",
-        (file_path,)
-    )
-    row = cursor.fetchone()
-    db.close()
-    return row['byte_position'] if row else 0
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "SELECT byte_position FROM index_state WHERE file_path = ?",
+                (file_path,)
+            )
+            row = await cursor.fetchone()
+            return row['byte_position'] if row else 0
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
-def update_byte_position(file_path: str, byte_position: int):
+async def update_byte_position(file_path: str, byte_position: int):
     """Update the byte position for a file."""
-    db = get_db()
-    db.execute("""
-        INSERT INTO index_state (file_path, byte_position, last_indexed)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(file_path) DO UPDATE SET
-            byte_position = excluded.byte_position,
-            last_indexed = excluded.last_indexed
-    """, (file_path, byte_position))
-    db.commit()
-    db.close()
+    async def do_update():
+        db = await get_async_db()
+        try:
+            await db.execute("""
+                INSERT INTO index_state (file_path, byte_position, last_indexed)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    byte_position = excluded.byte_position,
+                    last_indexed = excluded.last_indexed
+            """, (file_path, byte_position))
+            await db.commit()
+        finally:
+            await db.close()
+
+    await retry_with_backoff(do_update)
 
 
 # =============================================================================
 # Utilities
 # =============================================================================
 
-def get_stats() -> dict:
+async def get_stats() -> dict:
     """Get database statistics."""
-    db = get_db()
-    stats = {}
+    async def do_query():
+        db = await get_async_db()
+        try:
+            stats = {}
 
-    cursor = db.execute("SELECT COUNT(*) as count FROM ideas")
-    stats["total_ideas"] = cursor.fetchone()['count']
+            cursor = await db.execute("SELECT COUNT(*) as count FROM ideas")
+            row = await cursor.fetchone()
+            stats["total_ideas"] = row['count']
 
-    cursor = db.execute("SELECT COUNT(*) as count FROM spans")
-    stats["total_spans"] = cursor.fetchone()['count']
+            cursor = await db.execute("SELECT COUNT(*) as count FROM spans")
+            row = await cursor.fetchone()
+            stats["total_spans"] = row['count']
 
-    cursor = db.execute("SELECT COUNT(*) as count FROM entities")
-    stats["total_entities"] = cursor.fetchone()['count']
+            cursor = await db.execute("SELECT COUNT(*) as count FROM entities")
+            row = await cursor.fetchone()
+            stats["total_entities"] = row['count']
 
-    cursor = db.execute("SELECT COUNT(*) as count FROM relations")
-    stats["total_relations"] = cursor.fetchone()['count']
+            cursor = await db.execute("SELECT COUNT(*) as count FROM relations")
+            row = await cursor.fetchone()
+            stats["total_relations"] = row['count']
 
-    cursor = db.execute("SELECT COUNT(DISTINCT session) as count FROM spans")
-    stats["sessions_indexed"] = cursor.fetchone()['count']
+            cursor = await db.execute("SELECT COUNT(DISTINCT session) as count FROM spans")
+            row = await cursor.fetchone()
+            stats["sessions_indexed"] = row['count']
 
-    cursor = db.execute("""
-        SELECT intent, COUNT(*) as count
-        FROM ideas
-        WHERE intent IS NOT NULL
-        GROUP BY intent
-    """)
-    stats["by_intent"] = {row['intent']: row['count'] for row in cursor}
+            cursor = await db.execute("""
+                SELECT intent, COUNT(*) as count
+                FROM ideas
+                WHERE intent IS NOT NULL
+                GROUP BY intent
+            """)
+            stats["by_intent"] = {row['intent']: row['count'] for row in await cursor.fetchall()}
 
-    cursor = db.execute("""
-        SELECT type, COUNT(*) as count
-        FROM entities
-        GROUP BY type
-    """)
-    stats["entities_by_type"] = {row['type']: row['count'] for row in cursor}
+            cursor = await db.execute("""
+                SELECT type, COUNT(*) as count
+                FROM entities
+                GROUP BY type
+            """)
+            stats["entities_by_type"] = {row['type']: row['count'] for row in await cursor.fetchall()}
 
-    # Count unanswered questions
-    cursor = db.execute("""
-        SELECT COUNT(*) as count FROM ideas
-        WHERE intent = 'question' AND (answered IS NULL OR answered = 0)
-    """)
-    stats["unanswered_questions"] = cursor.fetchone()['count']
+            # Count unanswered questions
+            cursor = await db.execute("""
+                SELECT COUNT(*) as count FROM ideas
+                WHERE intent = 'question' AND (answered IS NULL OR answered = 0)
+            """)
+            row = await cursor.fetchone()
+            stats["unanswered_questions"] = row['count']
 
-    # Access tracking statistics
-    cursor = db.execute("""
-        SELECT
-            SUM(COALESCE(access_count, 0)) as total_accesses,
-            AVG(COALESCE(access_count, 0)) as avg_accesses,
-            COUNT(CASE WHEN COALESCE(access_count, 0) = 0 THEN 1 END) as never_accessed,
-            COUNT(CASE WHEN COALESCE(access_count, 0) > 0 THEN 1 END) as accessed_at_least_once
-        FROM ideas
-    """)
-    row = cursor.fetchone()
-    stats["access_tracking"] = {
-        "total_accesses": row['total_accesses'] or 0,
-        "avg_accesses_per_idea": round(row['avg_accesses'] or 0, 2),
-        "never_accessed": row['never_accessed'] or 0,
-        "accessed_at_least_once": row['accessed_at_least_once'] or 0
-    }
+            # Access tracking statistics
+            cursor = await db.execute("""
+                SELECT
+                    SUM(COALESCE(access_count, 0)) as total_accesses,
+                    AVG(COALESCE(access_count, 0)) as avg_accesses,
+                    COUNT(CASE WHEN COALESCE(access_count, 0) = 0 THEN 1 END) as never_accessed,
+                    COUNT(CASE WHEN COALESCE(access_count, 0) > 0 THEN 1 END) as accessed_at_least_once
+                FROM ideas
+            """)
+            row = await cursor.fetchone()
+            stats["access_tracking"] = {
+                "total_accesses": row['total_accesses'] or 0,
+                "avg_accesses_per_idea": round(row['avg_accesses'] or 0, 2),
+                "never_accessed": row['never_accessed'] or 0,
+                "accessed_at_least_once": row['accessed_at_least_once'] or 0
+            }
 
-    # Most accessed ideas (top 5)
-    cursor = db.execute("""
-        SELECT id, content, access_count, last_accessed
-        FROM ideas
-        WHERE access_count > 0
-        ORDER BY access_count DESC
-        LIMIT 5
-    """)
-    stats["most_accessed_ideas"] = [
-        {"id": row['id'], "content": row['content'][:100], "access_count": row['access_count']}
-        for row in cursor
-    ]
+            # Most accessed ideas (top 5)
+            cursor = await db.execute("""
+                SELECT id, content, access_count, last_accessed
+                FROM ideas
+                WHERE access_count > 0
+                ORDER BY access_count DESC
+                LIMIT 5
+            """)
+            stats["most_accessed_ideas"] = [
+                {"id": row['id'], "content": row['content'][:100], "access_count": row['access_count']}
+                for row in await cursor.fetchall()
+            ]
 
-    # Message storage stats
-    try:
-        cursor = db.execute("SELECT COUNT(*) as count FROM messages")
-        stats["total_messages"] = cursor.fetchone()['count']
+            # Message storage stats
+            try:
+                cursor = await db.execute("SELECT COUNT(*) as count FROM messages")
+                row = await cursor.fetchone()
+                stats["total_messages"] = row['count']
 
-        cursor = db.execute("""
-            SELECT role, COUNT(*) as count FROM messages GROUP BY role
-        """)
-        stats["messages_by_role"] = {row['role']: row['count'] for row in cursor}
-    except Exception:
-        # Table might not exist yet
-        stats["total_messages"] = 0
-        stats["messages_by_role"] = {}
+                cursor = await db.execute("""
+                    SELECT role, COUNT(*) as count FROM messages GROUP BY role
+                """)
+                stats["messages_by_role"] = {row['role']: row['count'] for row in await cursor.fetchall()}
+            except Exception:
+                # Table might not exist yet
+                stats["total_messages"] = 0
+                stats["messages_by_role"] = {}
 
-    db.close()
+            return stats
+        finally:
+            await db.close()
 
-    # Add cache stats
-    stats["embedding_cache"] = get_embedding_cache_stats()
+    stats = await retry_with_backoff(do_query)
+
+    # Add cache stats (sync function)
+    stats["embedding_cache"] = await get_embedding_cache_stats()
 
     # Add database file size
     if DB_PATH.exists():
@@ -3710,7 +3952,7 @@ def get_stats() -> dict:
 # Working Memory Operations
 # =============================================================================
 
-def activate_idea(session: str, idea_id: int, activation: float = 1.0) -> None:
+async def activate_idea(session: str, idea_id: int, activation: float = 1.0) -> None:
     """Add or update an idea in working memory.
 
     Args:
@@ -3720,22 +3962,25 @@ def activate_idea(session: str, idea_id: int, activation: float = 1.0) -> None:
     """
     from datetime import datetime
 
-    db = get_db()
-    now = datetime.utcnow().isoformat()
+    async def do_activate():
+        db = await get_async_db()
+        try:
+            now = datetime.utcnow().isoformat()
+            await db.execute("""
+                INSERT INTO working_memory (session, idea_id, activation, last_access)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session, idea_id) DO UPDATE SET
+                    activation = MAX(activation, excluded.activation),
+                    last_access = excluded.last_access
+            """, (session, idea_id, activation, now))
+            await db.commit()
+        finally:
+            await db.close()
 
-    # Upsert into working_memory
-    db.execute("""
-        INSERT INTO working_memory (session, idea_id, activation, last_access)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(session, idea_id) DO UPDATE SET
-            activation = MAX(activation, excluded.activation),
-            last_access = excluded.last_access
-    """, (session, idea_id, activation, now))
-    db.commit()
-    db.close()
+    await retry_with_backoff(do_activate)
 
 
-def get_active_ideas(session: str, min_activation: float = 0.1, limit: int = 20) -> list[dict]:
+async def get_active_ideas(session: str, min_activation: float = 0.1, limit: int = 20) -> list[dict]:
     """Get currently active ideas in working memory.
 
     Args:
@@ -3746,27 +3991,31 @@ def get_active_ideas(session: str, min_activation: float = 0.1, limit: int = 20)
     Returns:
         List of idea dicts with activation levels
     """
-    db = get_db()
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic,
-            wm.activation, wm.last_access
-        FROM working_memory wm
-        JOIN ideas i ON i.id = wm.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE wm.session = ? AND wm.activation >= ?
-        ORDER BY wm.activation DESC
-        LIMIT ?
-    """, (session, min_activation, limit))
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    s.session, s.name as topic,
+                    wm.activation, wm.last_access
+                FROM working_memory wm
+                JOIN ideas i ON i.id = wm.idea_id
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE wm.session = ? AND wm.activation >= ?
+                ORDER BY wm.activation DESC
+                LIMIT ?
+            """, (session, min_activation, limit))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    results = [dict(row) for row in cursor]
-    db.close()
-    return results
+    return await retry_with_backoff(do_query)
 
 
-def decay_working_memory(session: str, decay_rate: float = 0.9) -> int:
+async def decay_working_memory(session: str, decay_rate: float = 0.9) -> int:
     """Apply time decay to working memory activations.
 
     Call this at session start or periodically to fade old activations.
@@ -3778,29 +4027,32 @@ def decay_working_memory(session: str, decay_rate: float = 0.9) -> int:
     Returns:
         Number of records updated
     """
-    db = get_db()
+    async def do_decay():
+        db = await get_async_db()
+        try:
+            # Apply decay
+            cursor = await db.execute("""
+                UPDATE working_memory
+                SET activation = activation * ?
+                WHERE session = ?
+            """, (decay_rate, session))
+            updated = cursor.rowcount
 
-    # Apply decay
-    cursor = db.execute("""
-        UPDATE working_memory
-        SET activation = activation * ?
-        WHERE session = ?
-    """, (decay_rate, session))
-    updated = cursor.rowcount
+            # Clean up very low activations
+            await db.execute("""
+                DELETE FROM working_memory
+                WHERE session = ? AND activation < 0.01
+            """, (session,))
 
-    # Clean up very low activations
-    db.execute("""
-        DELETE FROM working_memory
-        WHERE session = ? AND activation < 0.01
-    """, (session,))
+            await db.commit()
+            return updated
+        finally:
+            await db.close()
 
-    db.commit()
-    db.close()
-
-    return updated
+    return await retry_with_backoff(do_decay)
 
 
-def boost_results_by_activation(
+async def boost_results_by_activation(
     results: list[dict],
     session: str,
     boost_weight: float = 0.3
@@ -3820,19 +4072,22 @@ def boost_results_by_activation(
     if not results or boost_weight == 0:
         return results
 
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            idea_ids = [r['id'] for r in results]
+            placeholders = ','.join('?' * len(idea_ids))
+            cursor = await db.execute(f"""
+                SELECT idea_id, activation
+                FROM working_memory
+                WHERE session = ? AND idea_id IN ({placeholders})
+            """, [session] + idea_ids)
+            rows = await cursor.fetchall()
+            return {row['idea_id']: row['activation'] for row in rows}
+        finally:
+            await db.close()
 
-    # Get activations for result IDs
-    idea_ids = [r['id'] for r in results]
-    placeholders = ','.join('?' * len(idea_ids))
-    cursor = db.execute(f"""
-        SELECT idea_id, activation
-        FROM working_memory
-        WHERE session = ? AND idea_id IN ({placeholders})
-    """, [session] + idea_ids)
-
-    activations = {row['idea_id']: row['activation'] for row in cursor}
-    db.close()
+    activations = await retry_with_backoff(do_query)
 
     # Calculate blended scores
     # Original order is best similarity, so rank 0 = highest score
@@ -3855,7 +4110,7 @@ def boost_results_by_activation(
 # Soft Forgetting Operations
 # =============================================================================
 
-def forget_idea(idea_id: int) -> bool:
+async def forget_idea(idea_id: int) -> bool:
     """Mark an idea as forgotten (soft delete).
 
     Forgotten ideas are excluded from search results but not deleted.
@@ -3866,17 +4121,22 @@ def forget_idea(idea_id: int) -> bool:
     Returns:
         True if idea was found and updated
     """
-    db = get_db()
-    cursor = db.execute("""
-        UPDATE ideas SET forgotten = TRUE WHERE id = ?
-    """, (idea_id,))
-    updated = cursor.rowcount > 0
-    db.commit()
-    db.close()
-    return updated
+    async def do_forget():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                UPDATE ideas SET forgotten = TRUE WHERE id = ?
+            """, (idea_id,))
+            updated = cursor.rowcount > 0
+            await db.commit()
+            return updated
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_forget)
 
 
-def unforget_idea(idea_id: int) -> bool:
+async def unforget_idea(idea_id: int) -> bool:
     """Restore a forgotten idea.
 
     Args:
@@ -3885,17 +4145,22 @@ def unforget_idea(idea_id: int) -> bool:
     Returns:
         True if idea was found and updated
     """
-    db = get_db()
-    cursor = db.execute("""
-        UPDATE ideas SET forgotten = FALSE WHERE id = ?
-    """, (idea_id,))
-    updated = cursor.rowcount > 0
-    db.commit()
-    db.close()
-    return updated
+    async def do_unforget():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                UPDATE ideas SET forgotten = FALSE WHERE id = ?
+            """, (idea_id,))
+            updated = cursor.rowcount > 0
+            await db.commit()
+            return updated
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_unforget)
 
 
-def get_forgotten_ideas(limit: int = 50) -> list[dict]:
+async def get_forgotten_ideas(limit: int = 50) -> list[dict]:
     """List all forgotten ideas.
 
     Args:
@@ -3904,22 +4169,27 @@ def get_forgotten_ideas(limit: int = 50) -> list[dict]:
     Returns:
         List of forgotten idea dicts
     """
-    db = get_db()
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            i.access_count, i.last_accessed,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.forgotten = TRUE
-        ORDER BY i.created_at DESC
-        LIMIT ?
-    """, (limit,))
-    results = [dict(row) for row in cursor]
-    db.close()
-    return results
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    i.access_count, i.last_accessed,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.forgotten = TRUE
+                ORDER BY i.created_at DESC
+                LIMIT ?
+            """, (limit,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_query)
 
 
 def retention_score(idea: dict, now: str = None) -> float:
@@ -3982,7 +4252,7 @@ def retention_score(idea: dict, now: str = None) -> float:
     return round(score, 3)
 
 
-def get_forgettable_ideas(
+async def get_forgettable_ideas(
     threshold: float = 0.3,
     limit: int = 100,
     session: Optional[str] = None
@@ -3999,29 +4269,33 @@ def get_forgettable_ideas(
     Returns:
         List of idea dicts with retention_score field, sorted by score ascending
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            sql = """
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    i.message_time, i.access_count, i.last_accessed,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE (i.forgotten = FALSE OR i.forgotten IS NULL)
+                    AND i.intent NOT IN ('decision', 'conclusion')
+            """
+            params = []
 
-    # Get non-forgotten ideas with low importance intents
-    sql = """
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            i.message_time, i.access_count, i.last_accessed,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE (i.forgotten = FALSE OR i.forgotten IS NULL)
-            AND i.intent NOT IN ('decision', 'conclusion')
-    """
-    params = []
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
 
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    cursor = db.execute(sql, params)
-    ideas = [dict(row) for row in cursor]
-    db.close()
+    ideas = await retry_with_backoff(do_query)
 
     # Calculate retention scores
     from datetime import datetime
@@ -4040,7 +4314,7 @@ def get_forgettable_ideas(
     return scored[:limit]
 
 
-def auto_forget_ideas(
+async def auto_forget_ideas(
     threshold: float = 0.3,
     limit: int = 100,
     session: Optional[str] = None,
@@ -4059,7 +4333,7 @@ def auto_forget_ideas(
     Returns:
         Dict with candidates, count, and samples
     """
-    candidates = get_forgettable_ideas(threshold=threshold, limit=limit, session=session)
+    candidates = await get_forgettable_ideas(threshold=threshold, limit=limit, session=session)
 
     result = {
         "threshold": threshold,
@@ -4078,11 +4352,16 @@ def auto_forget_ideas(
     }
 
     if not dry_run and candidates:
-        db = get_db()
-        for idea in candidates:
-            db.execute("UPDATE ideas SET forgotten = TRUE WHERE id = ?", (idea["id"],))
-        db.commit()
-        db.close()
+        async def do_forget():
+            db = await get_async_db()
+            try:
+                for idea in candidates:
+                    await db.execute("UPDATE ideas SET forgotten = TRUE WHERE id = ?", (idea["id"],))
+                await db.commit()
+            finally:
+                await db.close()
+
+        await retry_with_backoff(do_forget)
         result["forgotten"] = len(candidates)
 
     return result
@@ -4117,7 +4396,7 @@ def should_preserve(idea: dict) -> bool:
     return False
 
 
-def get_consolidatable_ideas(
+async def get_consolidatable_ideas(
     topic_id: int,
     min_ideas: int = 5,
     max_age_days: int = 30
@@ -4139,25 +4418,31 @@ def get_consolidatable_ideas(
 
     cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
 
-    db = get_db()
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.created_at, i.message_time,
-            s.session, s.name as topic, t.id as topic_id
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        JOIN topics t ON t.id = s.topic_id
-        WHERE t.id = ?
-            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-            AND (i.consolidated_into IS NULL)
-            AND (i.is_consolidated = FALSE OR i.is_consolidated IS NULL)
-            AND i.intent NOT IN ('decision', 'conclusion')
-            AND COALESCE(i.message_time, i.created_at) < ?
-        ORDER BY COALESCE(i.message_time, i.created_at)
-    """, (topic_id, cutoff))
-    ideas = [dict(row) for row in cursor]
-    db.close()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.created_at, i.message_time,
+                    s.session, s.name as topic, t.id as topic_id
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                JOIN topics t ON t.id = s.topic_id
+                WHERE t.id = ?
+                    AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                    AND (i.consolidated_into IS NULL)
+                    AND (i.is_consolidated = FALSE OR i.is_consolidated IS NULL)
+                    AND i.intent NOT IN ('decision', 'conclusion')
+                    AND COALESCE(i.message_time, i.created_at) < ?
+                ORDER BY COALESCE(i.message_time, i.created_at)
+            """, (topic_id, cutoff))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
+
+    ideas = await retry_with_backoff(do_query)
 
     # Filter out high-confidence ideas
     ideas = [i for i in ideas if not should_preserve(i)]
@@ -4168,7 +4453,7 @@ def get_consolidatable_ideas(
     return ideas
 
 
-def consolidate_topic(
+async def consolidate_topic(
     topic_id: int,
     min_ideas: int = 5,
     max_age_days: int = 30,
@@ -4188,7 +4473,7 @@ def consolidate_topic(
     Returns:
         Dict with consolidation summary
     """
-    candidates = get_consolidatable_ideas(topic_id, min_ideas, max_age_days)
+    candidates = await get_consolidatable_ideas(topic_id, min_ideas, max_age_days)
 
     if not candidates:
         return {
@@ -4199,10 +4484,16 @@ def consolidate_topic(
         }
 
     # Get topic name
-    db = get_db()
-    cursor = db.execute("SELECT name, summary FROM topics WHERE id = ?", (topic_id,))
-    topic_row = cursor.fetchone()
-    topic_name = topic_row["name"] if topic_row else f"Topic {topic_id}"
+    async def get_topic_name():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("SELECT name, summary FROM topics WHERE id = ?", (topic_id,))
+            row = await cursor.fetchone()
+            return row["name"] if row else f"Topic {topic_id}"
+        finally:
+            await db.close()
+
+    topic_name = await retry_with_backoff(get_topic_name)
 
     result = {
         "topic_id": topic_id,
@@ -4218,7 +4509,6 @@ def consolidate_topic(
     }
 
     if dry_run:
-        db.close()
         return result
 
     # Generate summary using LLM
@@ -4236,35 +4526,42 @@ Context points:
 Write a 2-4 sentence summary that captures the essential information:"""
 
     try:
-        summary_text = claude_complete(summary_prompt)
+        summary_text = await claude_complete_async(summary_prompt)
     except Exception as e:
-        db.close()
         return {**result, "error": f"LLM summary failed: {e}"}
 
-    # Get a span for the summary (use first candidate's span)
-    span_id = None
-    if candidates:
-        cursor = db.execute("SELECT span_id FROM ideas WHERE id = ?", (candidates[0]["id"],))
-        span_row = cursor.fetchone()
-        if span_row:
-            span_id = span_row["span_id"]
+    # Create summary and link ideas
+    async def do_consolidate():
+        db = await get_async_db()
+        try:
+            # Get a span for the summary (use first candidate's span)
+            span_id = None
+            if candidates:
+                cursor = await db.execute("SELECT span_id FROM ideas WHERE id = ?", (candidates[0]["id"],))
+                span_row = await cursor.fetchone()
+                if span_row:
+                    span_id = span_row["span_id"]
 
-    # Create summary idea
-    cursor = db.execute("""
-        INSERT INTO ideas (span_id, content, intent, confidence, is_consolidated)
-        VALUES (?, ?, 'context', 0.8, TRUE)
-    """, (span_id, f"[Consolidated summary] {summary_text}"))
-    summary_id = cursor.lastrowid
+            # Create summary idea
+            cursor = await db.execute("""
+                INSERT INTO ideas (span_id, content, intent, confidence, is_consolidated)
+                VALUES (?, ?, 'context', 0.8, TRUE)
+            """, (span_id, f"[Consolidated summary] {summary_text}"))
+            summary_id = cursor.lastrowid
 
-    # Link original ideas to summary
-    for idea in candidates:
-        db.execute(
-            "UPDATE ideas SET consolidated_into = ? WHERE id = ?",
-            (summary_id, idea["id"])
-        )
+            # Link original ideas to summary
+            for idea in candidates:
+                await db.execute(
+                    "UPDATE ideas SET consolidated_into = ? WHERE id = ?",
+                    (summary_id, idea["id"])
+                )
 
-    db.commit()
-    db.close()
+            await db.commit()
+            return summary_id
+        finally:
+            await db.close()
+
+    summary_id = await retry_with_backoff(do_consolidate)
 
     result["consolidated"] = len(candidates)
     result["summary_id"] = summary_id
@@ -4273,7 +4570,7 @@ Write a 2-4 sentence summary that captures the essential information:"""
     return result
 
 
-def get_consolidation_candidates(
+async def get_consolidation_candidates(
     session: Optional[str] = None,
     min_ideas: int = 5,
     max_age_days: int = 30
@@ -4292,44 +4589,46 @@ def get_consolidation_candidates(
 
     cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
 
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            sql = """
+                SELECT
+                    t.id as topic_id, t.name as topic_name,
+                    COUNT(*) as candidate_count
+                FROM topics t
+                JOIN spans s ON s.topic_id = t.id
+                JOIN ideas i ON i.span_id = s.id
+                WHERE (i.forgotten = FALSE OR i.forgotten IS NULL)
+                    AND (i.consolidated_into IS NULL)
+                    AND (i.is_consolidated = FALSE OR i.is_consolidated IS NULL)
+                    AND i.intent NOT IN ('decision', 'conclusion')
+                    AND i.confidence < 0.9
+                    AND COALESCE(i.message_time, i.created_at) < ?
+            """
+            params = [cutoff]
 
-    # Get topics with old, unconsolidated context ideas
-    sql = """
-        SELECT
-            t.id as topic_id, t.name as topic_name,
-            COUNT(*) as candidate_count
-        FROM topics t
-        JOIN spans s ON s.topic_id = t.id
-        JOIN ideas i ON i.span_id = s.id
-        WHERE (i.forgotten = FALSE OR i.forgotten IS NULL)
-            AND (i.consolidated_into IS NULL)
-            AND (i.is_consolidated = FALSE OR i.is_consolidated IS NULL)
-            AND i.intent NOT IN ('decision', 'conclusion')
-            AND i.confidence < 0.9
-            AND COALESCE(i.message_time, i.created_at) < ?
-    """
-    params = [cutoff]
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
 
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
+            sql += f"""
+                GROUP BY t.id
+                HAVING COUNT(*) >= ?
+                ORDER BY COUNT(*) DESC
+            """
+            params.append(min_ideas)
 
-    sql += f"""
-        GROUP BY t.id
-        HAVING COUNT(*) >= ?
-        ORDER BY COUNT(*) DESC
-    """
-    params.append(min_ideas)
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    cursor = db.execute(sql, params)
-    results = [dict(row) for row in cursor]
-    db.close()
-
-    return results
+    return await retry_with_backoff(do_query)
 
 
-def get_session_time_range(session: str) -> dict | None:
+async def get_session_time_range(session: str) -> dict | None:
     """Get the time range (first/last idea) for a session.
 
     Args:
@@ -4338,67 +4637,74 @@ def get_session_time_range(session: str) -> dict | None:
     Returns:
         Dict with start_time, end_time (ISO format) or None if not found
     """
-    db = get_db()
-    cursor = db.execute("""
-        SELECT
-            MIN(COALESCE(i.message_time, i.created_at)) as start_time,
-            MAX(COALESCE(i.message_time, i.created_at)) as end_time
-        FROM spans s
-        JOIN ideas i ON i.span_id = s.id
-        WHERE s.session = ?
-    """, (session,))
-    row = cursor.fetchone()
-    db.close()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    MIN(COALESCE(i.message_time, i.created_at)) as start_time,
+                    MAX(COALESCE(i.message_time, i.created_at)) as end_time
+                FROM spans s
+                JOIN ideas i ON i.span_id = s.id
+                WHERE s.session = ?
+            """, (session,))
+            row = await cursor.fetchone()
+            if row and row['start_time']:
+                return {
+                    "session": session,
+                    "start_time": row['start_time'],
+                    "end_time": row['end_time']
+                }
+            return None
+        finally:
+            await db.close()
 
-    if row and row['start_time']:
-        return {
-            "session": session,
-            "start_time": row['start_time'],
-            "end_time": row['end_time']
-        }
-    return None
+    return await retry_with_backoff(do_query)
 
 
-def list_sessions() -> list[dict]:
+async def list_sessions() -> list[dict]:
     """List all indexed sessions with their stats.
 
     Returns:
         List of session dicts with name, idea count, topic count, latest date
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    s.session,
+                    COUNT(DISTINCT s.id) as topic_count,
+                    COUNT(DISTINCT i.id) as idea_count,
+                    MAX(i.created_at) as latest_idea,
+                    MIN(i.created_at) as first_idea
+                FROM spans s
+                LEFT JOIN ideas i ON i.span_id = s.id
+                GROUP BY s.session
+                ORDER BY MAX(i.created_at) DESC
+            """)
 
-    cursor = db.execute("""
-        SELECT
-            s.session,
-            COUNT(DISTINCT s.id) as topic_count,
-            COUNT(DISTINCT i.id) as idea_count,
-            MAX(i.created_at) as latest_idea,
-            MIN(i.created_at) as first_idea
-        FROM spans s
-        LEFT JOIN ideas i ON i.span_id = s.id
-        GROUP BY s.session
-        ORDER BY MAX(i.created_at) DESC
-    """)
+            sessions = []
+            async for row in cursor:
+                sessions.append({
+                    "session": row["session"],
+                    "topic_count": row["topic_count"],
+                    "idea_count": row["idea_count"],
+                    "first_idea": row["first_idea"],
+                    "latest_idea": row["latest_idea"],
+                })
+            return sessions
+        finally:
+            await db.close()
 
-    sessions = []
-    for row in cursor:
-        sessions.append({
-            "session": row["session"],
-            "topic_count": row["topic_count"],
-            "idea_count": row["idea_count"],
-            "first_idea": row["first_idea"],
-            "latest_idea": row["latest_idea"],
-        })
-
-    db.close()
-    return sessions
+    return await retry_with_backoff(do_query)
 
 
 # =============================================================================
 # Graph Revision Operations
 # =============================================================================
 
-def update_idea_intent(idea_id: int, new_intent: str) -> bool:
+async def update_idea_intent(idea_id: int, new_intent: str) -> bool:
     """Update an idea's intent classification.
 
     Args:
@@ -4408,18 +4714,22 @@ def update_idea_intent(idea_id: int, new_intent: str) -> bool:
     Returns:
         True if updated, False if idea not found
     """
-    db = get_db()
-    cursor = db.execute(
-        "UPDATE ideas SET intent = ? WHERE id = ?",
-        (new_intent, idea_id)
-    )
-    db.commit()
-    updated = cursor.rowcount > 0
-    db.close()
-    return updated
+    async def do_update():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "UPDATE ideas SET intent = ? WHERE id = ?",
+                (new_intent, idea_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_update)
 
 
-def move_idea_to_span(idea_id: int, span_id: int) -> bool:
+async def move_idea_to_span(idea_id: int, span_id: int) -> bool:
     """Move an idea to a different topic span.
 
     Args:
@@ -4429,18 +4739,22 @@ def move_idea_to_span(idea_id: int, span_id: int) -> bool:
     Returns:
         True if updated, False if idea not found
     """
-    db = get_db()
-    cursor = db.execute(
-        "UPDATE ideas SET span_id = ? WHERE id = ?",
-        (span_id, idea_id)
-    )
-    db.commit()
-    updated = cursor.rowcount > 0
-    db.close()
-    return updated
+    async def do_move():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "UPDATE ideas SET span_id = ? WHERE id = ?",
+                (span_id, idea_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_move)
 
 
-def merge_spans(source_span_id: int, target_span_id: int) -> dict:
+async def merge_spans(source_span_id: int, target_span_id: int) -> dict:
     """Merge one span into another.
 
     All ideas from source span are moved to target span,
@@ -4453,46 +4767,49 @@ def merge_spans(source_span_id: int, target_span_id: int) -> dict:
     Returns:
         Dict with merge stats
     """
-    db = get_db()
+    async def do_merge():
+        db = await get_async_db()
+        try:
+            # Move all ideas
+            cursor = await db.execute(
+                "UPDATE ideas SET span_id = ? WHERE span_id = ?",
+                (target_span_id, source_span_id)
+            )
+            ideas_moved = cursor.rowcount
 
-    # Move all ideas
-    cursor = db.execute(
-        "UPDATE ideas SET span_id = ? WHERE span_id = ?",
-        (target_span_id, source_span_id)
-    )
-    ideas_moved = cursor.rowcount
+            # Move child spans
+            cursor = await db.execute(
+                "UPDATE spans SET parent_id = ? WHERE parent_id = ?",
+                (target_span_id, source_span_id)
+            )
+            children_moved = cursor.rowcount
 
-    # Move child spans
-    cursor = db.execute(
-        "UPDATE spans SET parent_id = ? WHERE parent_id = ?",
-        (target_span_id, source_span_id)
-    )
-    children_moved = cursor.rowcount
+            # Delete source span embedding
+            await db.execute(
+                "DELETE FROM span_embeddings WHERE span_id = ?",
+                (source_span_id,)
+            )
 
-    # Delete source span embedding
-    db.execute(
-        "DELETE FROM span_embeddings WHERE span_id = ?",
-        (source_span_id,)
-    )
+            # Delete source span
+            await db.execute(
+                "DELETE FROM spans WHERE id = ?",
+                (source_span_id,)
+            )
 
-    # Delete source span
-    db.execute(
-        "DELETE FROM spans WHERE id = ?",
-        (source_span_id,)
-    )
+            await db.commit()
+            return {
+                "source_span_id": source_span_id,
+                "target_span_id": target_span_id,
+                "ideas_moved": ideas_moved,
+                "children_moved": children_moved
+            }
+        finally:
+            await db.close()
 
-    db.commit()
-    db.close()
-
-    return {
-        "source_span_id": source_span_id,
-        "target_span_id": target_span_id,
-        "ideas_moved": ideas_moved,
-        "children_moved": children_moved
-    }
+    return await retry_with_backoff(do_merge)
 
 
-def supersede_idea(old_idea_id: int, new_idea_id: int, reason: Optional[str] = None) -> bool:
+async def supersede_idea(old_idea_id: int, new_idea_id: int, reason: Optional[str] = None) -> bool:
     """Mark an idea as superseded by another.
 
     Creates a 'supersedes' relation and optionally stores the reason.
@@ -4505,11 +4822,11 @@ def supersede_idea(old_idea_id: int, new_idea_id: int, reason: Optional[str] = N
     Returns:
         True if relation created
     """
-    add_relation(new_idea_id, old_idea_id, "supersedes")
+    await add_relation(new_idea_id, old_idea_id, "supersedes")
     return True
 
 
-def update_span_name(span_id: int, new_name: str) -> bool:
+async def update_span_name(span_id: int, new_name: str) -> bool:
     """Update a span's name.
 
     Args:
@@ -4519,18 +4836,22 @@ def update_span_name(span_id: int, new_name: str) -> bool:
     Returns:
         True if updated
     """
-    db = get_db()
-    cursor = db.execute(
-        "UPDATE spans SET name = ? WHERE id = ?",
-        (new_name, span_id)
-    )
-    db.commit()
-    updated = cursor.rowcount > 0
-    db.close()
-    return updated
+    async def do_update():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute(
+                "UPDATE spans SET name = ? WHERE id = ?",
+                (new_name, span_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_update)
 
 
-def reparent_span(span_id: int, new_parent_id: Optional[int], new_depth: Optional[int] = None) -> bool:
+async def reparent_span(span_id: int, new_parent_id: Optional[int], new_depth: Optional[int] = None) -> bool:
     """Change a span's parent in the hierarchy.
 
     Args:
@@ -4541,31 +4862,35 @@ def reparent_span(span_id: int, new_parent_id: Optional[int], new_depth: Optiona
     Returns:
         True if updated
     """
-    db = get_db()
+    async def do_reparent():
+        db = await get_async_db()
+        try:
+            depth = new_depth
+            # Calculate depth if not provided
+            if depth is None:
+                if new_parent_id is None:
+                    depth = 0
+                else:
+                    cursor = await db.execute(
+                        "SELECT depth FROM spans WHERE id = ?",
+                        (new_parent_id,)
+                    )
+                    row = await cursor.fetchone()
+                    depth = (row["depth"] + 1) if row else 0
 
-    # Calculate depth if not provided
-    if new_depth is None:
-        if new_parent_id is None:
-            new_depth = 0
-        else:
-            cursor = db.execute(
-                "SELECT depth FROM spans WHERE id = ?",
-                (new_parent_id,)
+            cursor = await db.execute(
+                "UPDATE spans SET parent_id = ?, depth = ? WHERE id = ?",
+                (new_parent_id, depth, span_id)
             )
-            row = cursor.fetchone()
-            new_depth = (row["depth"] + 1) if row else 0
+            await db.commit()
+            return cursor.rowcount > 0
+        finally:
+            await db.close()
 
-    cursor = db.execute(
-        "UPDATE spans SET parent_id = ?, depth = ? WHERE id = ?",
-        (new_parent_id, new_depth, span_id)
-    )
-    db.commit()
-    updated = cursor.rowcount > 0
-    db.close()
-    return updated
+    return await retry_with_backoff(do_reparent)
 
 
-def prune_old_ideas(
+async def prune_old_ideas(
     older_than_days: int = 90,
     session: Optional[str] = None,
     dry_run: bool = True
@@ -4583,78 +4908,85 @@ def prune_old_ideas(
     from datetime import datetime, timedelta
 
     cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
-    db = get_db()
 
-    # Build query
-    if session:
-        count_sql = """
-            SELECT COUNT(*) as count FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            WHERE i.created_at < ? AND s.session = ?
-        """
-        params = (cutoff, session)
-    else:
-        count_sql = """
-            SELECT COUNT(*) as count FROM ideas
-            WHERE created_at < ?
-        """
-        params = (cutoff,)
+    async def do_prune():
+        db = await get_async_db()
+        try:
+            # Build query
+            if session:
+                count_sql = """
+                    SELECT COUNT(*) as count FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    WHERE i.created_at < ? AND s.session = ?
+                """
+                params = (cutoff, session)
+            else:
+                count_sql = """
+                    SELECT COUNT(*) as count FROM ideas
+                    WHERE created_at < ?
+                """
+                params = (cutoff,)
 
-    cursor = db.execute(count_sql, params)
-    count = cursor.fetchone()["count"]
+            cursor = await db.execute(count_sql, params)
+            row = await cursor.fetchone()
+            count = row["count"]
 
-    result = {
-        "would_remove": count,
-        "older_than_days": older_than_days,
-        "cutoff_date": cutoff,
-        "session": session,
-        "dry_run": dry_run,
-    }
+            result = {
+                "would_remove": count,
+                "older_than_days": older_than_days,
+                "cutoff_date": cutoff,
+                "session": session,
+                "dry_run": dry_run,
+            }
 
-    if not dry_run and count > 0:
-        # Get IDs to delete
-        if session:
-            id_sql = """
-                SELECT i.id FROM ideas i
-                JOIN spans s ON s.id = i.span_id
-                WHERE i.created_at < ? AND s.session = ?
-            """
-        else:
-            id_sql = """
-                SELECT id FROM ideas WHERE created_at < ?
-            """
+            if not dry_run and count > 0:
+                # Get IDs to delete
+                if session:
+                    id_sql = """
+                        SELECT i.id FROM ideas i
+                        JOIN spans s ON s.id = i.span_id
+                        WHERE i.created_at < ? AND s.session = ?
+                    """
+                else:
+                    id_sql = """
+                        SELECT id FROM ideas WHERE created_at < ?
+                    """
 
-        cursor = db.execute(id_sql, params)
-        idea_ids = [row["id"] for row in cursor]
+                cursor = await db.execute(id_sql, params)
+                rows = await cursor.fetchall()
+                idea_ids = [row["id"] for row in rows]
 
-        if idea_ids:
-            placeholders = ",".join("?" * len(idea_ids))
+                if idea_ids:
+                    placeholders = ",".join("?" * len(idea_ids))
 
-            # Delete embeddings
-            db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+                    # Delete embeddings
+                    await db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
 
-            # Delete relations
-            db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
-                      idea_ids + idea_ids)
+                    # Delete relations
+                    await db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                              idea_ids + idea_ids)
 
-            # Delete entity links
-            db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+                    # Delete entity links
+                    await db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
 
-            # Delete FTS entries
-            db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+                    # Delete FTS entries
+                    await db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
 
-            # Delete ideas
-            db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+                    # Delete ideas
+                    await db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
 
-            db.commit()
-            result["removed"] = len(idea_ids)
-            result["dry_run"] = False
+                    await db.commit()
+                    result["removed"] = len(idea_ids)
+                    result["dry_run"] = False
 
-    db.close()
-    return result
+            return result
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_prune)
 
 
-def review_ideas_against_filters(
+async def review_ideas_against_filters(
     topic_id: Optional[int] = None,
     dry_run: bool = True
 ) -> dict:
@@ -4672,94 +5004,99 @@ def review_ideas_against_filters(
     """
     from transcript import get_filter_reason
 
-    db = get_db()
+    async def do_review():
+        db = await get_async_db()
+        try:
+            # Get ideas to review
+            if topic_id:
+                cursor = await db.execute("""
+                    SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+                    FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    LEFT JOIN topics t ON t.id = s.topic_id
+                    WHERE s.topic_id = ?
+                    ORDER BY i.source_line
+                """, (topic_id,))
+            else:
+                cursor = await db.execute("""
+                    SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+                    FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    LEFT JOIN topics t ON t.id = s.topic_id
+                    ORDER BY s.topic_id, i.source_line
+                """)
 
-    # Get ideas to review
-    if topic_id:
-        cursor = db.execute("""
-            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
-            FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            LEFT JOIN topics t ON t.id = s.topic_id
-            WHERE s.topic_id = ?
-            ORDER BY i.source_line
-        """, (topic_id,))
-    else:
-        cursor = db.execute("""
-            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
-            FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            LEFT JOIN topics t ON t.id = s.topic_id
-            ORDER BY s.topic_id, i.source_line
-        """)
+            rows = await cursor.fetchall()
+            ideas = [dict(row) for row in rows]
 
-    ideas = [dict(row) for row in cursor]
+            # Check each idea against filters
+            would_filter = []
+            filter_reasons = {}
 
-    # Check each idea against filters
-    would_filter = []
-    filter_reasons = {}
+            for idea in ideas:
+                # Simulate the message structure expected by is_indexable
+                message = {
+                    "content": idea["content"],
+                    "type": "assistant",  # Assume assistant for stricter filtering
+                    "has_tool_use": False,
+                }
 
-    for idea in ideas:
-        # Simulate the message structure expected by is_indexable
-        message = {
-            "content": idea["content"],
-            "type": "assistant",  # Assume assistant for stricter filtering
-            "has_tool_use": False,
-        }
+                reason = get_filter_reason(message)
+                if reason:
+                    would_filter.append({
+                        "id": idea["id"],
+                        "content": idea["content"][:100],
+                        "intent": idea["intent"],
+                        "topic": idea["topic_name"],
+                        "reason": reason,
+                    })
+                    filter_reasons[reason] = filter_reasons.get(reason, 0) + 1
 
-        reason = get_filter_reason(message)
-        if reason:
-            would_filter.append({
-                "id": idea["id"],
-                "content": idea["content"][:100],
-                "intent": idea["intent"],
-                "topic": idea["topic_name"],
-                "reason": reason,
-            })
-            filter_reasons[reason] = filter_reasons.get(reason, 0) + 1
+            result = {
+                "total_reviewed": len(ideas),
+                "would_filter": len(would_filter),
+                "would_keep": len(ideas) - len(would_filter),
+                "filter_reasons": filter_reasons,
+                "dry_run": dry_run,
+                "topic_id": topic_id,
+            }
 
-    result = {
-        "total_reviewed": len(ideas),
-        "would_filter": len(would_filter),
-        "would_keep": len(ideas) - len(would_filter),
-        "filter_reasons": filter_reasons,
-        "dry_run": dry_run,
-        "topic_id": topic_id,
-    }
+            # Add sample of what would be filtered
+            result["samples"] = would_filter[:20]
 
-    # Add sample of what would be filtered
-    result["samples"] = would_filter[:20]
+            if not dry_run and would_filter:
+                # Delete the filtered ideas
+                idea_ids = [item["id"] for item in would_filter]
+                placeholders = ",".join("?" * len(idea_ids))
 
-    if not dry_run and would_filter:
-        # Delete the filtered ideas
-        idea_ids = [item["id"] for item in would_filter]
-        placeholders = ",".join("?" * len(idea_ids))
+                # Delete embeddings
+                await db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
 
-        # Delete embeddings
-        db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+                # Delete relations
+                await db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                          idea_ids + idea_ids)
 
-        # Delete relations
-        db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
-                  idea_ids + idea_ids)
+                # Delete entity links
+                await db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
 
-        # Delete entity links
-        db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+                # Delete FTS entries
+                await db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
 
-        # Delete FTS entries
-        db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+                # Delete ideas
+                await db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
 
-        # Delete ideas
-        db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+                await db.commit()
+                result["removed"] = len(idea_ids)
+                result["dry_run"] = False
 
-        db.commit()
-        result["removed"] = len(idea_ids)
-        result["dry_run"] = False
+            return result
+        finally:
+            await db.close()
 
-    db.close()
-    return result
+    return await retry_with_backoff(do_review)
 
 
-def llm_filter_ideas(
+async def llm_filter_ideas(
     topic_id: Optional[int] = None,
     batch_size: int = 20,
     dry_run: bool = True
@@ -4780,28 +5117,33 @@ def llm_filter_ideas(
     Returns:
         Dict with filtering results
     """
-    db = get_db()
+    # First, get all ideas to review
+    async def get_ideas():
+        db = await get_async_db()
+        try:
+            if topic_id:
+                cursor = await db.execute("""
+                    SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+                    FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    LEFT JOIN topics t ON t.id = s.topic_id
+                    WHERE s.topic_id = ?
+                    ORDER BY i.source_line
+                """, (topic_id,))
+            else:
+                cursor = await db.execute("""
+                    SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
+                    FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    LEFT JOIN topics t ON t.id = s.topic_id
+                    ORDER BY s.topic_id, i.source_line
+                """)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    # Get ideas to review
-    if topic_id:
-        cursor = db.execute("""
-            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
-            FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            LEFT JOIN topics t ON t.id = s.topic_id
-            WHERE s.topic_id = ?
-            ORDER BY i.source_line
-        """, (topic_id,))
-    else:
-        cursor = db.execute("""
-            SELECT i.id, i.content, i.intent, i.source_line, s.session, t.name as topic_name
-            FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            LEFT JOIN topics t ON t.id = s.topic_id
-            ORDER BY s.topic_id, i.source_line
-        """)
-
-    ideas = [dict(row) for row in cursor]
+    ideas = await retry_with_backoff(get_ideas)
 
     flagged = []
     total_reviewed = 0
@@ -4841,7 +5183,7 @@ Reply with ONLY a JSON array of indices that should be REMOVED, e.g. [0, 3, 5]
 If none should be removed, reply: []"""
 
         try:
-            response_text = claude_complete(prompt).strip()
+            response_text = (await claude_complete_async(prompt)).strip()
 
             # Parse response - handle various formats
             import re
@@ -4860,10 +5202,8 @@ If none should be removed, reply: []"""
                         })
 
         except TotalRecallError:
-            db.close()
             raise  # Re-raise TotalRecallError as-is
         except Exception as e:
-            db.close()
             logger.error(f"LLM filter batch failed: {e}")
             raise TotalRecallError(
                 f"LLM filter failed: {e}",
@@ -4881,34 +5221,39 @@ If none should be removed, reply: []"""
     }
 
     if not dry_run and flagged:
-        # Delete the flagged ideas
-        idea_ids = [item["id"] for item in flagged]
-        placeholders = ",".join("?" * len(idea_ids))
+        async def do_delete():
+            db = await get_async_db()
+            try:
+                idea_ids = [item["id"] for item in flagged]
+                placeholders = ",".join("?" * len(idea_ids))
 
-        # Delete embeddings
-        db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
+                # Delete embeddings
+                await db.execute(f"DELETE FROM idea_embeddings WHERE idea_id IN ({placeholders})", idea_ids)
 
-        # Delete relations
-        db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
-                  idea_ids + idea_ids)
+                # Delete relations
+                await db.execute(f"DELETE FROM relations WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                          idea_ids + idea_ids)
 
-        # Delete entity links
-        db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
+                # Delete entity links
+                await db.execute(f"DELETE FROM idea_entities WHERE idea_id IN ({placeholders})", idea_ids)
 
-        # Delete FTS entries
-        db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
+                # Delete FTS entries
+                await db.execute(f"DELETE FROM ideas_fts WHERE rowid IN ({placeholders})", idea_ids)
 
-        # Delete ideas
-        db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
+                # Delete ideas
+                await db.execute(f"DELETE FROM ideas WHERE id IN ({placeholders})", idea_ids)
 
-        db.commit()
-        result["removed"] = len(idea_ids)
+                await db.commit()
+                return len(idea_ids)
+            finally:
+                await db.close()
 
-    db.close()
+        result["removed"] = await retry_with_backoff(do_delete)
+
     return result
 
 
-def get_context(idea_id: int, lines_before: int = 5, lines_after: int = 5) -> dict:
+async def get_context(idea_id: int, lines_before: int = 5, lines_after: int = 5) -> dict:
     """Get the source transcript context around an idea.
 
     Args:
@@ -4919,25 +5264,30 @@ def get_context(idea_id: int, lines_before: int = 5, lines_after: int = 5) -> di
     Returns:
         Dict with idea info, context lines, and source info
     """
-    db = get_db()
-    cursor = db.execute("""
-        SELECT i.id, i.content, i.intent, i.source_file, i.source_line,
-               s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.id = ?
-    """, (idea_id,))
-    row = cursor.fetchone()
-    db.close()
+    async def get_idea():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT i.id, i.content, i.intent, i.source_file, i.source_line,
+                       s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.id = ?
+            """, (idea_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            await db.close()
 
-    if not row:
+    idea = await retry_with_backoff(get_idea)
+
+    if not idea:
         raise TotalRecallError(
             f"Idea {idea_id} not found",
             "not_found",
             {"idea_id": idea_id}
         )
 
-    idea = dict(row)
     source_file = idea.get("source_file")
     source_line = idea.get("source_line")
 
@@ -5017,7 +5367,7 @@ def get_context(idea_id: int, lines_before: int = 5, lines_after: int = 5) -> di
     }
 
 
-def export_data(session: Optional[str] = None, include_embeddings: bool = False) -> dict:
+async def export_data(session: Optional[str] = None, include_embeddings: bool = False) -> dict:
     """Export ideas and spans as JSON for backup.
 
     Args:
@@ -5027,82 +5377,90 @@ def export_data(session: Optional[str] = None, include_embeddings: bool = False)
     Returns:
         Dict with ideas, spans, relations, entities
     """
-    db = get_db()
+    async def do_export():
+        db = await get_async_db()
+        try:
+            # Export spans
+            if session:
+                cursor = await db.execute("""
+                    SELECT id, session, parent_id, name, summary, start_line, end_line, depth, created_at
+                    FROM spans WHERE session = ? ORDER BY id
+                """, (session,))
+            else:
+                cursor = await db.execute("""
+                    SELECT id, session, parent_id, name, summary, start_line, end_line, depth, created_at
+                    FROM spans ORDER BY id
+                """)
+            rows = await cursor.fetchall()
+            spans = [dict(row) for row in rows]
 
-    # Export spans
-    if session:
-        cursor = db.execute("""
-            SELECT id, session, parent_id, name, summary, start_line, end_line, depth, created_at
-            FROM spans WHERE session = ? ORDER BY id
-        """, (session,))
-    else:
-        cursor = db.execute("""
-            SELECT id, session, parent_id, name, summary, start_line, end_line, depth, created_at
-            FROM spans ORDER BY id
-        """)
-    spans = [dict(row) for row in cursor]
+            # Export ideas
+            if session:
+                cursor = await db.execute("""
+                    SELECT i.id, i.span_id, i.content, i.intent, i.confidence, i.answered,
+                           i.source_file, i.source_line, i.created_at
+                    FROM ideas i
+                    JOIN spans s ON s.id = i.span_id
+                    WHERE s.session = ? ORDER BY i.id
+                """, (session,))
+            else:
+                cursor = await db.execute("""
+                    SELECT id, span_id, content, intent, confidence, answered,
+                           source_file, source_line, created_at
+                    FROM ideas ORDER BY id
+                """)
+            rows = await cursor.fetchall()
+            ideas = [dict(row) for row in rows]
 
-    # Export ideas
-    if session:
-        cursor = db.execute("""
-            SELECT i.id, i.span_id, i.content, i.intent, i.confidence, i.answered,
-                   i.source_file, i.source_line, i.created_at
-            FROM ideas i
-            JOIN spans s ON s.id = i.span_id
-            WHERE s.session = ? ORDER BY i.id
-        """, (session,))
-    else:
-        cursor = db.execute("""
-            SELECT id, span_id, content, intent, confidence, answered,
-                   source_file, source_line, created_at
-            FROM ideas ORDER BY id
-        """)
-    ideas = [dict(row) for row in cursor]
+            # Get idea IDs for filtering relations and entities
+            idea_ids = {i["id"] for i in ideas}
 
-    # Get idea IDs for filtering relations and entities
-    idea_ids = {i["id"] for i in ideas}
+            # Export relations
+            cursor = await db.execute("SELECT from_id, to_id, relation_type FROM relations ORDER BY id")
+            rows = await cursor.fetchall()
+            relations = [
+                dict(row) for row in rows
+                if row["from_id"] in idea_ids or row["to_id"] in idea_ids
+            ]
 
-    # Export relations
-    cursor = db.execute("SELECT from_id, to_id, relation_type FROM relations ORDER BY id")
-    relations = [
-        dict(row) for row in cursor
-        if row["from_id"] in idea_ids or row["to_id"] in idea_ids
-    ]
+            # Export entities and their links
+            cursor = await db.execute("SELECT id, name, type FROM entities ORDER BY id")
+            rows = await cursor.fetchall()
+            all_entities = {row["id"]: dict(row) for row in rows}
 
-    # Export entities and their links
-    cursor = db.execute("SELECT id, name, type FROM entities ORDER BY id")
-    all_entities = {row["id"]: dict(row) for row in cursor}
+            cursor = await db.execute("SELECT idea_id, entity_id FROM idea_entities")
+            rows = await cursor.fetchall()
+            entity_links = [
+                dict(row) for row in rows
+                if row["idea_id"] in idea_ids
+            ]
 
-    cursor = db.execute("SELECT idea_id, entity_id FROM idea_entities")
-    entity_links = [
-        dict(row) for row in cursor
-        if row["idea_id"] in idea_ids
-    ]
+            # Filter to only entities that are used
+            used_entity_ids = {link["entity_id"] for link in entity_links}
+            entities = [e for eid, e in all_entities.items() if eid in used_entity_ids]
 
-    # Filter to only entities that are used
-    used_entity_ids = {link["entity_id"] for link in entity_links}
-    entities = [e for eid, e in all_entities.items() if eid in used_entity_ids]
+            return {
+                "version": 1,
+                "session_filter": session,
+                "spans": spans,
+                "ideas": ideas,
+                "relations": relations,
+                "entities": entities,
+                "entity_links": entity_links,
+                "stats": {
+                    "spans_count": len(spans),
+                    "ideas_count": len(ideas),
+                    "relations_count": len(relations),
+                    "entities_count": len(entities),
+                }
+            }
+        finally:
+            await db.close()
 
-    db.close()
-
-    return {
-        "version": 1,
-        "session_filter": session,
-        "spans": spans,
-        "ideas": ideas,
-        "relations": relations,
-        "entities": entities,
-        "entity_links": entity_links,
-        "stats": {
-            "spans_count": len(spans),
-            "ideas_count": len(ideas),
-            "relations_count": len(relations),
-            "entities_count": len(entities),
-        }
-    }
+    return await retry_with_backoff(do_export)
 
 
-def import_data(data: dict, replace: bool = False) -> dict:
+async def import_data(data: dict, replace: bool = False) -> dict:
     """Import data from an export JSON.
 
     Args:
@@ -5120,147 +5478,151 @@ def import_data(data: dict, replace: bool = False) -> dict:
             {"version": version}
         )
 
-    db = get_db()
-
-    if replace:
-        # Clear existing data
-        db.execute("DELETE FROM idea_entities")
-        db.execute("DELETE FROM relations")
-        db.execute("DELETE FROM ideas")
-        db.execute("DELETE FROM idea_embeddings")
-        db.execute("DELETE FROM spans")
-        db.execute("DELETE FROM entities")
-        db.commit()
-
-    # ID mapping: old_id -> new_id
-    span_id_map = {}
-    idea_id_map = {}
-    entity_id_map = {}
-
-    # Import spans (maintaining parent relationships)
-    # Sort by depth so parents are created first
-    spans_by_depth = sorted(data.get("spans", []), key=lambda s: s.get("depth", 0))
-    for span in spans_by_depth:
-        old_id = span["id"]
-        old_parent_id = span.get("parent_id")
-        new_parent_id = span_id_map.get(old_parent_id) if old_parent_id else None
-
-        cursor = db.execute("""
-            INSERT INTO spans (session, parent_id, name, summary, start_line, end_line, depth, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            span["session"],
-            new_parent_id,
-            span.get("name"),
-            span.get("summary"),
-            span.get("start_line"),
-            span.get("end_line"),
-            span.get("depth", 0),
-            span.get("created_at")
-        ))
-        span_id_map[old_id] = cursor.lastrowid
-
-    # Import entities
-    for entity in data.get("entities", []):
-        old_id = entity["id"]
-        cursor = db.execute("""
-            INSERT INTO entities (name, type)
-            VALUES (?, ?)
-        """, (entity["name"], entity.get("type")))
-        entity_id_map[old_id] = cursor.lastrowid
-
-    # Import ideas and generate embeddings
-    ideas_imported = 0
-    for idea in data.get("ideas", []):
-        old_id = idea["id"]
-        old_span_id = idea["span_id"]
-        new_span_id = span_id_map.get(old_span_id)
-
-        if not new_span_id:
-            logger.warning(f"Skipping idea {old_id}: span {old_span_id} not found")
-            continue
-
-        # Generate embedding for the idea
+    async def do_import():
+        db = await get_async_db()
         try:
-            embedding = get_embedding(idea["content"])
-        except Exception as e:
-            logger.warning(f"Failed to embed idea {old_id}: {e}")
-            continue
+            if replace:
+                # Clear existing data
+                await db.execute("DELETE FROM idea_entities")
+                await db.execute("DELETE FROM relations")
+                await db.execute("DELETE FROM ideas")
+                await db.execute("DELETE FROM idea_embeddings")
+                await db.execute("DELETE FROM spans")
+                await db.execute("DELETE FROM entities")
+                await db.commit()
 
-        cursor = db.execute("""
-            INSERT OR IGNORE INTO ideas (span_id, content, intent, confidence, answered, source_file, source_line, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            new_span_id,
-            idea["content"],
-            idea.get("intent"),
-            idea.get("confidence"),
-            idea.get("answered"),
-            idea.get("source_file"),
-            idea.get("source_line"),
-            idea.get("created_at")
-        ))
-        new_idea_id = cursor.lastrowid
-        if not new_idea_id:
-            logger.info(f"Skipping duplicate idea from {idea.get('source_file')}:{idea.get('source_line')}")
-            continue
-        idea_id_map[old_id] = new_idea_id
+            # ID mapping: old_id -> new_id
+            span_id_map = {}
+            idea_id_map = {}
+            entity_id_map = {}
 
-        # Store embedding
-        db.execute(
-            "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
-            (new_idea_id, serialize_embedding(embedding))
-        )
-        ideas_imported += 1
+            # Import spans (maintaining parent relationships)
+            # Sort by depth so parents are created first
+            spans_by_depth = sorted(data.get("spans", []), key=lambda s: s.get("depth", 0))
+            for span in spans_by_depth:
+                old_id = span["id"]
+                old_parent_id = span.get("parent_id")
+                new_parent_id = span_id_map.get(old_parent_id) if old_parent_id else None
 
-    # Import relations
-    relations_imported = 0
-    for rel in data.get("relations", []):
-        new_from_id = idea_id_map.get(rel["from_id"])
-        new_to_id = idea_id_map.get(rel["to_id"])
-        if new_from_id and new_to_id:
-            try:
-                db.execute("""
-                    INSERT INTO relations (from_id, to_id, relation_type)
-                    VALUES (?, ?, ?)
-                """, (new_from_id, new_to_id, rel["relation_type"]))
-                relations_imported += 1
-            except sqlite3.IntegrityError:
-                pass  # Duplicate relation
+                cursor = await db.execute("""
+                    INSERT INTO spans (session, parent_id, name, summary, start_line, end_line, depth, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    span["session"],
+                    new_parent_id,
+                    span.get("name"),
+                    span.get("summary"),
+                    span.get("start_line"),
+                    span.get("end_line"),
+                    span.get("depth", 0),
+                    span.get("created_at")
+                ))
+                span_id_map[old_id] = cursor.lastrowid
 
-    # Import entity links
-    entity_links_imported = 0
-    for link in data.get("entity_links", []):
-        new_idea_id = idea_id_map.get(link["idea_id"])
-        new_entity_id = entity_id_map.get(link["entity_id"])
-        if new_idea_id and new_entity_id:
-            try:
-                db.execute("""
-                    INSERT INTO idea_entities (idea_id, entity_id)
+            # Import entities
+            for entity in data.get("entities", []):
+                old_id = entity["id"]
+                cursor = await db.execute("""
+                    INSERT INTO entities (name, type)
                     VALUES (?, ?)
-                """, (new_idea_id, new_entity_id))
-                entity_links_imported += 1
-            except sqlite3.IntegrityError:
-                pass  # Duplicate link
+                """, (entity["name"], entity.get("type")))
+                entity_id_map[old_id] = cursor.lastrowid
 
-    db.commit()
-    db.close()
+            # Import ideas and generate embeddings
+            ideas_imported = 0
+            for idea in data.get("ideas", []):
+                old_id = idea["id"]
+                old_span_id = idea["span_id"]
+                new_span_id = span_id_map.get(old_span_id)
 
-    return {
-        "success": True,
-        "stats": {
-            "spans_imported": len(span_id_map),
-            "ideas_imported": ideas_imported,
-            "relations_imported": relations_imported,
-            "entities_imported": len(entity_id_map),
-            "entity_links_imported": entity_links_imported,
-        },
-        "id_mappings": {
-            "spans": span_id_map,
-            "ideas": idea_id_map,
-            "entities": entity_id_map,
-        }
-    }
+                if not new_span_id:
+                    logger.warning(f"Skipping idea {old_id}: span {old_span_id} not found")
+                    continue
+
+                # Generate embedding for the idea
+                try:
+                    embedding = await get_embedding_async(idea["content"])
+                except Exception as e:
+                    logger.warning(f"Failed to embed idea {old_id}: {e}")
+                    continue
+
+                cursor = await db.execute("""
+                    INSERT OR IGNORE INTO ideas (span_id, content, intent, confidence, answered, source_file, source_line, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    new_span_id,
+                    idea["content"],
+                    idea.get("intent"),
+                    idea.get("confidence"),
+                    idea.get("answered"),
+                    idea.get("source_file"),
+                    idea.get("source_line"),
+                    idea.get("created_at")
+                ))
+                new_idea_id = cursor.lastrowid
+                if not new_idea_id:
+                    logger.info(f"Skipping duplicate idea from {idea.get('source_file')}:{idea.get('source_line')}")
+                    continue
+                idea_id_map[old_id] = new_idea_id
+
+                # Store embedding
+                await db.execute(
+                    "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
+                    (new_idea_id, serialize_embedding(embedding))
+                )
+                ideas_imported += 1
+
+            # Import relations
+            relations_imported = 0
+            for rel in data.get("relations", []):
+                new_from_id = idea_id_map.get(rel["from_id"])
+                new_to_id = idea_id_map.get(rel["to_id"])
+                if new_from_id and new_to_id:
+                    try:
+                        await db.execute("""
+                            INSERT INTO relations (from_id, to_id, relation_type)
+                            VALUES (?, ?, ?)
+                        """, (new_from_id, new_to_id, rel["relation_type"]))
+                        relations_imported += 1
+                    except sqlite3.IntegrityError:
+                        pass  # Duplicate relation
+
+            # Import entity links
+            entity_links_imported = 0
+            for link in data.get("entity_links", []):
+                new_idea_id = idea_id_map.get(link["idea_id"])
+                new_entity_id = entity_id_map.get(link["entity_id"])
+                if new_idea_id and new_entity_id:
+                    try:
+                        await db.execute("""
+                            INSERT INTO idea_entities (idea_id, entity_id)
+                            VALUES (?, ?)
+                        """, (new_idea_id, new_entity_id))
+                        entity_links_imported += 1
+                    except sqlite3.IntegrityError:
+                        pass  # Duplicate link
+
+            await db.commit()
+
+            return {
+                "success": True,
+                "stats": {
+                    "spans_imported": len(span_id_map),
+                    "ideas_imported": ideas_imported,
+                    "relations_imported": relations_imported,
+                    "entities_imported": len(entity_id_map),
+                    "entity_links_imported": entity_links_imported,
+                },
+                "id_mappings": {
+                    "spans": span_id_map,
+                    "ideas": idea_id_map,
+                    "entities": entity_id_map,
+                }
+            }
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_import)
 
 
 def extract_session_from_path(file_path: str) -> str:
@@ -5391,7 +5753,7 @@ def get_session_for_cwd(cwd: str) -> str | None:
 # Reflection Operations
 # =============================================================================
 
-def generate_session_reflection(
+async def generate_session_reflection(
     session: Optional[str] = None,
     days: int = 7
 ) -> dict:
@@ -5411,28 +5773,33 @@ def generate_session_reflection(
     # Get recent ideas
     since = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
 
-    db = get_db()
+    async def get_ideas():
+        db = await get_async_db()
+        try:
+            sql = """
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.message_time, i.created_at,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE COALESCE(i.message_time, i.created_at) >= ?
+                    AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+            """
+            params = [since]
 
-    sql = """
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.message_time, i.created_at,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE COALESCE(i.message_time, i.created_at) >= ?
-            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-    """
-    params = [since]
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
 
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
+            sql += " ORDER BY COALESCE(i.message_time, i.created_at)"
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    sql += " ORDER BY COALESCE(i.message_time, i.created_at)"
-    cursor = db.execute(sql, params)
-    ideas = [dict(row) for row in cursor]
-    db.close()
+    ideas = await retry_with_backoff(get_ideas)
 
     if not ideas:
         return {
@@ -5470,7 +5837,7 @@ Activity summary:
 Reflection:"""
 
     try:
-        reflection_text = claude_complete(prompt)
+        reflection_text = await claude_complete_async(prompt)
     except Exception as e:
         return {
             "session": session,
@@ -5490,7 +5857,7 @@ Reflection:"""
     }
 
 
-def store_reflection(
+async def store_reflection(
     reflection_text: str,
     session: Optional[str] = None,
     topic_id: Optional[int] = None
@@ -5505,40 +5872,43 @@ def store_reflection(
     Returns:
         ID of the stored reflection idea
     """
-    db = get_db()
+    async def do_store():
+        db = await get_async_db()
+        try:
+            # Find or create a span for reflections
+            span_id = None
+            if session:
+                cursor = await db.execute("""
+                    SELECT id FROM spans WHERE session = ?
+                    ORDER BY created_at DESC LIMIT 1
+                """, (session,))
+                row = await cursor.fetchone()
+                if row:
+                    span_id = row["id"]
 
-    # Find or create a span for reflections
-    span_id = None
-    if session:
-        cursor = db.execute("""
-            SELECT id FROM spans WHERE session = ?
-            ORDER BY created_at DESC LIMIT 1
-        """, (session,))
-        row = cursor.fetchone()
-        if row:
-            span_id = row["id"]
+            # Store as special reflection idea
+            cursor = await db.execute("""
+                INSERT INTO ideas (span_id, content, intent, confidence)
+                VALUES (?, ?, 'reflection', 0.9)
+            """, (span_id, reflection_text))
+            idea_id = cursor.lastrowid
 
-    # Store as special reflection idea
-    cursor = db.execute("""
-        INSERT INTO ideas (span_id, content, intent, confidence)
-        VALUES (?, ?, 'reflection', 0.9)
-    """, (span_id, reflection_text))
-    idea_id = cursor.lastrowid
+            # Generate and store embedding
+            embedding = await get_embedding_async(reflection_text)
+            await db.execute(
+                "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
+                (idea_id, serialize_embedding(embedding))
+            )
 
-    # Generate and store embedding
-    embedding = get_embedding(reflection_text)
-    db.execute(
-        "INSERT INTO idea_embeddings (idea_id, embedding) VALUES (?, ?)",
-        (idea_id, serialize_embedding(embedding))
-    )
+            await db.commit()
+            return idea_id
+        finally:
+            await db.close()
 
-    db.commit()
-    db.close()
-
-    return idea_id
+    return await retry_with_backoff(do_store)
 
 
-def get_reflections(
+async def get_reflections(
     session: Optional[str] = None,
     limit: int = 20
 ) -> list[dict]:
@@ -5551,35 +5921,38 @@ def get_reflections(
     Returns:
         List of reflection idea dicts
     """
-    db = get_db()
+    async def do_query():
+        db = await get_async_db()
+        try:
+            sql = """
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.created_at, i.message_time,
+                    s.session, s.name as topic
+                FROM ideas i
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE i.intent = 'reflection'
+                    AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+            """
+            params = []
 
-    sql = """
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.created_at, i.message_time,
-            s.session, s.name as topic
-        FROM ideas i
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE i.intent = 'reflection'
-            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-    """
-    params = []
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
 
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
+            sql += " ORDER BY COALESCE(i.message_time, i.created_at) DESC LIMIT ?"
+            params.append(limit)
 
-    sql += " ORDER BY COALESCE(i.message_time, i.created_at) DESC LIMIT ?"
-    params.append(limit)
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await db.close()
 
-    cursor = db.execute(sql, params)
-    results = [dict(row) for row in cursor]
-    db.close()
-
-    return results
+    return await retry_with_backoff(do_query)
 
 
-def reflect_on_topic(topic_id: int) -> dict:
+async def reflect_on_topic(topic_id: int) -> dict:
     """Generate a reflection on a specific topic's evolution.
 
     Args:
@@ -5588,34 +5961,42 @@ def reflect_on_topic(topic_id: int) -> dict:
     Returns:
         Dict with reflection on the topic
     """
-    db = get_db()
+    async def get_topic_data():
+        db = await get_async_db()
+        try:
+            # Get topic info
+            cursor = await db.execute("""
+                SELECT id, name, summary, first_seen, last_seen
+                FROM topics WHERE id = ?
+            """, (topic_id,))
+            topic_row = await cursor.fetchone()
 
-    # Get topic info
-    cursor = db.execute("""
-        SELECT id, name, summary, first_seen, last_seen
-        FROM topics WHERE id = ?
-    """, (topic_id,))
-    topic_row = cursor.fetchone()
+            if not topic_row:
+                return None, []
 
-    if not topic_row:
-        db.close()
+            topic = dict(topic_row)
+
+            # Get ideas for this topic
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.message_time, i.created_at
+                FROM ideas i
+                JOIN spans s ON s.id = i.span_id
+                WHERE s.topic_id = ?
+                    AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                ORDER BY COALESCE(i.message_time, i.created_at)
+            """, (topic_id,))
+            rows = await cursor.fetchall()
+            ideas = [dict(row) for row in rows]
+            return topic, ideas
+        finally:
+            await db.close()
+
+    topic, ideas = await retry_with_backoff(get_topic_data)
+
+    if not topic:
         return {"error": f"Topic {topic_id} not found"}
-
-    topic = dict(topic_row)
-
-    # Get ideas for this topic
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.message_time, i.created_at
-        FROM ideas i
-        JOIN spans s ON s.id = i.span_id
-        WHERE s.topic_id = ?
-            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-        ORDER BY COALESCE(i.message_time, i.created_at)
-    """, (topic_id,))
-    ideas = [dict(row) for row in cursor]
-    db.close()
 
     if not ideas:
         return {
@@ -5644,7 +6025,7 @@ Topic timeline ({len(ideas)} ideas total):
 Reflection (2-4 paragraphs):"""
 
     try:
-        reflection_text = claude_complete(prompt)
+        reflection_text = await claude_complete_async(prompt)
     except Exception as e:
         return {
             "topic_id": topic_id,

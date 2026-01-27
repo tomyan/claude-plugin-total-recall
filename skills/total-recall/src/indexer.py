@@ -115,7 +115,8 @@ def generate_topic_name_from_content(messages: list[dict], fallback: str = "Disc
         return fallback
 
     # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    from config import get_openai_api_key
+    api_key = get_openai_api_key()
     if not api_key or OpenAI is None:
         # No LLM available - extract key terms from first message
         first_content = messages[0].get("content", "")[:200]
@@ -443,7 +444,8 @@ def analyze_message_with_llm(content: str) -> dict:
         return {"indexable": False, "intent": None, "confidence": 1.0, "reason": "too_short"}
 
     # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    from config import get_openai_api_key
+    api_key = get_openai_api_key()
     if not api_key or OpenAI is None:
         # Fallback to regex classification, assume indexable
         return {
@@ -1003,7 +1005,8 @@ def summarize_span_with_llm(messages: list[dict]) -> str:
         return ""
 
     # Get API key
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    from config import get_openai_api_key
+    api_key = get_openai_api_key()
     if not api_key or OpenAI is None:
         return summarize_span(messages)
 

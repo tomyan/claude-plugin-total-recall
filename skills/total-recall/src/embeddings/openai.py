@@ -1,21 +1,21 @@
-"""OpenAI embedding provider for total-recall."""
+"""Async OpenAI embedding provider for total-recall."""
 
-import os
 from typing import Optional
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
-from config import EMBEDDING_MODEL, EMBEDDING_DIM, logger
-from embeddings.cache import cache_embedding, get_cached_embedding
-from embeddings.provider import EmbeddingProvider
+from config import EMBEDDING_MODEL, EMBEDDING_DIM, logger, get_openai_api_key, OPENAI_KEY_FILE
+from embeddings.cache import (
+    cache_embedding, get_cached_embedding, cache_source
+)
 from errors import TotalRecallError
 
 
-class OpenAIEmbeddings(EmbeddingProvider):
-    """OpenAI embedding provider using text-embedding-3-small."""
+class AsyncOpenAIEmbeddings:
+    """Async OpenAI embedding provider using text-embedding-3-small."""
 
     def __init__(self, model: str = None, dimension: int = None):
-        """Initialize OpenAI embeddings.
+        """Initialize async OpenAI embeddings.
 
         Args:
             model: Model name (defaults to config EMBEDDING_MODEL)
@@ -23,7 +23,7 @@ class OpenAIEmbeddings(EmbeddingProvider):
         """
         self._model = model or EMBEDDING_MODEL
         self._dimension = dimension or EMBEDDING_DIM
-        self._client: Optional[OpenAI] = None
+        self._client: Optional[AsyncOpenAI] = None
 
     @property
     def name(self) -> str:
@@ -33,22 +33,20 @@ class OpenAIEmbeddings(EmbeddingProvider):
     def dimension(self) -> int:
         return self._dimension
 
-    def _get_client(self) -> OpenAI:
-        """Get or create OpenAI client."""
+    def _get_client(self) -> AsyncOpenAI:
+        """Get or create async OpenAI client."""
         if self._client is None:
-            from config import get_openai_api_key, OPENAI_KEY_FILE
             api_key = get_openai_api_key()
             if not api_key:
                 raise TotalRecallError(
-                    f"OpenAI API key not found. Create {OPENAI_KEY_FILE} with your key, "
-                    "or set OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS environment variable.",
+                    f"OpenAI API key not found. Create {OPENAI_KEY_FILE} with your key.",
                     "missing_api_key"
                 )
-            self._client = OpenAI(api_key=api_key)
+            self._client = AsyncOpenAI(api_key=api_key)
         return self._client
 
-    def get_embedding(self, text: str, use_cache: bool = True) -> list[float]:
-        """Get embedding from OpenAI with caching.
+    async def get_embedding(self, text: str, use_cache: bool = True) -> list[float]:
+        """Get embedding from OpenAI with async caching.
 
         Args:
             text: Text to embed
@@ -62,13 +60,13 @@ class OpenAIEmbeddings(EmbeddingProvider):
         """
         # Check cache first
         if use_cache:
-            cached = get_cached_embedding(text)
+            cached = await get_cached_embedding(text)
             if cached is not None:
                 return cached
 
         try:
             client = self._get_client()
-            response = client.embeddings.create(
+            response = await client.embeddings.create(
                 model=self._model,
                 input=text
             )
@@ -76,7 +74,7 @@ class OpenAIEmbeddings(EmbeddingProvider):
         except TotalRecallError:
             raise
         except Exception as e:
-            logger.error(f"Embedding API call failed: {e}")
+            logger.error(f"Async embedding API call failed: {e}")
             raise TotalRecallError(
                 f"Failed to get embedding from OpenAI: {e}",
                 "embedding_failed",
@@ -85,11 +83,11 @@ class OpenAIEmbeddings(EmbeddingProvider):
 
         # Cache the result
         if use_cache:
-            cache_embedding(text, embedding)
+            await cache_embedding(text, embedding)
 
         return embedding
 
-    def get_embeddings_batch(
+    async def get_embeddings_batch(
         self,
         texts: list[str],
         use_cache: bool = True
@@ -117,7 +115,7 @@ class OpenAIEmbeddings(EmbeddingProvider):
 
         if use_cache:
             for i, text in enumerate(texts):
-                cached = get_cached_embedding(text)
+                cached = await get_cached_embedding(text)
                 if cached is not None:
                     results[i] = cached
                 else:
@@ -133,7 +131,7 @@ class OpenAIEmbeddings(EmbeddingProvider):
             client = self._get_client()
             # Send all uncached texts in a single request
             batch_texts = [t for _, t in texts_to_embed]
-            response = client.embeddings.create(
+            response = await client.embeddings.create(
                 model=self._model,
                 input=batch_texts
             )
@@ -145,14 +143,14 @@ class OpenAIEmbeddings(EmbeddingProvider):
 
                 # Cache the result
                 if use_cache:
-                    cache_embedding(text, embedding)
+                    await cache_embedding(text, embedding)
 
-            logger.debug(f"Batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
+            logger.debug(f"Async batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
 
         except TotalRecallError:
             raise
         except Exception as e:
-            logger.error(f"Batch embedding API call failed: {e}")
+            logger.error(f"Async batch embedding API call failed: {e}")
             raise TotalRecallError(
                 f"Failed to get embeddings from OpenAI: {e}",
                 "embedding_failed",
@@ -163,26 +161,26 @@ class OpenAIEmbeddings(EmbeddingProvider):
 
 
 # Default provider instance
-_default_provider: Optional[OpenAIEmbeddings] = None
+_default_provider: Optional[AsyncOpenAIEmbeddings] = None
 
 
-def _get_provider() -> OpenAIEmbeddings:
-    """Get or create the default provider."""
+def _get_async_provider() -> AsyncOpenAIEmbeddings:
+    """Get or create the default async provider."""
     global _default_provider
     if _default_provider is None:
-        _default_provider = OpenAIEmbeddings()
+        _default_provider = AsyncOpenAIEmbeddings()
     return _default_provider
 
 
-def _reset_provider() -> None:
+def _reset_async_provider() -> None:
     """Reset the default provider (for testing)."""
     global _default_provider
     _default_provider = None
 
 
-# Backward-compatible functions
-def get_embedding(text: str, use_cache: bool = True) -> list[float]:
-    """Get embedding from OpenAI with caching.
+# Convenience functions
+async def get_embedding_async(text: str, use_cache: bool = True) -> list[float]:
+    """Get embedding from OpenAI with async caching.
 
     Args:
         text: Text to embed
@@ -194,13 +192,13 @@ def get_embedding(text: str, use_cache: bool = True) -> list[float]:
     Raises:
         TotalRecallError: If API key is missing or API call fails
     """
-    return _get_provider().get_embedding(text, use_cache)
+    return await _get_async_provider().get_embedding(text, use_cache)
 
 
-def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
-    """Get embeddings for multiple texts in a single API call.
+async def get_embeddings_batch_async(texts: list[str], use_cache: bool = True) -> list[list[float]]:
+    """Get embeddings for multiple texts in a single async API call.
 
-    More efficient than calling get_embedding() for each text separately.
+    More efficient than calling get_embedding_async() for each text separately.
 
     Args:
         texts: List of texts to embed
@@ -212,4 +210,4 @@ def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[
     Raises:
         TotalRecallError: If API key is missing or API call fails
     """
-    return _get_provider().get_embeddings_batch(texts, use_cache)
+    return await _get_async_provider().get_embeddings_batch(texts, use_cache)

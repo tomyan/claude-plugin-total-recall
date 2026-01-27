@@ -1,14 +1,20 @@
-"""Vector search operations for total-recall."""
+"""Async vector search operations for total-recall."""
 
 from datetime import datetime
 from typing import Optional
 
-from db.connection import get_db
-from embeddings.openai import get_embedding
+from db.async_connection import get_async_db
+from embeddings.openai import get_embedding_async
+from embeddings.cache import cache_source
 from embeddings.serialize import serialize_embedding
+from utils.async_retry import retry_with_backoff
 
 
-def _update_access_tracking(idea_ids: list[int], db=None, session: str = None) -> None:
+async def _update_access_tracking_async(
+    idea_ids: list[int],
+    db=None,
+    session: str = None
+) -> None:
     """Update access_count and last_accessed for retrieved ideas.
 
     Also records activation in working memory if session is provided.
@@ -21,38 +27,43 @@ def _update_access_tracking(idea_ids: list[int], db=None, session: str = None) -
     if not idea_ids:
         return
 
-    close_db = False
-    if db is None:
-        db = get_db()
-        close_db = True
+    async def do_update():
+        nonlocal db
+        close_db = False
+        if db is None:
+            db = await get_async_db()
+            close_db = True
 
-    now = datetime.utcnow().isoformat()
-    placeholders = ','.join('?' * len(idea_ids))
-    db.execute(f"""
-        UPDATE ideas
-        SET access_count = access_count + 1,
-            last_accessed = ?
-        WHERE id IN ({placeholders})
-    """, [now] + idea_ids)
+        try:
+            now = datetime.utcnow().isoformat()
+            placeholders = ','.join('?' * len(idea_ids))
+            await db.execute(f"""
+                UPDATE ideas
+                SET access_count = access_count + 1,
+                    last_accessed = ?
+                WHERE id IN ({placeholders})
+            """, [now] + idea_ids)
 
-    # Also record in working memory if session provided
-    if session:
-        for idea_id in idea_ids:
-            db.execute("""
-                INSERT INTO working_memory (session, idea_id, activation, last_access)
-                VALUES (?, ?, 1.0, ?)
-                ON CONFLICT(session, idea_id) DO UPDATE SET
-                    activation = MIN(1.0, activation + 0.2),
-                    last_access = excluded.last_access
-            """, (session, idea_id, now))
+            # Also record in working memory if session provided
+            if session:
+                for idea_id in idea_ids:
+                    await db.execute("""
+                        INSERT INTO working_memory (session, idea_id, activation, last_access)
+                        VALUES (?, ?, 1.0, ?)
+                        ON CONFLICT(session, idea_id) DO UPDATE SET
+                            activation = MIN(1.0, activation + 0.2),
+                            last_access = excluded.last_access
+                    """, (session, idea_id, now))
 
-    db.commit()
+            await db.commit()
+        finally:
+            if close_db:
+                await db.close()
 
-    if close_db:
-        db.close()
+    await retry_with_backoff(do_update)
 
 
-def search_ideas(
+async def search_ideas_async(
     query: str,
     limit: int = 10,
     session: Optional[str] = None,
@@ -61,59 +72,81 @@ def search_ideas(
     include_forgotten: bool = False,
     show_originals: bool = False
 ) -> list[dict]:
-    """Search for similar ideas using vector similarity."""
-    query_embedding = get_embedding(query)
-    db = get_db()
+    """Search for similar ideas using vector similarity (async).
 
-    # Vector search with larger k for filtering
-    k = limit * 3 if (session or intent) else limit
+    Args:
+        query: Search query text
+        limit: Maximum results to return
+        session: Optional session to filter by
+        intent: Optional intent to filter by
+        recency_weight: Weight for recency (not currently used)
+        include_forgotten: Include forgotten ideas if True
+        show_originals: Show consolidated original ideas if True
 
-    # Build filters
-    forgotten_filter = "" if include_forgotten else "AND (i.forgotten = FALSE OR i.forgotten IS NULL)"
-    consolidated_filter = "" if show_originals else "AND (i.consolidated_into IS NULL)"
-    cursor = db.execute(f"""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic,
-            e.distance
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-            {forgotten_filter}
-            {consolidated_filter}
-        ORDER BY e.distance
-    """, (serialize_embedding(query_embedding), k))
+    Returns:
+        List of matching idea dicts
+    """
+    async with cache_source("search"):
+        query_embedding = await get_embedding_async(query)
 
-    results = []
-    for row in cursor:
-        # Apply filters
-        if session and row['session'] != session:
-            continue
-        if intent and row['intent'] != intent:
-            continue
+    async def do_search():
+        db = await get_async_db()
+        try:
+            # Vector search with larger k for filtering
+            k = limit * 3 if (session or intent) else limit
 
-        results.append(dict(row))
-        if len(results) >= limit:
-            break
+            # Build filters
+            forgotten_filter = "" if include_forgotten else "AND (i.forgotten = FALSE OR i.forgotten IS NULL)"
+            consolidated_filter = "" if show_originals else "AND (i.consolidated_into IS NULL)"
+            cursor = await db.execute(f"""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    s.session, s.name as topic,
+                    e.distance
+                FROM idea_embeddings e
+                JOIN ideas i ON i.id = e.idea_id
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE e.embedding MATCH ? AND k = ?
+                    {forgotten_filter}
+                    {consolidated_filter}
+                ORDER BY e.distance
+            """, (serialize_embedding(query_embedding), k))
 
-    # Update access tracking for returned results
-    if results:
-        _update_access_tracking([r['id'] for r in results], db, session=session)
+            results = []
+            rows = await cursor.fetchall()
+            for row in rows:
+                # Apply filters
+                if session and row['session'] != session:
+                    continue
+                if intent and row['intent'] != intent:
+                    continue
 
-    db.close()
-    return results
+                results.append(dict(row))
+                if len(results) >= limit:
+                    break
+
+            # Update access tracking for returned results
+            if results:
+                await _update_access_tracking_async(
+                    [r['id'] for r in results], db, session=session
+                )
+
+            return results
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_search)
 
 
-def find_similar_ideas(
+async def find_similar_ideas_async(
     idea_id: int,
     limit: int = 5,
     exclude_related: bool = True,
     same_session: Optional[bool] = None,
     session: Optional[str] = None
 ) -> list[dict]:
-    """Find ideas similar to a given idea.
+    """Find ideas similar to a given idea (async).
 
     Uses the idea's embedding to find semantically similar ideas.
 
@@ -127,87 +160,100 @@ def find_similar_ideas(
     Returns:
         List of similar idea dicts with distance
     """
-    db = get_db()
+    async def do_find():
+        db = await get_async_db()
+        try:
+            # Get the idea's embedding and session
+            cursor = await db.execute("""
+                SELECT e.embedding, s.session
+                FROM idea_embeddings e
+                JOIN ideas i ON i.id = e.idea_id
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE e.idea_id = ?
+            """, (idea_id,))
+            row = await cursor.fetchone()
 
-    # Get the idea's embedding and session
-    cursor = db.execute("""
-        SELECT e.embedding, s.session
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE e.idea_id = ?
-    """, (idea_id,))
-    row = cursor.fetchone()
+            if not row:
+                return []
 
-    if not row:
-        db.close()
-        return []
+            embedding = row["embedding"]
+            source_session = row["session"]
 
-    embedding = row["embedding"]
-    source_session = row["session"]
+            # Find similar ideas (exclude forgotten and consolidated)
+            cursor = await db.execute("""
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    s.session, s.name as topic,
+                    e.distance
+                FROM idea_embeddings e
+                JOIN ideas i ON i.id = e.idea_id
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE e.embedding MATCH ? AND k = ?
+                    AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                    AND (i.consolidated_into IS NULL)
+                ORDER BY e.distance
+            """, (embedding, limit + 20))  # Get extra to filter
 
-    # Find similar ideas (exclude forgotten and consolidated)
-    cursor = db.execute("""
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            s.session, s.name as topic,
-            e.distance
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-            AND (i.consolidated_into IS NULL)
-        ORDER BY e.distance
-    """, (embedding, limit + 20))  # Get extra to filter
+            results = []
+            related_ids = set()
 
-    results = []
-    related_ids = set()
+            if exclude_related:
+                # Get related idea IDs
+                rel_cursor = await db.execute("""
+                    SELECT to_id FROM relations WHERE from_id = ?
+                    UNION
+                    SELECT from_id FROM relations WHERE to_id = ?
+                """, (idea_id, idea_id))
+                rel_rows = await rel_cursor.fetchall()
+                related_ids = {
+                    row["to_id"] if "to_id" in row.keys() else row["from_id"]
+                    for row in rel_rows
+                }
 
-    if exclude_related:
-        # Get related idea IDs
-        rel_cursor = db.execute("""
-            SELECT to_id FROM relations WHERE from_id = ?
-            UNION
-            SELECT from_id FROM relations WHERE to_id = ?
-        """, (idea_id, idea_id))
-        related_ids = {row["to_id"] if "to_id" in row.keys() else row["from_id"] for row in rel_cursor}
+            rows = await cursor.fetchall()
+            for row in rows:
+                if row["id"] == idea_id:
+                    continue  # Skip self
+                if exclude_related and row["id"] in related_ids:
+                    continue
 
-    for row in cursor:
-        if row["id"] == idea_id:
-            continue  # Skip self
-        if exclude_related and row["id"] in related_ids:
-            continue
+                # Session filtering
+                row_session = row["session"]
+                if session is not None:
+                    if row_session != session:
+                        continue
+                elif same_session is True:
+                    if row_session != source_session:
+                        continue
+                elif same_session is False:
+                    if row_session == source_session:
+                        continue
 
-        # Session filtering
-        row_session = row["session"]
-        if session is not None:
-            if row_session != session:
-                continue
-        elif same_session is True:
-            if row_session != source_session:
-                continue
-        elif same_session is False:
-            if row_session == source_session:
-                continue
+                results.append(dict(row))
+                if len(results) >= limit:
+                    break
 
-        results.append(dict(row))
-        if len(results) >= limit:
-            break
+            # Update access tracking for returned results
+            if results:
+                # Use explicit session if provided, otherwise use source idea's session
+                track_session = session if session else source_session
+                await _update_access_tracking_async(
+                    [r['id'] for r in results], db, session=track_session
+                )
 
-    # Update access tracking for returned results
-    if results:
-        # Use explicit session if provided, otherwise use source idea's session
-        track_session = session if session else source_session
-        _update_access_tracking([r['id'] for r in results], db, session=track_session)
+            return results
+        finally:
+            await db.close()
 
-    db.close()
-    return results
+    return await retry_with_backoff(do_find)
 
 
-def enrich_with_relations(results: list[dict], max_related: int = 3) -> list[dict]:
-    """Enrich search results with related ideas.
+async def enrich_with_relations_async(
+    results: list[dict],
+    max_related: int = 3
+) -> list[dict]:
+    """Enrich search results with related ideas (async).
 
     Adds a 'related' field to each result showing ideas that
     supersede, contradict, or answer it.
@@ -222,72 +268,93 @@ def enrich_with_relations(results: list[dict], max_related: int = 3) -> list[dic
     if not results:
         return results
 
-    db = get_db()
+    async def do_enrich():
+        db = await get_async_db()
+        try:
+            for result in results:
+                idea_id = result.get("id")
+                if not idea_id:
+                    continue
 
-    for result in results:
-        idea_id = result.get("id")
-        if not idea_id:
-            continue
+                related = []
 
-        related = []
+                # Get outgoing relations
+                cursor = await db.execute("""
+                    SELECT r.relation_type, i.id, i.content, i.intent
+                    FROM relations r
+                    JOIN ideas i ON i.id = r.to_id
+                    WHERE r.from_id = ?
+                    LIMIT ?
+                """, (idea_id, max_related))
+                rows = await cursor.fetchall()
+                for row in rows:
+                    related.append({
+                        "type": row["relation_type"],
+                        "direction": "outgoing",
+                        "id": row["id"],
+                        "content": row["content"][:100],  # Truncate
+                        "intent": row["intent"]
+                    })
 
-        # Get outgoing relations
-        cursor = db.execute("""
-            SELECT r.relation_type, i.id, i.content, i.intent
-            FROM relations r
-            JOIN ideas i ON i.id = r.to_id
-            WHERE r.from_id = ?
-            LIMIT ?
-        """, (idea_id, max_related))
-        for row in cursor:
-            related.append({
-                "type": row["relation_type"],
-                "direction": "outgoing",
-                "id": row["id"],
-                "content": row["content"][:100],  # Truncate
-                "intent": row["intent"]
-            })
+                # Get incoming relations (if room)
+                if len(related) < max_related:
+                    cursor = await db.execute("""
+                        SELECT r.relation_type, i.id, i.content, i.intent
+                        FROM relations r
+                        JOIN ideas i ON i.id = r.from_id
+                        WHERE r.to_id = ?
+                        LIMIT ?
+                    """, (idea_id, max_related - len(related)))
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        related.append({
+                            "type": row["relation_type"],
+                            "direction": "incoming",
+                            "id": row["id"],
+                            "content": row["content"][:100],
+                            "intent": row["intent"]
+                        })
 
-        # Get incoming relations (if room)
-        if len(related) < max_related:
-            cursor = db.execute("""
-                SELECT r.relation_type, i.id, i.content, i.intent
-                FROM relations r
-                JOIN ideas i ON i.id = r.from_id
-                WHERE r.to_id = ?
-                LIMIT ?
-            """, (idea_id, max_related - len(related)))
-            for row in cursor:
-                related.append({
-                    "type": row["relation_type"],
-                    "direction": "incoming",
-                    "id": row["id"],
-                    "content": row["content"][:100],
-                    "intent": row["intent"]
-                })
+                result["related"] = related
 
-        result["related"] = related
+            return results
+        finally:
+            await db.close()
 
-    db.close()
-    return results
+    return await retry_with_backoff(do_enrich)
 
 
-def search_spans(query: str, limit: int = 5) -> list[dict]:
-    """Search for similar topic spans."""
-    db = get_db()
-    query_embedding = get_embedding(query)
+async def search_spans_async(query: str, limit: int = 5) -> list[dict]:
+    """Search for similar topic spans (async).
 
-    cursor = db.execute("""
-        SELECT
-            s.id, s.session, s.name, s.summary,
-            s.start_line, s.end_line, s.depth, s.created_at,
-            e.distance
-        FROM span_embeddings e
-        JOIN spans s ON s.id = e.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-        ORDER BY e.distance
-    """, (serialize_embedding(query_embedding), limit))
+    Args:
+        query: Search query text
+        limit: Maximum results to return
 
-    results = [dict(row) for row in cursor]
-    db.close()
-    return results
+    Returns:
+        List of matching span dicts
+    """
+    async with cache_source("search"):
+        query_embedding = await get_embedding_async(query)
+
+    async def do_search():
+        db = await get_async_db()
+        try:
+            cursor = await db.execute("""
+                SELECT
+                    s.id, s.session, s.name, s.summary,
+                    s.start_line, s.end_line, s.depth, s.created_at,
+                    e.distance
+                FROM span_embeddings e
+                JOIN spans s ON s.id = e.span_id
+                WHERE e.embedding MATCH ? AND k = ?
+                ORDER BY e.distance
+            """, (serialize_embedding(query_embedding), limit))
+
+            rows = await cursor.fetchall()
+            results = [dict(row) for row in rows]
+            return results
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_search)

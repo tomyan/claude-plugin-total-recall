@@ -252,6 +252,7 @@ def embed_ideas(idea_ids: list[int]) -> int:
 
     try:
         from embeddings.openai import OpenAIEmbeddings
+        from embeddings.cache import cache_source
         provider = OpenAIEmbeddings()
     except Exception:
         return 0
@@ -273,7 +274,8 @@ def embed_ideas(idea_ids: list[int]) -> int:
 
         # Generate embedding
         try:
-            embedding = provider.get_embedding(row["content"])
+            with cache_source("indexing"):
+                embedding = provider.get_embedding(row["content"])
 
             # Store embedding
             import json
@@ -310,6 +312,7 @@ def embed_messages(message_ids: list[int]) -> int:
 
     try:
         from embeddings.openai import OpenAIEmbeddings
+        from embeddings.cache import cache_source
         provider = OpenAIEmbeddings()
     except Exception:
         return 0
@@ -331,7 +334,8 @@ def embed_messages(message_ids: list[int]) -> int:
 
         # Generate embedding
         try:
-            embedding = provider.get_embedding(row["content"])
+            with cache_source("indexing"):
+                embedding = provider.get_embedding(row["content"])
 
             # Store embedding
             import json

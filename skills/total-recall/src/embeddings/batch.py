@@ -1,10 +1,16 @@
 """Batch embedding for ideas and spans."""
 
+import asyncio
 from typing import Any
 
 from db.connection import get_db
-from embeddings.openai import get_embeddings_batch
+from embeddings.openai import get_embeddings_batch_async
 from embeddings.serialize import serialize_embedding
+
+
+def get_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
+    """Sync wrapper for get_embeddings_batch_async."""
+    return asyncio.run(get_embeddings_batch_async(texts, use_cache))
 
 
 # Maximum texts per API call

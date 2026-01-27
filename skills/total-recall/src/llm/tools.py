@@ -83,12 +83,12 @@ def execute_tool(tool_name: str, tool_input: dict[str, Any], session: str = None
 def _search_ideas(query: str, limit: int = 5) -> str:
     """Search ideas by content similarity."""
     from embeddings.openai import OpenAIEmbeddingProvider
-    import os
+    from config import get_openai_api_key
 
     db = get_db()
 
     # Try vector search if embeddings available
-    api_key = os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    api_key = get_openai_api_key()
     if api_key:
         try:
             provider = OpenAIEmbeddingProvider(api_key=api_key)

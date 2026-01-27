@@ -1,18 +1,21 @@
-"""HyDE (Hypothetical Document Embeddings) search for total-recall."""
+"""Async HyDE (Hypothetical Document Embeddings) search for total-recall."""
 
+import asyncio
 from typing import Optional
 
 import config
-from db.connection import get_db
-from embeddings.openai import get_embedding
+from db.async_connection import get_async_db
+from embeddings.openai import get_embedding_async
+from embeddings.cache import cache_source
 from embeddings.serialize import serialize_embedding
 from errors import TotalRecallError
 from llm.claude import claude_complete
-from search.vector import _update_access_tracking
+from search.vector import _update_access_tracking_async
+from utils.async_retry import retry_with_backoff
 
 
-def generate_hypothetical_doc(query: str) -> str:
-    """Generate a hypothetical document that would answer the query.
+async def generate_hypothetical_doc_async(query: str) -> str:
+    """Generate a hypothetical document that would answer the query (async).
 
     Used for HyDE (Hypothetical Document Embeddings) to improve retrieval.
     Uses LLM to generate a plausible answer, which often matches stored
@@ -30,7 +33,11 @@ write a brief hypothetical answer that might appear in documentation or conversa
 Write in a direct, factual style as if you were recording a decision or explaining a solution.
 Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably"."""
 
-        hypothetical = claude_complete(query, system=system_prompt).strip()
+        # Run blocking Claude CLI call in thread pool
+        hypothetical = await asyncio.to_thread(
+            claude_complete, query, system=system_prompt
+        )
+        hypothetical = hypothetical.strip()
         config.logger.debug(f"HyDE generated: {hypothetical[:100]}...")
         return hypothetical
 
@@ -45,14 +52,14 @@ Keep it to 1-3 sentences. Do not include phrases like "I think" or "probably".""
         ) from e
 
 
-def hyde_search(
+async def hyde_search_async(
     query: str,
     limit: int = 10,
     session: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None
 ) -> list[dict]:
-    """HyDE search - generates hypothetical answer then searches.
+    """HyDE search - generates hypothetical answer then searches (async).
 
     For vague queries, this often retrieves better matches than raw query.
 
@@ -67,50 +74,57 @@ def hyde_search(
         List of matching idea dicts
     """
     # Generate hypothetical document
-    hypothetical = generate_hypothetical_doc(query)
+    hypothetical = await generate_hypothetical_doc_async(query)
 
     # Embed the hypothetical document
-    hypo_embedding = get_embedding(hypothetical)
+    async with cache_source("search"):
+        hypo_embedding = await get_embedding_async(hypothetical)
 
-    # Search with hypothetical embedding
-    db = get_db()
+    async def do_search():
+        db = await get_async_db()
+        try:
+            # Build query with filters (exclude forgotten and consolidated)
+            sql = """
+                SELECT
+                    i.id, i.content, i.intent, i.confidence,
+                    i.source_file, i.source_line, i.created_at,
+                    i.message_time,
+                    s.session, s.name as topic,
+                    e.distance
+                FROM idea_embeddings e
+                JOIN ideas i ON i.id = e.idea_id
+                LEFT JOIN spans s ON s.id = i.span_id
+                WHERE e.embedding MATCH ? AND k = ?
+                    AND (i.forgotten = FALSE OR i.forgotten IS NULL)
+                    AND (i.consolidated_into IS NULL)
+            """
+            params = [serialize_embedding(hypo_embedding), limit * 2]  # Get more for filtering
 
-    # Build query with filters (exclude forgotten and consolidated)
-    sql = """
-        SELECT
-            i.id, i.content, i.intent, i.confidence,
-            i.source_file, i.source_line, i.created_at,
-            i.message_time,
-            s.session, s.name as topic,
-            e.distance
-        FROM idea_embeddings e
-        JOIN ideas i ON i.id = e.idea_id
-        LEFT JOIN spans s ON s.id = i.span_id
-        WHERE e.embedding MATCH ? AND k = ?
-            AND (i.forgotten = FALSE OR i.forgotten IS NULL)
-            AND (i.consolidated_into IS NULL)
-    """
-    params = [serialize_embedding(hypo_embedding), limit * 2]  # Get more for filtering
+            if session:
+                sql += " AND s.session = ?"
+                params.append(session)
+            if since:
+                sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
+                params.append(since)
+            if until:
+                sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
+                params.append(until)
 
-    if session:
-        sql += " AND s.session = ?"
-        params.append(session)
-    if since:
-        sql += " AND COALESCE(i.message_time, i.created_at) >= ?"
-        params.append(since)
-    if until:
-        sql += " AND COALESCE(i.message_time, i.created_at) <= ?"
-        params.append(until)
+            sql += " ORDER BY e.distance LIMIT ?"
+            params.append(limit)
 
-    sql += " ORDER BY e.distance LIMIT ?"
-    params.append(limit)
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            results = [dict(row) for row in rows]
 
-    cursor = db.execute(sql, params)
-    results = [dict(row) for row in cursor]
+            # Update access tracking for returned results
+            if results:
+                await _update_access_tracking_async(
+                    [r['id'] for r in results], db, session=session
+                )
 
-    # Update access tracking for returned results
-    if results:
-        _update_access_tracking([r['id'] for r in results], db, session=session)
+            return results
+        finally:
+            await db.close()
 
-    db.close()
-    return results
+    return await retry_with_backoff(do_search)

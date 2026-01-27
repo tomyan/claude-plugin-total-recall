@@ -161,6 +161,36 @@ SCHEMA_SQL = """
     CREATE INDEX IF NOT EXISTS idx_working_memory_session ON working_memory(session);
     CREATE INDEX IF NOT EXISTS idx_working_memory_activation ON working_memory(activation);
 
+    -- Embedding cache (persistent with stats)
+    CREATE TABLE IF NOT EXISTS embedding_cache (
+        text_hash TEXT PRIMARY KEY,
+        text_preview TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_accessed TEXT DEFAULT CURRENT_TIMESTAMP,
+        hit_count INTEGER DEFAULT 0,
+        source TEXT CHECK(source IN ('search', 'indexing', 'backfill', 'other'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_embedding_cache_last_accessed ON embedding_cache(last_accessed);
+    CREATE INDEX IF NOT EXISTS idx_embedding_cache_source ON embedding_cache(source);
+
+    -- Cache statistics (running totals)
+    CREATE TABLE IF NOT EXISTS cache_stats (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        total_hits INTEGER DEFAULT 0,
+        total_misses INTEGER DEFAULT 0,
+        hits_search INTEGER DEFAULT 0,
+        hits_indexing INTEGER DEFAULT 0,
+        hits_backfill INTEGER DEFAULT 0,
+        misses_search INTEGER DEFAULT 0,
+        misses_indexing INTEGER DEFAULT 0,
+        misses_backfill INTEGER DEFAULT 0,
+        last_reset TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    INSERT OR IGNORE INTO cache_stats (id) VALUES (1);
+
     -- Vector embeddings for spans
     CREATE VIRTUAL TABLE IF NOT EXISTS span_embeddings USING vec0(
         span_id INTEGER PRIMARY KEY,

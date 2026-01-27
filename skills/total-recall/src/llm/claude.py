@@ -1,5 +1,6 @@
 """Claude CLI integration for LLM tasks."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -8,6 +9,24 @@ from typing import Any, Optional
 from config import logger
 from errors import TotalRecallError
 from llm.tools import INDEXING_TOOLS, execute_tool
+
+
+async def claude_complete_async(
+    prompt: str,
+    system: Optional[str] = None,
+    model: str = "haiku"
+) -> str:
+    """Async wrapper for claude_complete - runs in thread pool.
+
+    Args:
+        prompt: The user prompt
+        system: Optional system prompt
+        model: Model to use (default: haiku for speed)
+
+    Returns:
+        The response text
+    """
+    return await asyncio.to_thread(claude_complete, prompt, system, model)
 
 
 def claude_complete(

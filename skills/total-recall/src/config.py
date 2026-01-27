@@ -169,16 +169,13 @@ OPENAI_KEY_FILE = Path.home() / ".config" / "total-recall" / "openai-api-key"
 
 
 def get_openai_api_key() -> Optional[str]:
-    """Get OpenAI API key from file or environment variable.
+    """Get OpenAI API key from file.
 
-    Checks in order:
-    1. File at ~/.claude-plugin-total-recall/openai-api-key
-    2. OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS env var
+    Reads from: ~/.config/total-recall/openai-api-key
 
     Returns:
         API key string or None if not found
     """
-    # Check file first (more reliable across processes)
     if OPENAI_KEY_FILE.exists():
         try:
             key = OPENAI_KEY_FILE.read_text().strip()
@@ -187,8 +184,7 @@ def get_openai_api_key() -> Optional[str]:
         except Exception:
             pass
 
-    # Fall back to env var
-    return os.environ.get("OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS")
+    return None
 
 # Logging setup
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)

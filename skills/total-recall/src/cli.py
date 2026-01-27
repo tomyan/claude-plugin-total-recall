@@ -6,6 +6,7 @@ Usage: total-recall <command> [args]
 """
 
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -40,10 +41,8 @@ def error_result(error: str, code: str = "unknown", details: dict = None) -> dic
 ❌ CONFIGURATION ERROR: {error}
 
 To fix this:
+  mkdir -p ~/.config/total-recall
   echo 'your-openai-api-key' > {OPENAI_KEY_FILE}
-
-Or set environment variable:
-  export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS="your-openai-api-key"
 
 Then retry your search.
 ================================================================================
@@ -82,7 +81,7 @@ def resolve_session(args) -> str | None:
     # Try to derive from cwd
     cwd = getattr(args, 'cwd', None)
     if cwd:
-        session = memory_db.get_session_for_cwd(cwd)
+        session = asyncio.run(memory_db.get_session_for_cwd(cwd))
         if session:
             return session
 
@@ -123,7 +122,7 @@ def run_search_command(
         # Auto-analyze query for temporal/intent filters if not explicitly provided
         detected = {}
         if auto_analyze:
-            detected = memory_db.analyze_query(query)
+            detected = asyncio.run(memory_db.analyze_query(query))
             # Only use detected filters if not explicitly provided
             if not recent and not since and not until:
                 recent = detected.get("temporal")
@@ -131,40 +130,40 @@ def run_search_command(
                 intent = detected.get("intent_filter")
 
         # Check if query should be decomposed
-        decomp = memory_db.decompose_query(query)
+        decomp = asyncio.run(memory_db.decompose_query(query))
         use_decomposed = decomp["type"] != "simple" or show_decomposition
 
         if since or until or recent:
             # Use temporal search when date filters provided
-            results = memory_db.search_ideas_temporal(
+            results = asyncio.run(memory_db.search_ideas_temporal(
                 query, limit=limit, since=since, until=until,
                 relative=recent, session=session,
                 include_forgotten=include_forgotten
-            )
+            ))
             # Apply intent filter if specified
             if intent:
                 results = [r for r in results if r.get('intent') == intent]
         elif use_decomposed:
             # Use decomposed search for complex queries
-            decomp_result = memory_db.decomposed_search(
+            decomp_result = asyncio.run(memory_db.decomposed_search(
                 query, limit=limit, session=session,
                 show_decomposition=show_decomposition
-            )
+            ))
             results = decomp_result["results"]
             if decomp_result.get("decomposition"):
                 detected["decomposition"] = decomp_result["decomposition"]
         else:
-            results = memory_db.search_ideas(
+            results = asyncio.run(memory_db.search_ideas(
                 query, limit=limit, session=session, intent=intent,
                 include_forgotten=include_forgotten,
                 show_originals=show_originals
-            )
+            ))
 
         # Apply LLM relevance verification if requested
         if verify or explain:
-            results = memory_db.verify_relevance(
+            results = asyncio.run(memory_db.verify_relevance(
                 query, results, threshold=3, explain=explain
-            )
+            ))
             detected["verified"] = True
 
         # Add metadata about detected filters
@@ -182,7 +181,7 @@ def run_stats_command() -> dict:
     """Run stats command with error handling."""
     try:
         import memory_db
-        stats = memory_db.get_stats()
+        stats = asyncio.run(memory_db.get_stats())
         return safe_result(stats)
     except memory_db.TotalRecallError as e:
         return error_result(str(e), e.error_code, e.details)
@@ -219,7 +218,7 @@ def run_command(args):
 
     try:
         if args.command == "init":
-            memory_db.init_db()
+            asyncio.run(memory_db.init_db())
             print(json.dumps({"success": True, "message": "Database initialized"}))
 
         elif args.command == "search":
@@ -230,7 +229,7 @@ def run_command(args):
             # --after-session sets since to the end of that session
             since = args.since
             if args.after_session:
-                session_range = memory_db.get_session_time_range(args.after_session)
+                session_range = asyncio.run(memory_db.get_session_time_range(args.after_session))
                 if session_range:
                     since = session_range['end_time']
                     print(f"# Searching after session '{args.after_session}' (since {since[:10]})", file=sys.stderr)
@@ -281,12 +280,12 @@ def run_command(args):
             since, until = args.since, args.until
             time_filter = args.when if args.when else args.recent
             if time_filter:
-                since, until = memory_db.resolve_temporal_qualifier(time_filter)
+                since, until = asyncio.run(memory_db.resolve_temporal_qualifier(time_filter))
                 print(f"# Time filter: {time_filter} ({since[:10]} to {until[:10]})", file=sys.stderr)
-            results = memory_db.hybrid_search(
+            results = asyncio.run(memory_db.hybrid_search(
                 args.query, limit=args.limit, session=session,
                 since=since, until=until
-            )
+            ))
             # Apply intent filter if specified
             intent = getattr(args, 'intent', None)
             if intent:
@@ -302,29 +301,133 @@ def run_command(args):
             since, until = args.since, args.until
             time_filter = args.when if args.when else args.recent
             if time_filter:
-                since, until = memory_db.resolve_temporal_qualifier(time_filter)
+                since, until = asyncio.run(memory_db.resolve_temporal_qualifier(time_filter))
                 print(f"# Time filter: {time_filter} ({since[:10]} to {until[:10]})", file=sys.stderr)
-            results = memory_db.hyde_search(
+            results = asyncio.run(memory_db.hyde_search(
                 args.query, limit=args.limit, session=session,
                 since=since, until=until
-            )
+            ))
             # Apply intent filter if specified
             intent = getattr(args, 'intent', None)
             if intent:
                 results = [r for r in results if r.get('intent') == intent]
             print(json.dumps(results, indent=2, default=str))
 
+        elif args.command == "multi-search":
+            # Parallel multi-strategy search using asyncio
+
+            # Parse strategies
+            strategies = [s.strip() for s in args.strategies.split(',')]
+            valid_strategies = {'hybrid', 'hyde', 'semantic', 'decisions', 'todos', 'questions', 'problems', 'solutions'}
+            invalid = set(strategies) - valid_strategies
+            if invalid:
+                print(json.dumps(error_result(f"Invalid strategies: {invalid}", "invalid_strategy")))
+                sys.exit(1)
+
+            # Resolve session (--local means use cwd, otherwise global)
+            session = None
+            if args.local:
+                if args.cwd:
+                    session = asyncio.run(memory_db.get_session_for_cwd(args.cwd))
+                    if session:
+                        print(f"# Scoped to project: {session}", file=sys.stderr)
+                    else:
+                        print("# Warning: --local specified but couldn't detect project from cwd", file=sys.stderr)
+
+            # Resolve temporal filters
+            since, until = args.since, args.until
+            time_filter = args.when if args.when else args.recent
+            if time_filter:
+                since, until = asyncio.run(memory_db.resolve_temporal_qualifier(time_filter))
+                print(f"# Time filter: {time_filter} ({since[:10]} to {until[:10]})", file=sys.stderr)
+
+            print(f"# Running strategies: {', '.join(strategies)}", file=sys.stderr)
+
+            # Map intent-based strategies to their filter values
+            intent_map = {
+                'decisions': 'decision',
+                'todos': 'todo',
+                'questions': 'question',
+                'problems': 'problem',
+                'solutions': 'solution',
+            }
+
+            async def run_strategy_async(strategy: str) -> tuple[str, list[dict]]:
+                """Run a single search strategy and return (strategy_name, results)."""
+                try:
+                    if strategy == 'hybrid':
+                        results = await memory_db.hybrid_search(
+                            args.query, limit=args.limit, session=session,
+                            since=since, until=until
+                        )
+                    elif strategy == 'hyde':
+                        results = await memory_db.hyde_search(
+                            args.query, limit=args.limit, session=session,
+                            since=since, until=until
+                        )
+                    elif strategy == 'semantic':
+                        results = await memory_db.search_ideas(
+                            args.query, limit=args.limit, session=session
+                        )
+                        # Apply temporal filters manually for semantic search
+                        if since:
+                            results = [r for r in results if r.get('message_time', r.get('created_at', '')) >= since]
+                        if until:
+                            results = [r for r in results if r.get('message_time', r.get('created_at', '')) <= until]
+                    elif strategy in intent_map:
+                        # Intent-filtered search using hybrid as base
+                        results = await memory_db.hybrid_search(
+                            args.query, limit=args.limit, session=session,
+                            since=since, until=until
+                        )
+                        results = [r for r in results if r.get('intent') == intent_map[strategy]]
+                    else:
+                        results = []
+                    return (strategy, results)
+                except Exception as e:
+                    print(f"# Strategy {strategy} failed: {e}", file=sys.stderr)
+                    return (strategy, [])
+
+            async def run_all_strategies():
+                tasks = [run_strategy_async(s) for s in strategies]
+                return await asyncio.gather(*tasks)
+
+            # Run all strategies in parallel
+            all_results = {}
+            seen_ids = set()
+            combined = []
+
+            strategy_results = asyncio.run(run_all_strategies())
+            for strategy, results in strategy_results:
+                all_results[strategy] = len(results)
+                for r in results:
+                    if r['id'] not in seen_ids:
+                        seen_ids.add(r['id'])
+                        r['_strategy'] = strategy  # Track which strategy found it
+                        combined.append(r)
+
+            # Sort by distance (if available) and limit
+            combined.sort(key=lambda x: x.get('distance', 999))
+            combined = combined[:args.limit]
+
+            # Report strategy contributions
+            for strategy, count in all_results.items():
+                print(f"#   {strategy}: {count} results", file=sys.stderr)
+            print(f"# Combined: {len(combined)} unique results", file=sys.stderr)
+
+            print(json.dumps(combined, indent=2, default=str))
+
         elif args.command == "expand":
             # Search with topic expansion
             session = resolve_session(args)
             if session:
                 print(f"# Primary session: {session}", file=sys.stderr)
-            results = memory_db.search_with_topic_expansion(
+            results = asyncio.run(memory_db.search_with_topic_expansion(
                 args.query,
                 limit=args.limit,
                 session=session,
                 expand_limit=args.expand_limit
-            )
+            ))
             # Format output
             print(f"# Primary results: {len(results['primary_results'])}", file=sys.stderr)
             if results['linked_results']:
@@ -333,63 +436,71 @@ def run_command(args):
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "topic-links":
-            links = memory_db.get_topic_links(args.topic_id)
+            links = asyncio.run(memory_db.get_topic_links(args.topic_id))
             print(json.dumps(links, indent=2, default=str))
 
         elif args.command == "link-topics":
-            link_id = memory_db.link_topics(
+            link_id = asyncio.run(memory_db.link_topics(
                 args.topic_id,
                 args.related_id,
                 similarity=args.similarity,
                 link_type='manual'
-            )
+            ))
             print(json.dumps({"link_id": link_id, "success": True}))
 
         elif args.command == "auto-link":
             # Get all topics and auto-link them
-            topics = memory_db.list_topics()
-            all_links = []
-            for topic in topics:
-                # Get the session for this topic
-                db = memory_db.get_db()
-                cursor = db.execute(
-                    "SELECT DISTINCT session FROM spans WHERE topic_id = ?",
-                    (topic['id'],)
-                )
-                sessions = [r['session'] for r in cursor]
-                db.close()
-
-                if not sessions:
-                    continue
-
-                # Find related topics (excluding this topic's sessions)
-                related = memory_db.find_related_topics(
-                    topic['id'],
-                    exclude_sessions=sessions,
-                    min_similarity=args.min_similarity
-                )
-
-                for rel in related:
-                    link_info = {
-                        "topic_id": topic['id'],
-                        "topic_name": topic['name'],
-                        "related_id": rel['id'],
-                        "related_name": rel['name'],
-                        "similarity": rel['similarity'],
-                        "related_session": rel.get('session')
-                    }
-
-                    if args.dry_run:
-                        all_links.append(link_info)
-                    else:
-                        link_id = memory_db.link_topics(
-                            topic['id'], rel['id'],
-                            similarity=rel['similarity'],
-                            link_type='semantic'
+            async def do_auto_link():
+                topics = await memory_db.list_topics()
+                all_links = []
+                for topic in topics:
+                    # Get the session for this topic
+                    from db.async_connection import get_async_db
+                    db = await get_async_db()
+                    try:
+                        cursor = await db.execute(
+                            "SELECT DISTINCT session FROM spans WHERE topic_id = ?",
+                            (topic['id'],)
                         )
-                        link_info['link_id'] = link_id
-                        all_links.append(link_info)
+                        rows = await cursor.fetchall()
+                        sessions = [r['session'] for r in rows]
+                    finally:
+                        await db.close()
 
+                    if not sessions:
+                        continue
+
+                    # Find related topics (excluding this topic's sessions)
+                    related = await memory_db.find_related_topics(
+                        topic['id'],
+                        exclude_sessions=sessions,
+                        min_similarity=args.min_similarity
+                    )
+
+                    for rel in related:
+                        link_info = {
+                            "topic_id": topic['id'],
+                            "topic_name": topic['name'],
+                            "related_id": rel['id'],
+                            "related_name": rel['name'],
+                            "similarity": rel['similarity'],
+                            "related_session": rel.get('session')
+                        }
+
+                        if args.dry_run:
+                            all_links.append(link_info)
+                        else:
+                            link_id = await memory_db.link_topics(
+                                topic['id'], rel['id'],
+                                similarity=rel['similarity'],
+                                link_type='semantic'
+                            )
+                            link_info['link_id'] = link_id
+                            all_links.append(link_info)
+
+                return all_links
+
+            all_links = asyncio.run(do_auto_link())
             print(json.dumps({
                 "dry_run": args.dry_run,
                 "links_found": len(all_links),
@@ -398,63 +509,74 @@ def run_command(args):
 
         elif args.command == "refresh-embeddings":
             # Find spans without embeddings
-            db = memory_db.get_db()
-            sql = """
-                SELECT s.id, s.name, s.session
-                FROM spans s
-                LEFT JOIN span_embeddings se ON se.span_id = s.id
-                WHERE se.span_id IS NULL
-            """
-            params = []
-            if args.session:
-                sql += " AND s.session = ?"
-                params.append(args.session)
-
-            cursor = db.execute(sql, params)
-            spans_to_update = list(cursor)
-            db.close()
-
-            print(f"Found {len(spans_to_update)} spans without embeddings", file=sys.stderr)
-
-            updated = 0
-            for span in spans_to_update:
+            async def do_refresh():
+                from db.async_connection import get_async_db
+                db = await get_async_db()
                 try:
-                    memory_db.update_span_embedding(span['id'])
-                    updated += 1
-                    print(f"  Updated: {span['name'][:50]}... ({span['session']})", file=sys.stderr)
-                except Exception as e:
-                    print(f"  Failed: {span['name'][:50]}... - {e}", file=sys.stderr)
+                    sql = """
+                        SELECT s.id, s.name, s.session
+                        FROM spans s
+                        LEFT JOIN span_embeddings se ON se.span_id = s.id
+                        WHERE se.span_id IS NULL
+                    """
+                    params = []
+                    if args.session:
+                        sql += " AND s.session = ?"
+                        params.append(args.session)
 
-            print(json.dumps({
-                "spans_found": len(spans_to_update),
-                "spans_updated": updated
-            }, indent=2))
+                    cursor = await db.execute(sql, params)
+                    spans_to_update = [dict(row) for row in await cursor.fetchall()]
+                finally:
+                    await db.close()
+
+                print(f"Found {len(spans_to_update)} spans without embeddings", file=sys.stderr)
+
+                updated = 0
+                for span in spans_to_update:
+                    try:
+                        await memory_db.update_span_embedding(span['id'])
+                        updated += 1
+                        print(f"  Updated: {span['name'][:50]}... ({span['session']})", file=sys.stderr)
+                    except Exception as e:
+                        print(f"  Failed: {span['name'][:50]}... - {e}", file=sys.stderr)
+
+                return {"spans_found": len(spans_to_update), "spans_updated": updated}
+
+            result = asyncio.run(do_refresh())
+            print(json.dumps(result, indent=2))
 
         elif args.command == "embed-ideas":
             # Find ideas without embeddings
-            db = memory_db.get_db()
-            cursor = db.execute("""
-                SELECT i.id, i.content
-                FROM ideas i
-                LEFT JOIN idea_embeddings ie ON ie.idea_id = i.id
-                WHERE ie.idea_id IS NULL
-            """)
-            ideas_to_embed = list(cursor)
-            db.close()
+            async def do_embed_ideas():
+                from db.async_connection import get_async_db
+                db = await get_async_db()
+                try:
+                    cursor = await db.execute("""
+                        SELECT i.id, i.content
+                        FROM ideas i
+                        LEFT JOIN idea_embeddings ie ON ie.idea_id = i.id
+                        WHERE ie.idea_id IS NULL
+                    """)
+                    ideas_to_embed = [dict(row) for row in await cursor.fetchall()]
+                finally:
+                    await db.close()
 
-            print(f"Found {len(ideas_to_embed)} ideas without embeddings", file=sys.stderr)
+                print(f"Found {len(ideas_to_embed)} ideas without embeddings", file=sys.stderr)
 
-            if not ideas_to_embed:
-                print(json.dumps({"ideas_found": 0, "ideas_embedded": 0}))
-            else:
-                from executor import embed_ideas
-                idea_ids = [idea['id'] for idea in ideas_to_embed]
-                embedded = embed_ideas(idea_ids)
-                print(f"Embedded {embedded} ideas", file=sys.stderr)
-                print(json.dumps({
-                    "ideas_found": len(ideas_to_embed),
-                    "ideas_embedded": embedded
-                }, indent=2))
+                if not ideas_to_embed:
+                    return {"ideas_found": 0, "ideas_embedded": 0}
+                else:
+                    from executor import embed_ideas
+                    idea_ids = [idea['id'] for idea in ideas_to_embed]
+                    embedded = embed_ideas(idea_ids)
+                    print(f"Embedded {embedded} ideas", file=sys.stderr)
+                    return {
+                        "ideas_found": len(ideas_to_embed),
+                        "ideas_embedded": embedded
+                    }
+
+            result = asyncio.run(do_embed_ideas())
+            print(json.dumps(result, indent=2))
 
         elif args.command == "stats":
             result = run_stats_command()
@@ -463,6 +585,16 @@ def run_command(args):
             else:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
+
+        elif args.command == "cache-stats":
+            import asyncio
+            from embeddings.cache import get_embedding_cache_stats, clear_embedding_cache
+            if getattr(args, 'clear', False):
+                asyncio.run(clear_embedding_cache())
+                print(json.dumps({"success": True, "message": "Cache cleared"}))
+            else:
+                stats = asyncio.run(get_embedding_cache_stats())
+                print(json.dumps(stats, indent=2, default=str))
 
         elif args.command == "backfill":
             # Check for API key FIRST - refuse to backfill without it
@@ -532,49 +664,55 @@ def run_command(args):
 
         elif args.command == "topics":
             # List deduplicated topics
-            topics = memory_db.list_topics()
+            topics = asyncio.run(memory_db.list_topics())
             print(json.dumps(topics, indent=2, default=str))
 
         elif args.command == "spans":
             # List physical transcript spans
-            db = memory_db.get_db()
-            if args.session:
-                cursor = db.execute("""
-                    SELECT s.id, s.topic_id, s.session, s.name, s.summary,
-                           s.start_line, s.end_line, s.depth, t.name as topic_name
-                    FROM spans s
-                    LEFT JOIN topics t ON t.id = s.topic_id
-                    WHERE s.session = ? ORDER BY s.start_line
-                """, (args.session,))
-            else:
-                cursor = db.execute("""
-                    SELECT s.id, s.topic_id, s.session, s.name, s.summary,
-                           s.start_line, s.end_line, s.depth, t.name as topic_name
-                    FROM spans s
-                    LEFT JOIN topics t ON t.id = s.topic_id
-                    ORDER BY s.session, s.start_line
-                """)
-            results = [dict(row) for row in cursor]
-            db.close()
+            async def do_list_spans():
+                from db.async_connection import get_async_db
+                db = await get_async_db()
+                try:
+                    if args.session:
+                        cursor = await db.execute("""
+                            SELECT s.id, s.topic_id, s.session, s.name, s.summary,
+                                   s.start_line, s.end_line, s.depth, t.name as topic_name
+                            FROM spans s
+                            LEFT JOIN topics t ON t.id = s.topic_id
+                            WHERE s.session = ? ORDER BY s.start_line
+                        """, (args.session,))
+                    else:
+                        cursor = await db.execute("""
+                            SELECT s.id, s.topic_id, s.session, s.name, s.summary,
+                                   s.start_line, s.end_line, s.depth, t.name as topic_name
+                            FROM spans s
+                            LEFT JOIN topics t ON t.id = s.topic_id
+                            ORDER BY s.session, s.start_line
+                        """)
+                    return [dict(row) for row in await cursor.fetchall()]
+                finally:
+                    await db.close()
+
+            results = asyncio.run(do_list_spans())
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "merge-topics":
-            result = memory_db.merge_topics(args.source, args.target)
+            result = asyncio.run(memory_db.merge_topics(args.source, args.target))
             print(json.dumps({"success": True, **result}))
 
         elif args.command == "review":
-            issues = memory_db.review_topics()
+            issues = asyncio.run(memory_db.review_topics())
             print(json.dumps(issues, indent=2, default=str))
 
         elif args.command == "rename-topic":
             if args.name:
-                success = memory_db.rename_topic(args.id, args.name)
+                success = asyncio.run(memory_db.rename_topic(args.id, args.name))
             else:
                 # Use LLM to suggest name
-                suggested = memory_db.suggest_topic_name(args.id)
+                suggested = asyncio.run(memory_db.suggest_topic_name(args.id))
                 if suggested:
                     if args.auto:
-                        success = memory_db.rename_topic(args.id, suggested)
+                        success = asyncio.run(memory_db.rename_topic(args.id, suggested))
                         print(json.dumps({"success": success, "new_name": suggested}))
                         return
                     else:
@@ -586,7 +724,7 @@ def run_command(args):
             print(json.dumps({"success": success}))
 
         elif args.command == "migrate-timestamps":
-            result = memory_db.migrate_timestamps_from_transcripts()
+            result = asyncio.run(memory_db.migrate_timestamps_from_transcripts())
             print(json.dumps(result))
 
         elif args.command == "progress":
@@ -595,18 +733,18 @@ def run_command(args):
             print(json.dumps(result))
 
         elif args.command == "questions":
-            questions = memory_db.get_unanswered_questions(args.session)
+            questions = asyncio.run(memory_db.get_unanswered_questions(args.session))
             print(json.dumps(questions, indent=2, default=str))
 
         elif args.command == "decisions":
             # Shortcut for search --intent decision
             session = resolve_session(args)
-            results = memory_db.search_ideas(
+            results = asyncio.run(memory_db.search_ideas(
                 args.query or "",
                 limit=args.limit,
                 session=session,
                 intent="decision"
-            )
+            ))
             if session:
                 print(f"# Searching project: {session}", file=sys.stderr)
             print(json.dumps(results, indent=2, default=str))
@@ -614,18 +752,18 @@ def run_command(args):
         elif args.command == "todos":
             # Shortcut for search --intent todo
             session = resolve_session(args)
-            results = memory_db.search_ideas(
+            results = asyncio.run(memory_db.search_ideas(
                 args.query or "",
                 limit=args.limit,
                 session=session,
                 intent="todo"
-            )
+            ))
             if session:
                 print(f"# Searching project: {session}", file=sys.stderr)
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "get":
-            result = memory_db.get_idea_with_relations(args.id)
+            result = asyncio.run(memory_db.get_idea_with_relations(args.id))
             if result:
                 print(json.dumps(result, indent=2, default=str))
             else:
@@ -633,12 +771,12 @@ def run_command(args):
                 sys.exit(1)
 
         elif args.command == "similar":
-            results = memory_db.find_similar_ideas(
+            results = asyncio.run(memory_db.find_similar_ideas(
                 args.id,
                 limit=args.limit,
                 same_session=args.same_session,
                 session=args.session
-            )
+            ))
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "trace":
@@ -647,12 +785,12 @@ def run_command(args):
                 direction = "backward"
             elif args.forward and not args.backward:
                 direction = "forward"
-            result = memory_db.trace_idea(
+            result = asyncio.run(memory_db.trace_idea(
                 args.id,
                 direction=direction,
                 hops=args.hops,
                 limit=args.limit
-            )
+            ))
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -670,11 +808,11 @@ def run_command(args):
                     print(f"  {arrow} [{h['id']:5}] [{h['relation']:12}] {h['content'][:60]}...")
 
         elif args.command == "path":
-            result = memory_db.find_path(
+            result = asyncio.run(memory_db.find_path(
                 args.from_id,
                 args.to_id,
                 max_hops=args.max_hops
-            )
+            ))
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -689,31 +827,31 @@ def run_command(args):
                     print(f"           Intent: {idea['intent']} | Topic: {idea.get('topic', 'N/A')}")
 
         elif args.command == "prune":
-            result = memory_db.prune_old_ideas(
+            result = asyncio.run(memory_db.prune_old_ideas(
                 older_than_days=args.days,
                 session=args.session,
                 dry_run=not args.execute
-            )
+            ))
             print(json.dumps(result, indent=2, default=str))
 
         elif args.command == "update-intent":
-            result = memory_db.update_idea_intent(args.id, args.intent)
+            result = asyncio.run(memory_db.update_idea_intent(args.id, args.intent))
             print(json.dumps({"updated": result, "id": args.id, "intent": args.intent}))
 
         elif args.command == "move-idea":
-            result = memory_db.move_idea_to_span(args.id, args.span_id)
+            result = asyncio.run(memory_db.move_idea_to_span(args.id, args.span_id))
             print(json.dumps({"moved": result, "idea_id": args.id, "span_id": args.span_id}))
 
         elif args.command == "merge-spans":
-            result = memory_db.merge_spans(args.source, args.target)
+            result = asyncio.run(memory_db.merge_spans(args.source, args.target))
             print(json.dumps(result, indent=2))
 
         elif args.command == "supersede":
-            memory_db.supersede_idea(args.old_id, args.new_id)
+            asyncio.run(memory_db.supersede_idea(args.old_id, args.new_id))
             print(json.dumps({"success": True, "old_id": args.old_id, "new_id": args.new_id}))
 
         elif args.command == "export":
-            data = memory_db.export_data(session=args.session)
+            data = asyncio.run(memory_db.export_data(session=args.session))
             if args.output:
                 with open(args.output, 'w') as f:
                     json.dump(data, f, indent=2, default=str)
@@ -724,27 +862,27 @@ def run_command(args):
         elif args.command == "import":
             with open(args.file, 'r') as f:
                 data = json.load(f)
-            result = memory_db.import_data(data, replace=args.replace)
+            result = asyncio.run(memory_db.import_data(data, replace=args.replace))
             print(json.dumps(result, indent=2, default=str))
 
         elif args.command == "context":
-            result = memory_db.get_context(
+            result = asyncio.run(memory_db.get_context(
                 args.id,
                 lines_before=args.before,
                 lines_after=args.after
-            )
+            ))
             print(json.dumps(result, indent=2, default=str))
 
         elif args.command == "sessions":
-            sessions = memory_db.list_sessions()
+            sessions = asyncio.run(memory_db.list_sessions())
             print(json.dumps(sessions, indent=2, default=str))
 
         elif args.command == "projects":
-            projects = memory_db.list_projects()
+            projects = asyncio.run(memory_db.list_projects())
             print(json.dumps(projects, indent=2, default=str))
 
         elif args.command == "create-project":
-            project_id = memory_db.create_project(args.name, args.description)
+            project_id = asyncio.run(memory_db.create_project(args.name, args.description))
             print(json.dumps({"success": True, "id": project_id, "name": args.name}))
 
         elif args.command == "assign-topic":
@@ -752,30 +890,30 @@ def run_command(args):
             try:
                 project_id = int(args.project)
             except ValueError:
-                project = memory_db.get_project_by_name(args.project)
+                project = asyncio.run(memory_db.get_project_by_name(args.project))
                 if not project:
                     print(json.dumps({"error": f"Project '{args.project}' not found"}), file=sys.stderr)
                     sys.exit(1)
                 project_id = project["id"]
-            memory_db.assign_topic_to_project(args.topic_id, project_id)
+            asyncio.run(memory_db.assign_topic_to_project(args.topic_id, project_id))
             print(json.dumps({"success": True, "topic_id": args.topic_id, "project_id": project_id}))
 
         elif args.command == "unparent-topic":
-            memory_db.unparent_topic(args.topic_id)
+            asyncio.run(memory_db.unparent_topic(args.topic_id))
             print(json.dumps({"success": True, "topic_id": args.topic_id, "parent_id": None}))
 
         elif args.command == "reparent-topic":
-            memory_db.reparent_topic(args.topic_id, args.parent_id)
+            asyncio.run(memory_db.reparent_topic(args.topic_id, args.parent_id))
             print(json.dumps({"success": True, "topic_id": args.topic_id, "parent_id": args.parent_id}))
 
         elif args.command == "delete-topic":
-            result = memory_db.delete_topic(args.topic_id, delete_ideas=args.delete_ideas)
+            result = asyncio.run(memory_db.delete_topic(args.topic_id, delete_ideas=args.delete_ideas))
             print(f"Deleted topic {args.topic_id}")
             print(f"  Ideas deleted: {result['ideas_deleted']}")
             print(f"  Spans deleted: {result['spans_deleted']}")
 
         elif args.command == "tree":
-            tree = memory_db.get_project_tree()
+            tree = asyncio.run(memory_db.get_project_tree())
 
             def count_ideas(topic):
                 """Recursively count ideas including children."""
@@ -813,10 +951,10 @@ def run_command(args):
                     render_topic(topic, "  ", i == len(topics) - 1)
 
         elif args.command == "review-ideas":
-            result = memory_db.review_ideas_against_filters(
+            result = asyncio.run(memory_db.review_ideas_against_filters(
                 topic_id=args.topic,
                 dry_run=not args.execute
-            )
+            ))
             # Pretty print summary
             print(f"Reviewed: {result['total_reviewed']} ideas")
             print(f"Would filter: {result['would_filter']}")
@@ -833,7 +971,7 @@ def run_command(args):
                 print(f"\nRemoved: {result.get('removed', 0)} ideas")
 
         elif args.command == "auto-categorize":
-            result = memory_db.auto_categorize_topics(dry_run=not args.execute)
+            result = asyncio.run(memory_db.auto_categorize_topics(dry_run=not args.execute))
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -846,7 +984,7 @@ def run_command(args):
                 print("No changes needed")
 
         elif args.command == "improve":
-            result = memory_db.improve_categorization()
+            result = asyncio.run(memory_db.improve_categorization())
             print("Categorization improvements:")
             if result.get("categorization", {}).get("changes"):
                 print(f"  Assigned {len(result['categorization']['changes'])} topics to projects")
@@ -862,11 +1000,11 @@ def run_command(args):
                     print(f"  {ri['empty_topics']} empty topics could be removed")
 
         elif args.command == "llm-filter":
-            result = memory_db.llm_filter_ideas(
+            result = asyncio.run(memory_db.llm_filter_ideas(
                 topic_id=args.topic,
                 batch_size=args.batch,
                 dry_run=not args.execute
-            )
+            ))
             print(f"Reviewed: {result['total_reviewed']} ideas")
             print(f"Flagged for removal: {result['flagged']}")
             if result.get('samples'):
@@ -877,7 +1015,7 @@ def run_command(args):
                 print(f"\nRemoved: {result.get('removed', 0)} ideas")
 
         elif args.command == "cluster":
-            result = memory_db.cluster_topics(min_cluster_size=args.min_size)
+            result = asyncio.run(memory_db.cluster_topics(min_cluster_size=args.min_size))
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -912,7 +1050,7 @@ def run_command(args):
                     print(f"    {m['current_topic']} → {m['suggested_topic']} ({m['distance_improvement']}% closer)")
 
         elif args.command == "recluster":
-            result = memory_db.recluster_topic(args.topic_id, num_clusters=args.clusters)
+            result = asyncio.run(memory_db.recluster_topic(args.topic_id, num_clusters=args.clusters))
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -929,12 +1067,12 @@ def run_command(args):
                 print()
 
         elif args.command == "split-topic":
-            result = memory_db.split_topic(
+            result = asyncio.run(memory_db.split_topic(
                 args.topic_id,
                 num_clusters=args.clusters,
                 min_cluster_size=args.min_size,
                 delete_junk=not args.keep_junk
-            )
+            ))
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
@@ -952,7 +1090,7 @@ def run_command(args):
 
             if args.topic:
                 # Topic timeline
-                result = memory_db.get_topic_timeline(topic_name=args.topic)
+                result = asyncio.run(memory_db.get_topic_timeline(topic_name=args.topic))
                 if "error" in result:
                     print(json.dumps(result), file=sys.stderr)
                     sys.exit(1)
@@ -998,9 +1136,9 @@ def run_command(args):
                 # Project timeline
                 session = args.project
                 if args.cwd:
-                    session = memory_db.get_session_for_cwd(args.cwd) or args.project
+                    session = asyncio.run(memory_db.get_session_for_cwd(args.cwd)) or args.project
 
-                result = memory_db.get_project_timeline(session, days=args.days)
+                result = asyncio.run(memory_db.get_project_timeline(session, days=args.days))
                 if "error" in result:
                     print(json.dumps(result), file=sys.stderr)
                     sys.exit(1)
@@ -1030,11 +1168,11 @@ def run_command(args):
         elif args.command == "activity":
             # Resolve session from args
             session = resolve_session(args)
-            result = memory_db.get_activity_by_period(
+            result = asyncio.run(memory_db.get_activity_by_period(
                 period=args.by,
                 days=args.days,
                 session=session
-            )
+            ))
 
             print(f"\nActivity by {args.by} (last {args.days} days)")
             if session:
@@ -1063,7 +1201,7 @@ def run_command(args):
                 print(f"  {intent}: {count}")
 
         elif args.command == "forget":
-            success = memory_db.forget_idea(args.id)
+            success = asyncio.run(memory_db.forget_idea(args.id))
             if success:
                 print(json.dumps({"success": True, "id": args.id, "status": "forgotten"}))
             else:
@@ -1071,7 +1209,7 @@ def run_command(args):
                 sys.exit(1)
 
         elif args.command == "unforget":
-            success = memory_db.unforget_idea(args.id)
+            success = asyncio.run(memory_db.unforget_idea(args.id))
             if success:
                 print(json.dumps({"success": True, "id": args.id, "status": "restored"}))
             else:
@@ -1079,16 +1217,16 @@ def run_command(args):
                 sys.exit(1)
 
         elif args.command == "forgotten":
-            results = memory_db.get_forgotten_ideas(limit=args.limit)
+            results = asyncio.run(memory_db.get_forgotten_ideas(limit=args.limit))
             print(json.dumps(results, indent=2, default=str))
 
         elif args.command == "forgettable":
-            result = memory_db.auto_forget_ideas(
+            result = asyncio.run(memory_db.auto_forget_ideas(
                 threshold=args.threshold,
                 limit=args.limit,
                 session=args.session,
                 dry_run=not args.execute
-            )
+            ))
             print(f"Retention threshold: {result['threshold']}")
             print(f"Found {result['candidates']} forgettable ideas")
             if result['samples']:
@@ -1102,11 +1240,11 @@ def run_command(args):
                 print(f"\nDry run - use --execute to actually forget")
 
         elif args.command == "consolidatable":
-            candidates = memory_db.get_consolidation_candidates(
+            candidates = asyncio.run(memory_db.get_consolidation_candidates(
                 session=args.session,
                 min_ideas=args.min_ideas,
                 max_age_days=args.max_age
-            )
+            ))
             if not candidates:
                 print("No topics ready for consolidation")
             else:
@@ -1116,12 +1254,12 @@ def run_command(args):
                 print(f"\nRun: consolidate <topic_id> to consolidate a topic")
 
         elif args.command == "consolidate":
-            result = memory_db.consolidate_topic(
+            result = asyncio.run(memory_db.consolidate_topic(
                 topic_id=args.topic_id,
                 min_ideas=args.min_ideas,
                 max_age_days=args.max_age,
                 dry_run=not args.execute
-            )
+            ))
             print(f"Topic: {result.get('topic_name', result['topic_id'])}")
             print(f"Consolidatable ideas: {result['candidates']}")
             if result.get('samples'):
@@ -1138,10 +1276,10 @@ def run_command(args):
                 print(f"\nDry run - use --execute to consolidate")
 
         elif args.command == "reflect":
-            result = memory_db.generate_session_reflection(
+            result = asyncio.run(memory_db.generate_session_reflection(
                 session=resolve_session(args),
                 days=args.days
-            )
+            ))
             if result.get("error"):
                 print(f"Error: {result['error']}", file=sys.stderr)
                 sys.exit(1)
@@ -1154,13 +1292,13 @@ def run_command(args):
             print(result["reflection"])
 
             if args.store:
-                idea_id = memory_db.store_reflection(result["reflection"], session=resolve_session(args))
+                idea_id = asyncio.run(memory_db.store_reflection(result["reflection"], session=resolve_session(args)))
                 print(f"\nStored as reflection idea #{idea_id}")
                 result["stored"] = True
                 result["idea_id"] = idea_id
 
         elif args.command == "reflect-topic":
-            result = memory_db.reflect_on_topic(args.topic_id)
+            result = asyncio.run(memory_db.reflect_on_topic(args.topic_id))
             if result.get("error"):
                 print(f"Error: {result['error']}", file=sys.stderr)
                 sys.exit(1)
@@ -1173,10 +1311,10 @@ def run_command(args):
             print(result["reflection"])
 
         elif args.command == "insights":
-            results = memory_db.get_reflections(
+            results = asyncio.run(memory_db.get_reflections(
                 session=resolve_session(args),
                 limit=args.limit
-            )
+            ))
             if not results:
                 print("No reflections found")
             else:
@@ -1189,11 +1327,11 @@ def run_command(args):
                     print()
 
         elif args.command == "topic-activity":
-            result = memory_db.get_topic_activity(
+            result = asyncio.run(memory_db.get_topic_activity(
                 topic_id=args.topic_id,
                 period=args.by,
                 days=args.days
-            )
+            ))
 
             if "error" in result:
                 print(json.dumps(result), file=sys.stderr)
@@ -1293,6 +1431,19 @@ def main():
     hyde_p.add_argument("-g", "--global", dest="global_search", action="store_true",
                           help="Search across all projects (default: current project only)")
 
+    # multi-search (parallel strategy search - LLM selects strategies)
+    multi_p = subparsers.add_parser("multi-search", help="Parallel multi-strategy search (LLM selects strategies)")
+    multi_p.add_argument("query", help="Search query")
+    multi_p.add_argument("--strategies", "-S", default="hybrid",
+                         help="Comma-separated strategies: hybrid,hyde,semantic,decisions,todos,questions,problems,solutions")
+    multi_p.add_argument("-n", "--limit", type=int, default=15, help="Max total results")
+    multi_p.add_argument("--local", "-l", action="store_true", help="Scope to current project (default: global)")
+    multi_p.add_argument("--cwd", help="Current working directory (for --local project detection)")
+    multi_p.add_argument("--since", help="Only ideas after this date (ISO format)")
+    multi_p.add_argument("--until", help="Only ideas before this date (ISO format)")
+    multi_p.add_argument("--recent", help="Relative time filter (e.g. 1d, 1w, 1m)")
+    multi_p.add_argument("--when", help="Natural language time (e.g. 'last week', 'since tuesday')")
+
     # expand (search with topic expansion)
     expand_p = subparsers.add_parser("expand", help="Search with cross-session topic expansion")
     expand_p.add_argument("query", help="Search query")
@@ -1326,6 +1477,10 @@ def main():
 
     # stats
     subparsers.add_parser("stats", help="Show database statistics")
+
+    # cache-stats
+    cache_stats_p = subparsers.add_parser("cache-stats", help="Show embedding cache statistics")
+    cache_stats_p.add_argument("--clear", action="store_true", help="Clear the cache and reset stats")
 
     # backfill (async - enqueues for daemon)
     backfill_p = subparsers.add_parser("backfill", help="Enqueue transcripts for background indexing")

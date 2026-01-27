@@ -2,15 +2,23 @@
 context: fork
 name: total-recall
 description: Search past conversations for relevant context
-hooks:
-  UserPromptSubmit:
-    - hooks:
-        - type: command
-          command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
-  Stop:
-    - hooks:
-        - type: command
-          command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Bash(cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH=:*)
+  - Bash(SKILL_DIR=:*)
+  - Bash(PYTHONPATH=:*)
+# hooks disabled for performance testing
+# hooks:
+#   UserPromptSubmit:
+#     - hooks:
+#         - type: command
+#           command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
+#   Stop:
+#     - hooks:
+#         - type: command
+#           command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
 ---
 
 # Memory Retrieval Skill
@@ -20,7 +28,7 @@ Searches past conversations for relevant ideas, decisions, and context using sem
 ## Prerequisites
 
 - **uv** - Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **OpenAI API key** - Create `~/.config/total-recall/openai-api-key` with your key, or set `OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS` env var
+- **OpenAI API key** - Create `~/.config/total-recall/openai-api-key` with your key
 
 ## Invocation
 
@@ -56,20 +64,15 @@ If any command fails with "database not found" or "no such file", run [First-Run
 KEY_FILE="$HOME/.config/total-recall/openai-api-key"
 if [ -f "$KEY_FILE" ] && [ -s "$KEY_FILE" ]; then
   echo "✓ API key found in $KEY_FILE"
-elif [ -n "$OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS" ]; then
-  echo "✓ API key found in environment"
 else
   echo "❌ ERROR: OpenAI API key not found!"
   echo ""
   echo "This skill requires an OpenAI API key for generating embeddings."
   echo "Without it, search will not work."
   echo ""
-  echo "To fix, create the key file (recommended):"
+  echo "To fix, create the key file:"
   echo "  mkdir -p ~/.config/total-recall"
   echo "  echo 'your-openai-api-key' > ~/.config/total-recall/openai-api-key"
-  echo ""
-  echo "Or set environment variable:"
-  echo "  export OPENAI_TOKEN_TOTAL_RECALL_EMBEDDINGS='your-openai-api-key'"
   exit 1
 fi
 ```
@@ -125,90 +128,46 @@ Then stop - don't proceed with a search until setup is confirmed complete.
 
 ### Search: `/total-recall <query>`
 
-Run the search directly:
+Analyze the query and select appropriate search strategies, then run ONE command.
+
+**Strategy Selection Guide:**
+- General queries → `hybrid` (combines semantic + keyword)
+- Vague/conceptual queries → `hybrid,hyde` (adds hypothetical doc generation)
+- "What did we decide about X" → `hybrid,decisions`
+- "What are the open tasks/todos" → `todos`
+- "What questions/issues came up" → `hybrid,questions` or `hybrid,problems`
+- "How did we solve X" → `hybrid,solutions`
+- Time-bounded queries → add `--when "last week"` etc.
+
+**Run the search:**
 ```bash
 SKILL_DIR="$HOME/.claude/skills/total-recall"
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --cwd "$(pwd)"
+cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/cli.py" multi-search "<query>" --strategies "<selected>" -n 15
 ```
 
-This returns ideas with:
+**Options:**
+- `--strategies` - Comma-separated: hybrid,hyde,semantic,decisions,todos,questions,problems,solutions
+- `--local` - Scope to current project only (default: searches all projects)
+- `--when "last week"` - Time filter (natural language)
+- `-n 15` - Max results
+
+**Example commands:**
+- `/total-recall LoRa range` → `multi-search "LoRa range" --strategies "hybrid"`
+- `/total-recall what decisions about auth` → `multi-search "auth" --strategies "hybrid,decisions"`
+- `/total-recall open tasks` → `multi-search "tasks" --strategies "todos"`
+- `/total-recall recent heating issues` → `multi-search "heating issues" --strategies "hybrid,problems" --when "last week"`
+
+The command returns JSON with ideas containing:
 - `content`: The extracted idea
 - `intent`: Type (decision, conclusion, question, problem, solution, todo, context)
 - `topic`: The topic span this idea belongs to
 - `session`: Which conversation session (project)
-- `source_file`: Original transcript path
-- `source_line`: Line number
 - `distance`: Semantic similarity (lower = more similar)
+- `_strategy`: Which search strategy found this result
 
-### Step 3: Choose Search Strategy
+### Present Results
 
-Based on the query, choose the best search strategy. **Always pass `--cwd "$(pwd)"`** to scope to current project:
-
-**Hybrid Search** - For queries with specific terms:
-```bash
-uv run python "$SKILL_DIR/src/cli.py" hybrid "<query>" -n 10 --cwd "$(pwd)"
-```
-
-**HyDE Search** - For vague/conceptual queries:
-```bash
-uv run python "$SKILL_DIR/src/cli.py" hyde "<query>" -n 10 --cwd "$(pwd)"
-```
-
-**Filtered Search** - For queries with intent:
-```bash
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" -i decision -n 10 --cwd "$(pwd)"
-```
-
-**Global Search** - To search across ALL projects (not just current):
-```bash
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --global
-```
-
-### Step 4: Present Results
-
-**If search returned no results**, respond with:
-
-```markdown
-## Memory: <query>
-
-No memories found for this query.
-
-Try:
-- Different keywords or phrasing
-- A broader search: `uv run python "$SKILL_DIR/src/cli.py" search "<query>" -n 10 --global`
-- Check what's indexed: `uv run python "$SKILL_DIR/src/cli.py" sessions`
-```
-
-**If search returned results**, format them for the user:
-
-```markdown
-## Memory: <query>
-
-### Key Ideas
-
-**Decisions:**
-- <decision content> (from: <session>, <date>)
-
-**Conclusions:**
-- <conclusion content>
-
-**Related Topics:**
-- <topic name>: <topic summary>
-
-### Open Questions
-- <any unanswered questions found>
-
-### Context
-Found <N> relevant ideas across <M> sessions.
-Most relevant from: <session names>
-```
-
-### Step 5: Offer Deep Dive
-
-If results seem incomplete or user wants more detail:
-- Offer to read the original transcript sections using the `context` command
-- Suggest trying different search terms or strategies
-- Try a global search with `--global` if project-scoped search found nothing
+Format results concisely grouped by intent type. If no results, say so briefly and suggest different keywords.
 
 ## Database Stats
 
