@@ -712,35 +712,35 @@ async def backfill_session(self, file_path: str):
 
 | Slice | Status | Commit |
 |-------|--------|--------|
-| 1.1 Entity Mentions | ⏳ | |
-| 1.2 Golden Entities | ⏳ | |
-| 1.3 Entity Resolution | ⏳ | |
-| 2.1 Tool Schema | ⏳ | |
-| 2.2 Search Ideas Tool | ⏳ | |
-| 2.3 Open Questions Tool | ⏳ | |
-| 2.4 Open Todos Tool | ⏳ | |
-| 2.5 Current Span Tool | ⏳ | |
-| 2.6 Session Spans Tool | ⏳ | |
-| 2.7 Search Entities Tool | ⏳ | |
-| 2.8 Recent Ideas Tool | ⏳ | |
-| 2.9 Tool Registry | ⏳ | |
-| 3.1 Agent Message Types | ⏳ | |
-| 3.2 Agent Loop Single | ⏳ | |
-| 3.3 Tool Execution | ⏳ | |
-| 3.4 Agent Loop Multi | ⏳ | |
-| 4.1 Parse Output | ⏳ | |
-| 4.2 Execute Ideas | ⏳ | |
-| 4.3 Execute Topic Updates | ⏳ | |
-| 4.4 Execute Topic Changes | ⏳ | |
-| 4.5 Execute Answered | ⏳ | |
-| 4.6 Execute Relations | ⏳ | |
-| 4.7 Execute Entity Links | ⏳ | |
-| 4.8 Execute Activated | ⏳ | |
-| 4.9 Full Executor | ⏳ | |
-| 5.1 Batch Collector | ⏳ | |
-| 5.2 Format Agent Input | ⏳ | |
-| 5.3 System Prompt | ⏳ | |
-| 5.4 Run Indexing Agent | ⏳ | |
+| 1.1 Entity Mentions | ✅ | (earlier) |
+| 1.2 Golden Entities | ✅ | (earlier) |
+| 1.3 Entity Resolution | ✅ | (earlier) |
+| 2.1 Tool Schema | ✅ | 0d6bdeb |
+| 2.2 Search Ideas Tool | ✅ | f54272c |
+| 2.3 Open Questions Tool | ✅ | f54272c |
+| 2.4 Open Todos Tool | ✅ | f54272c |
+| 2.5 Current Span Tool | ✅ | f54272c |
+| 2.6 Session Spans Tool | ✅ | f54272c |
+| 2.7 Search Entities Tool | ✅ | f54272c |
+| 2.8 Recent Ideas Tool | ✅ | f54272c |
+| 2.9 Tool Registry | ✅ | 2ee298d |
+| 3.1 Agent Message Types | ✅ | 7df0bbf |
+| 3.2 Agent Loop Single | ✅ | 05e0047 |
+| 3.3 Tool Execution | ✅ | 05e0047 |
+| 3.4 Agent Loop Multi | ✅ | 05e0047 |
+| 4.1 Parse Output | ✅ | dfdd0a8 |
+| 4.2 Execute Ideas | ✅ | 6bd130a |
+| 4.3 Execute Topic Updates | ✅ | 6bd130a |
+| 4.4 Execute Topic Changes | ✅ | 6bd130a |
+| 4.5 Execute Answered | ✅ | 6bd130a |
+| 4.6 Execute Relations | ✅ | 6bd130a |
+| 4.7 Execute Entity Links | ✅ | 6bd130a |
+| 4.8 Execute Activated | ✅ | 6bd130a |
+| 4.9 Full Executor | ✅ | 6bd130a |
+| 5.1 Batch Collector | ✅ | e7926a4 |
+| 5.2 Format Agent Input | ✅ | e7926a4 |
+| 5.3 System Prompt | ✅ | e7926a4 |
+| 5.4 Run Indexing Agent | ✅ | e7926a4 |
 | 5.5 Continuous Daemon | ⏳ | |
 | 5.6 Backfill Mode | ⏳ | |
 | 6.1 Integration Continuous | ⏳ | |
