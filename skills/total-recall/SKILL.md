@@ -59,70 +59,23 @@ If any command fails with "database not found" or "no such file", run [First-Run
 
 **Only run this section if a command failed because the database doesn't exist.**
 
-**FIRST: Check for required API key:**
+**Prerequisite:** Create your OpenAI API key file first:
 ```bash
-KEY_FILE="$HOME/.config/total-recall/openai-api-key"
-if [ -f "$KEY_FILE" ] && [ -s "$KEY_FILE" ]; then
-  echo "✓ API key found in $KEY_FILE"
-else
-  echo "❌ ERROR: OpenAI API key not found!"
-  echo ""
-  echo "This skill requires an OpenAI API key for generating embeddings."
-  echo "Without it, search will not work."
-  echo ""
-  echo "To fix, create the key file:"
-  echo "  mkdir -p ~/.config/total-recall"
-  echo "  echo 'your-openai-api-key' > ~/.config/total-recall/openai-api-key"
-  exit 1
-fi
+mkdir -p ~/.config/total-recall && echo 'your-openai-api-key' > ~/.config/total-recall/openai-api-key
 ```
 
-If the above check fails, **STOP** and tell the user they need to create the key file before proceeding.
-
-Run these commands to initialize the environment. Explain each step to the user:
-
-```markdown
-## Total Recall - First Time Setup
-
-Setting up your long-term memory system...
-```
-
-**1. Create runtime directory** (stores database and logs, separate from skill code):
+Then run setup:
 ```bash
-mkdir -p "$HOME/.claude-plugin-total-recall"
-```
-
-**2. Initialize Python environment** (installs dependencies via uv):
-```bash
-cd "$HOME/.claude-plugin-total-recall"
-uv init --name total-recall --no-readme 2>/dev/null || true
-uv add sqlite-vec openai aiosqlite 2>/dev/null || uv sync
-```
-
-**3. Initialize database** (creates the memory database with schema):
-```bash
-SKILL_DIR="$HOME/.claude/skills/total-recall"
-cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/memory_db.py" init
+bash ~/.claude/skills/total-recall/hooks/setup.sh
 ```
 
 After setup completes, respond with:
 
 ```markdown
-## Setup Complete! ✓
+## Setup Complete!
 
-Total Recall is ready. Your long-term memory system will now:
-- **Automatically index** new conversations as you work
-- **Remember** decisions, problems, solutions, and key context
-- **Search** across all your past conversations
-
-**Next steps:**
-- Run `/total-recall backfill --all` to index your existing conversation history
-- Then search anytime with `/total-recall <query>`
-
-*Tip: Indexing happens in the background - you can keep working while it runs.*
+Total Recall is ready. Run `/total-recall backfill --all` to index your conversation history.
 ```
-
-Then stop - don't proceed with a search until setup is confirmed complete.
 
 ---
 
