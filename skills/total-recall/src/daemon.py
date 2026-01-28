@@ -33,13 +33,14 @@ from utils.async_retry import retry_with_backoff
 RUNTIME_DIR = config.DB_PATH.parent
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
-# Configure logging
+# Configure logging - use DEBUG for detailed diagnostics
+LOG_LEVEL = os.environ.get("TOTAL_RECALL_LOG_LEVEL", "INFO").upper()
 root_logger = logging.getLogger()
 root_logger.handlers.clear()
-root_logger.setLevel(logging.INFO)
+root_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.INFO)
+handler.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
 root_logger.addHandler(handler)
 

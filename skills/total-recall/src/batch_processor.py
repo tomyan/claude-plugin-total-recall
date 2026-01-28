@@ -709,10 +709,13 @@ async def _process_transcript_impl(
             parsed = parse_llm_output({})
 
         # Execute actions
+        logger.debug(f"  Batch {batches_processed + 1}: executing actions...")
         if parsed.topic_update and current_span_id:
+            logger.debug("    topic_update...")
             await execute_topic_update(parsed.topic_update, span_id=current_span_id)
 
         if parsed.new_span:
+            logger.debug("    new_span...")
             current_span_id = await execute_new_span(
                 parsed.new_span,
                 session=session,
@@ -721,16 +724,20 @@ async def _process_transcript_impl(
             )
 
         if parsed.items:
+            logger.debug(f"    execute_ideas ({len(parsed.items)} items)...")
             idea_ids = await execute_ideas(parsed.items, span_id=current_span_id, source_file=file_path)
             ideas_stored += len(idea_ids)
-            # Generate embeddings for new ideas
+            logger.debug(f"    embed_ideas ({len(idea_ids)} ids)...")
             await embed_ideas(idea_ids)
 
         if parsed.relations:
+            logger.debug(f"    execute_relations ({len(parsed.relations)})...")
             relations_created += await execute_relations(parsed.relations, source_file=file_path)
 
         # Store raw messages for FTS/RAG and generate embeddings
+        logger.debug(f"    store_messages ({len(batch.messages)})...")
         message_ids = await store_messages(batch.messages, session=session, source_file=file_path)
+        logger.debug(f"    embed_messages ({len(message_ids)})...")
         await embed_messages(message_ids)
 
         # Update recent messages for next batch
@@ -743,8 +750,10 @@ async def _process_transcript_impl(
         recent_messages = recent_messages[-10:]
 
         # Update byte position after each batch
+        logger.debug("    update_byte_position...")
         await update_byte_position(file_path, batch.end_byte)
         batches_processed += 1
+        logger.debug(f"  Batch {batches_processed} complete")
 
     return {
         "batches_processed": batches_processed,
