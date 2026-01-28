@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -173,6 +174,55 @@ async def process_queue_batch(ctx: ProcessingContext, max_workers: int = PARALLE
 
 
 # =============================================================================
+# Pidfile Watcher Thread
+# =============================================================================
+
+class PidfileWatcher(threading.Thread):
+    """Preemptive thread that monitors pidfile and exits if missing.
+
+    This runs independently of the async event loop, ensuring the daemon
+    exits even if the main loop is blocked in a long-running operation.
+    """
+
+    def __init__(self, pidfile_path: Path, my_pid: int, check_interval: float = 1.0):
+        super().__init__(daemon=True, name="pidfile-watcher")
+        self.pidfile_path = pidfile_path
+        self.my_pid = my_pid
+        self.check_interval = check_interval
+        self.stop_event = threading.Event()
+
+    def run(self):
+        """Check pidfile periodically, exit process if invalid."""
+        logger.info(f"Pidfile watcher started (checking every {self.check_interval}s)")
+
+        while not self.stop_event.wait(self.check_interval):
+            if not self._check_pidfile():
+                logger.info("Pidfile watcher: forcing exit")
+                os._exit(0)  # Force immediate exit
+
+    def _check_pidfile(self) -> bool:
+        """Check if pidfile exists and contains our PID."""
+        if not self.pidfile_path.exists():
+            logger.info(f"Pidfile {self.pidfile_path} no longer exists")
+            return False
+
+        try:
+            stored_pid = int(self.pidfile_path.read_text().strip())
+            if stored_pid != self.my_pid:
+                logger.info(f"Pidfile contains PID {stored_pid}, but we are {self.my_pid}")
+                return False
+        except (ValueError, OSError) as e:
+            logger.info(f"Cannot read pidfile ({e})")
+            return False
+
+        return True
+
+    def stop(self):
+        """Signal the watcher to stop."""
+        self.stop_event.set()
+
+
+# =============================================================================
 # Async Daemon Main Loop
 # =============================================================================
 
@@ -187,6 +237,7 @@ class AsyncIndexingDaemon:
         self.last_pidfile_check = 0
         self.my_pid = os.getpid()
         self.pidfile_path = (RUNTIME_DIR / "daemon.pid").resolve()
+        self.pidfile_watcher = None
 
     def _handle_signal(self, signum, frame):
         logger.info(f"Received signal {signum}, shutting down gracefully...")
@@ -244,6 +295,10 @@ class AsyncIndexingDaemon:
         self.pidfile_path.write_text(str(self.my_pid))
         logger.info(f"PID {self.my_pid} written to {self.pidfile_path}")
 
+        # Start preemptive pidfile watcher thread
+        self.pidfile_watcher = PidfileWatcher(self.pidfile_path, self.my_pid)
+        self.pidfile_watcher.start()
+
         try:
             while self.running:
                 try:
@@ -281,6 +336,10 @@ class AsyncIndexingDaemon:
     async def _shutdown(self):
         """Clean shutdown with cache flush."""
         logger.info("Daemon shutting down")
+
+        # Stop pidfile watcher
+        if self.pidfile_watcher:
+            self.pidfile_watcher.stop()
 
         # Flush embedding cache
         try:
