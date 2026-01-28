@@ -15,38 +15,44 @@ async def claude_complete(
     prompt: str,
     system: Optional[str] = None,
     model: str = "haiku",
-    max_retries: int = 2,
-    timeout: int = 30
+    timeout: int = 30,
+    max_backoff: int = 300
 ) -> str:
     """Call Claude CLI non-interactively for LLM tasks (async).
 
     Runs the sync implementation in a thread pool for async compatibility.
-    Includes retry logic with exponential backoff for timeouts.
+    Retries indefinitely with exponential backoff (capped) on failures,
+    so it recovers automatically when underlying issues are fixed.
 
     Args:
         prompt: The user prompt
         system: Optional system prompt
         model: Model to use (default: haiku for speed)
-        max_retries: Number of retries on timeout (default: 2)
-        timeout: Timeout in seconds (default: 30)
+        timeout: Timeout in seconds per attempt (default: 30)
+        max_backoff: Maximum backoff between retries in seconds (default: 300)
 
     Returns:
         The response text
     """
     prompt_preview = prompt[:80].replace('\n', ' ') + '...' if len(prompt) > 80 else prompt.replace('\n', ' ')
+    attempt = 0
 
-    for attempt in range(max_retries + 1):
+    while True:
+        attempt += 1
         try:
-            logger.debug(f"LLM call attempt {attempt + 1}/{max_retries + 1}: {prompt_preview}")
+            logger.info(f"  LLM attempt {attempt}: {prompt_preview}")
             result = await asyncio.to_thread(_claude_complete_sync, prompt, system, model, timeout)
-            logger.debug(f"LLM call succeeded (attempt {attempt + 1})")
+            if attempt > 1:
+                logger.info(f"  LLM succeeded after {attempt} attempts")
             return result
         except TotalRecallError as e:
-            if e.code == "claude_cli_timeout" and attempt < max_retries:
-                wait_time = 2 ** attempt  # 1s, 2s, 4s...
-                logger.warning(f"LLM timeout (attempt {attempt + 1}), retrying in {wait_time}s...")
+            if e.code in ("claude_cli_timeout", "claude_cli_error"):
+                # Exponential backoff capped at max_backoff
+                wait_time = min(2 ** (attempt - 1), max_backoff)
+                logger.warning(f"  LLM failed (attempt {attempt}): {e.code}, retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
             else:
+                # Non-retryable error (e.g., CLI not found)
                 raise
 
 
