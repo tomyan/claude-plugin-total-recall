@@ -66,6 +66,7 @@ POLL_INTERVAL = 2  # seconds between queue checks
 IDLE_TIMEOUT = 300  # seconds of idle before exit (0 = never)
 PARALLEL_WORKERS = 2  # number of transcripts to process in parallel (reduced to avoid overwhelming LLM)
 HEARTBEAT_INTERVAL = 60  # log heartbeat every N seconds
+FILE_TIMEOUT = 180  # max seconds per file before giving up (prevents blocking)
 
 
 # =============================================================================
@@ -159,7 +160,20 @@ async def process_queue_batch(ctx: ProcessingContext, max_workers: int = PARALLE
 
     async def process_with_semaphore(fp: str) -> dict:
         async with sem:
-            return await process_single_file(fp)
+            try:
+                # Timeout per file prevents any single file from blocking
+                return await asyncio.wait_for(
+                    process_single_file(fp),
+                    timeout=FILE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"  Timeout processing {fp} after {FILE_TIMEOUT}s")
+                return {
+                    "file_path": fp,
+                    "batches_processed": 0,
+                    "ideas_stored": 0,
+                    "error": f"Timeout after {FILE_TIMEOUT}s"
+                }
 
     # Process all files concurrently
     results = await asyncio.gather(*[process_with_semaphore(fp) for fp in file_paths])

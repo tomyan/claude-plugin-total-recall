@@ -313,6 +313,20 @@ def run_command(args):
                 results = [r for r in results if r.get('intent') == intent]
             print(json.dumps(results, indent=2, default=str))
 
+        elif args.command == "research":
+            # Research bundle - comprehensive retrieval in a single call
+            from search import research
+            session = resolve_session(args)
+            if session:
+                print(f"# Researching in project: {session}", file=sys.stderr)
+            bundle = asyncio.run(research(
+                args.query,
+                limit=args.limit,
+                session=session,
+                deep=args.deep
+            ))
+            print(json.dumps(bundle, indent=2, default=str))
+
         elif args.command == "multi-search":
             # Parallel multi-strategy search using asyncio
 
@@ -585,6 +599,98 @@ def run_command(args):
             else:
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
+
+        elif args.command == "daemon-status":
+            # Report on daemon state, queue, progress
+            import config
+            from datetime import datetime
+
+            status = {
+                "daemon": {"running": False, "pid": None},
+                "queue": {"size": 0, "files": []},
+                "progress": {"files_per_minute": 0, "estimated_remaining": None},
+                "recent_errors": [],
+                "last_activity": None
+            }
+
+            # Check pidfile
+            pidfile = config.DB_PATH.parent / "daemon.pid"
+            if pidfile.exists():
+                try:
+                    pid = int(pidfile.read_text().strip())
+                    # Check if process is running
+                    import subprocess
+                    result = subprocess.run(["kill", "-0", str(pid)], capture_output=True)
+                    if result.returncode == 0:
+                        status["daemon"]["running"] = True
+                        status["daemon"]["pid"] = pid
+                except (ValueError, OSError):
+                    pass
+
+            # Check queue
+            async def get_queue_info():
+                from db.async_connection import get_async_db
+                db = await get_async_db()
+                try:
+                    cursor = await db.execute("SELECT count(*) as cnt FROM work_queue")
+                    row = await cursor.fetchone()
+                    queue_size = row["cnt"] if row else 0
+
+                    cursor = await db.execute("""
+                        SELECT file_path, file_size, queued_at
+                        FROM work_queue ORDER BY queued_at ASC LIMIT 5
+                    """)
+                    rows = await cursor.fetchall()
+                    queue_files = [
+                        {"file": Path(r["file_path"]).name, "size": r["file_size"], "queued": r["queued_at"]}
+                        for r in rows
+                    ]
+                    return queue_size, queue_files
+                finally:
+                    await db.close()
+
+            queue_size, queue_files = asyncio.run(get_queue_info())
+            status["queue"]["size"] = queue_size
+            status["queue"]["files"] = queue_files
+
+            # Check log for recent activity and errors
+            log_file = config.DB_PATH.parent / "daemon.log"
+            if log_file.exists():
+                try:
+                    lines = log_file.read_text().strip().split('\n')[-100:]
+                    # Find errors
+                    for line in lines:
+                        if "[ERROR]" in line or "[WARNING]" in line:
+                            status["recent_errors"].append(line[:200])
+                    status["recent_errors"] = status["recent_errors"][-5:]  # Last 5 errors
+
+                    # Find last activity timestamp
+                    for line in reversed(lines):
+                        if line and line[0].isdigit():
+                            status["last_activity"] = line[:23]  # Timestamp
+                            break
+
+                    # Estimate processing rate from completed files
+                    completed = [l for l in lines if "Result:" in l]
+                    if len(completed) >= 2:
+                        try:
+                            first_ts = completed[0][:19]
+                            last_ts = completed[-1][:19]
+                            t1 = datetime.fromisoformat(first_ts)
+                            t2 = datetime.fromisoformat(last_ts)
+                            elapsed = (t2 - t1).total_seconds()
+                            if elapsed > 0:
+                                rate = (len(completed) - 1) / (elapsed / 60)
+                                status["progress"]["files_per_minute"] = round(rate, 2)
+                                if queue_size > 0 and rate > 0:
+                                    remaining_mins = queue_size / rate
+                                    status["progress"]["estimated_remaining"] = f"{remaining_mins:.0f} minutes"
+                        except:
+                            pass
+                except:
+                    pass
+
+            print(json.dumps(status, indent=2, default=str))
 
         elif args.command == "cache-stats":
             from embeddings.cache import get_embedding_cache_stats, clear_embedding_cache
@@ -1430,6 +1536,17 @@ def main():
     hyde_p.add_argument("-g", "--global", dest="global_search", action="store_true",
                           help="Search across all projects (default: current project only)")
 
+    # research (comprehensive retrieval bundle)
+    research_p = subparsers.add_parser("research", help="Comprehensive research - combines multiple searches")
+    research_p.add_argument("query", help="Research query")
+    research_p.add_argument("-n", "--limit", type=int, default=10, help="Max results per strategy")
+    research_p.add_argument("-s", "--session", help="Filter by session/project")
+    research_p.add_argument("--cwd", help="Current working directory (for auto-detecting session)")
+    research_p.add_argument("-g", "--global", dest="global_search", action="store_true",
+                            help="Search across all projects")
+    research_p.add_argument("--deep", action="store_true",
+                            help="Deep mode: enrich with relations and find similar ideas")
+
     # multi-search (parallel strategy search - LLM selects strategies)
     multi_p = subparsers.add_parser("multi-search", help="Parallel multi-strategy search (LLM selects strategies)")
     multi_p.add_argument("query", help="Search query")
@@ -1476,6 +1593,9 @@ def main():
 
     # stats
     subparsers.add_parser("stats", help="Show database statistics")
+
+    # daemon-status
+    subparsers.add_parser("daemon-status", help="Show daemon status, queue size, and progress")
 
     # cache-stats
     cache_stats_p = subparsers.add_parser("cache-stats", help="Show embedding cache statistics")

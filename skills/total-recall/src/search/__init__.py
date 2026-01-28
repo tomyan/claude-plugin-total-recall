@@ -12,6 +12,7 @@ from search.vector import (
 )
 from search.hybrid import hybrid_search
 from search.hyde import generate_hypothetical_doc, hyde_search
+from search.research import research
 
 __all__ = [
     # Vector search (async)
@@ -25,4 +26,6 @@ __all__ = [
     # HyDE search (async)
     "generate_hypothetical_doc",
     "hyde_search",
+    # Research bundle (async)
+    "research",
 ]

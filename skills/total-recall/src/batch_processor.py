@@ -607,7 +607,7 @@ async def _process_transcript_impl(
     session: str,
     span_id: Optional[int] = None,
     window_seconds: float = 300.0,
-    target_tokens: int = 30000
+    target_tokens: int = 6000  # Small batches = faster, more reliable LLM calls
 ) -> dict[str, Any]:
     """
     Process a transcript file using batched LLM analysis (async).
@@ -773,7 +773,7 @@ def process_transcript(
     session: str,
     span_id: Optional[int] = None,
     window_seconds: float = 300.0,
-    target_tokens: int = 30000
+    target_tokens: int = 6000  # Small batches = faster, more reliable LLM calls
 ) -> dict[str, Any]:
     """Sync wrapper for process_transcript."""
     return asyncio.run(_process_transcript_impl(
