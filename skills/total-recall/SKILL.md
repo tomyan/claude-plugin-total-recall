@@ -6,9 +6,8 @@ allowed-tools:
   - Read
   - Glob
   - Grep
-  - Bash(cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH=:*)
-  - Bash(SKILL_DIR=:*)
-  - Bash(PYTHONPATH=:*)
+  - Bash(~/.claude/skills/total-recall/bin/total-recall :*)
+  - Bash(bash ~/.claude/skills/total-recall/hooks/:*)
 # hooks disabled for performance testing
 # hooks:
 #   UserPromptSubmit:
@@ -94,8 +93,7 @@ Analyze the query and select appropriate search strategies, then run ONE command
 
 **Run the search:**
 ```bash
-SKILL_DIR="$HOME/.claude/skills/total-recall"
-cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/cli.py" multi-search "<query>" --strategies "<selected>" -n 15
+~/.claude/skills/total-recall/bin/total-recall multi-search "<query>" --strategies "<selected>" -n 15
 ```
 
 **Options:**
@@ -126,76 +124,76 @@ Format results concisely grouped by intent type. If no results, say so briefly a
 
 To check what's indexed:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" stats
+~/.claude/skills/total-recall/bin/total-recall stats
 ```
 
 ## List Indexed Sessions
 
 See all sessions with idea and topic counts:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" sessions
+~/.claude/skills/total-recall/bin/total-recall sessions
 ```
 
 ## Unanswered Questions
 
 To see open questions from past conversations:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" questions
+~/.claude/skills/total-recall/bin/total-recall questions
 ```
 
 ## Get Idea Details
 
 To get a specific idea with its relations:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" get <idea_id>
+~/.claude/skills/total-recall/bin/total-recall get <idea_id>
 ```
 
 ## Find Similar Ideas
 
 Find ideas semantically similar to a given idea:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" similar <idea_id> -n 5
-uv run python "$SKILL_DIR/src/cli.py" similar <idea_id> --same-session  # Same session only
-uv run python "$SKILL_DIR/src/cli.py" similar <idea_id> --other-sessions  # Cross-session only
+~/.claude/skills/total-recall/bin/total-recall similar <idea_id> -n 5
+~/.claude/skills/total-recall/bin/total-recall similar <idea_id> --same-session  # Same session only
+~/.claude/skills/total-recall/bin/total-recall similar <idea_id> --other-sessions  # Cross-session only
 ```
 
 ## View Source Context
 
 See the original transcript around an idea:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" context <idea_id>
-uv run python "$SKILL_DIR/src/cli.py" context <idea_id> -B 10 -A 10  # More context
+~/.claude/skills/total-recall/bin/total-recall context <idea_id>
+~/.claude/skills/total-recall/bin/total-recall context <idea_id> -B 10 -A 10  # More context
 ```
 
 ## Search by Date Range
 
 Filter search results by time:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" --since 2024-01-01
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" --until 2024-06-01
-uv run python "$SKILL_DIR/src/cli.py" search "<query>" --since 2024-01-01 --until 2024-06-01
+~/.claude/skills/total-recall/bin/total-recall search "<query>" --since 2024-01-01
+~/.claude/skills/total-recall/bin/total-recall search "<query>" --until 2024-06-01
+~/.claude/skills/total-recall/bin/total-recall search "<query>" --since 2024-01-01 --until 2024-06-01
 ```
 
 ## Export and Import
 
 Backup the memory database:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" export -o backup.json
-uv run python "$SKILL_DIR/src/cli.py" export -s project-name -o project-backup.json  # Single session
+~/.claude/skills/total-recall/bin/total-recall export -o backup.json
+~/.claude/skills/total-recall/bin/total-recall export -s project-name -o project-backup.json  # Single session
 ```
 
 Restore from backup:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" import backup.json  # Merge with existing
-uv run python "$SKILL_DIR/src/cli.py" import backup.json --replace  # Replace all data
+~/.claude/skills/total-recall/bin/total-recall import backup.json  # Merge with existing
+~/.claude/skills/total-recall/bin/total-recall import backup.json --replace  # Replace all data
 ```
 
 ## Prune Old Data
 
 Remove old ideas to keep the database lean:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" prune -d 90  # Dry run - shows what would be removed
-uv run python "$SKILL_DIR/src/cli.py" prune -d 90 --execute  # Actually delete
+~/.claude/skills/total-recall/bin/total-recall prune -d 90  # Dry run - shows what would be removed
+~/.claude/skills/total-recall/bin/total-recall prune -d 90 --execute  # Actually delete
 ```
 
 ## Notes
@@ -210,23 +208,23 @@ The indexed graph is an interpretation of conversations and can be revised. The 
 
 **Reclassify an idea's intent:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" update-intent <idea_id> decision
+~/.claude/skills/total-recall/bin/total-recall update-intent <idea_id> decision
 # Valid intents: decision, conclusion, question, problem, solution, todo, context
 ```
 
 **Move an idea to a different topic:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" move-idea <idea_id> <span_id>
+~/.claude/skills/total-recall/bin/total-recall move-idea <idea_id> <span_id>
 ```
 
 **Merge topics:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" merge-spans <source_span_id> <target_span_id>
+~/.claude/skills/total-recall/bin/total-recall merge-spans <source_span_id> <target_span_id>
 ```
 
 **Mark an idea as superseding another:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" supersede <old_idea_id> <new_idea_id>
+~/.claude/skills/total-recall/bin/total-recall supersede <old_idea_id> <new_idea_id>
 ```
 
 ## Auto-Categorization
@@ -235,13 +233,13 @@ Automatically improve topic organization using LLM analysis.
 
 **Auto-assign topics to projects:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" auto-categorize  # Dry run
-uv run python "$SKILL_DIR/src/cli.py" auto-categorize --execute  # Apply changes
+~/.claude/skills/total-recall/bin/total-recall auto-categorize  # Dry run
+~/.claude/skills/total-recall/bin/total-recall auto-categorize --execute  # Apply changes
 ```
 
 **Run all categorization improvements:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" improve
+~/.claude/skills/total-recall/bin/total-recall improve
 ```
 This auto-categorizes unassigned topics, renames poorly-named topics, and reports remaining issues.
 
@@ -251,16 +249,16 @@ Keep the database lean by removing low-value content.
 
 **Review ideas against regex filters:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" review-ideas  # Dry run
-uv run python "$SKILL_DIR/src/cli.py" review-ideas -t <topic_id>  # Specific topic
-uv run python "$SKILL_DIR/src/cli.py" review-ideas --execute  # Delete filtered
+~/.claude/skills/total-recall/bin/total-recall review-ideas  # Dry run
+~/.claude/skills/total-recall/bin/total-recall review-ideas -t <topic_id>  # Specific topic
+~/.claude/skills/total-recall/bin/total-recall review-ideas --execute  # Delete filtered
 ```
 
 **Use LLM to identify subtle low-value content:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" llm-filter  # Dry run
-uv run python "$SKILL_DIR/src/cli.py" llm-filter -t <topic_id> -b 30  # Specific topic, batch size 30
-uv run python "$SKILL_DIR/src/cli.py" llm-filter --execute  # Delete flagged
+~/.claude/skills/total-recall/bin/total-recall llm-filter  # Dry run
+~/.claude/skills/total-recall/bin/total-recall llm-filter -t <topic_id> -b 30  # Specific topic, batch size 30
+~/.claude/skills/total-recall/bin/total-recall llm-filter --execute  # Delete flagged
 ```
 LLM filtering catches things regex misses: generic statements, context-dependent content, redundant ideas.
 
@@ -270,32 +268,32 @@ Organize topics into projects for better structure.
 
 **List projects:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" projects
+~/.claude/skills/total-recall/bin/total-recall projects
 ```
 
 **Create a project:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" create-project "My Project" -d "Description"
+~/.claude/skills/total-recall/bin/total-recall create-project "My Project" -d "Description"
 ```
 
 **Assign a topic to a project:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" assign-topic <topic_id> "My Project"
+~/.claude/skills/total-recall/bin/total-recall assign-topic <topic_id> "My Project"
 ```
 
 **Set a topic's parent (create topic hierarchy):**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" reparent-topic <topic_id> <parent_topic_id>
+~/.claude/skills/total-recall/bin/total-recall reparent-topic <topic_id> <parent_topic_id>
 ```
 
 **Remove a topic from its parent:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" unparent-topic <topic_id>
+~/.claude/skills/total-recall/bin/total-recall unparent-topic <topic_id>
 ```
 
 **View hierarchy tree:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" tree
+~/.claude/skills/total-recall/bin/total-recall tree
 ```
 
 ## Timeline Visualization
@@ -304,12 +302,12 @@ See activity across time for topics or projects.
 
 **Topic timeline (see activity for a topic across sessions):**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" timeline --topic "LoRa prototyping"
+~/.claude/skills/total-recall/bin/total-recall timeline --topic "LoRa prototyping"
 ```
 
 **Project timeline (see recent activity by date):**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" timeline --project rad-control-v1-1 --days 14
+~/.claude/skills/total-recall/bin/total-recall timeline --project rad-control-v1-1 --days 14
 ```
 
 Output shows spans grouped by date with key decisions and conclusions highlighted.
@@ -320,25 +318,25 @@ Search with natural language time expressions and temporal aggregation.
 
 **Natural language time in search:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" search "heating" --when "last week"
-uv run python "$SKILL_DIR/src/cli.py" search "decisions" --when "since tuesday"
-uv run python "$SKILL_DIR/src/cli.py" search "LoRa" --when "since jan 5"
+~/.claude/skills/total-recall/bin/total-recall search "heating" --when "last week"
+~/.claude/skills/total-recall/bin/total-recall search "decisions" --when "since tuesday"
+~/.claude/skills/total-recall/bin/total-recall search "LoRa" --when "since jan 5"
 ```
 
 **Search after a specific session:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" search "follow up" --after-session abc123 --global
+~/.claude/skills/total-recall/bin/total-recall search "follow up" --after-session abc123 --global
 ```
 
 **Activity aggregation by period:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" activity --by day --days 7
-uv run python "$SKILL_DIR/src/cli.py" activity --by week --days 30 -s rad-control-v1-1
+~/.claude/skills/total-recall/bin/total-recall activity --by day --days 7
+~/.claude/skills/total-recall/bin/total-recall activity --by week --days 30 -s rad-control-v1-1
 ```
 
 **Topic activity over time:**
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" topic-activity 42 --by week --days 90
+~/.claude/skills/total-recall/bin/total-recall topic-activity 42 --by week --days 90
 ```
 
 ---
@@ -356,15 +354,14 @@ Indexes existing conversation history. **Runs in background** - returns immediat
 
 **Run backfill:**
 ```bash
-SKILL_DIR="$HOME/.claude/skills/total-recall"
-cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/cli.py" backfill --all
+~/.claude/skills/total-recall/bin/total-recall backfill --all
 ```
 
 This returns immediately after enqueueing. Indexing happens in the background via daemon.
 
 **Check progress:**
 ```bash
-cd "$HOME/.claude-plugin-total-recall" && PYTHONPATH="$SKILL_DIR/src" uv run python "$SKILL_DIR/src/cli.py" stats
+~/.claude/skills/total-recall/bin/total-recall stats
 ```
 
 **Report to user:**
@@ -399,8 +396,7 @@ Shows statistics about the memory database.
 
 Run the CLI:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/total-recall"
-uv run python "$SKILL_DIR/src/cli.py" stats
+~/.claude/skills/total-recall/bin/total-recall stats
 ```
 
 This returns:
@@ -453,13 +449,12 @@ Lists topic spans across sessions.
 
 Run the CLI:
 ```bash
-SKILL_DIR="$HOME/.claude/skills/total-recall"
-uv run python "$SKILL_DIR/src/cli.py" topics
+~/.claude/skills/total-recall/bin/total-recall topics
 ```
 
 For a specific session:
 ```bash
-uv run python "$SKILL_DIR/src/cli.py" topics -s <session>
+~/.claude/skills/total-recall/bin/total-recall topics -s <session>
 ```
 
 This returns spans with:

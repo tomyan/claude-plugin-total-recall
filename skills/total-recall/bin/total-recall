@@ -1,0 +1,7 @@
+#!/bin/bash
+# Total Recall CLI wrapper - simplifies invocation for Claude
+
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RUNTIME_DIR="$HOME/.claude-plugin-total-recall"
+
+cd "$RUNTIME_DIR" && PYTHONPATH="$SKILL_DIR/src" exec uv run python "$SKILL_DIR/src/cli.py" "$@"
