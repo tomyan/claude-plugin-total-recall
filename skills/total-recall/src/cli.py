@@ -587,7 +587,6 @@ def run_command(args):
                 sys.exit(1)
 
         elif args.command == "cache-stats":
-            import asyncio
             from embeddings.cache import get_embedding_cache_stats, clear_embedding_cache
             if getattr(args, 'clear', False):
                 asyncio.run(clear_embedding_cache())
