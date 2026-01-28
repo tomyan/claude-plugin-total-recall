@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from batcher import collect_batches, BatcherError
 from config import logger
-from context import build_context
+from context import build_context, get_session_topic_history
 from db.async_connection import get_async_db
 from embeddings.openai import get_embedding
 from embeddings.cache import cache_source
@@ -243,23 +243,43 @@ Identify these types:
 - todo: Action items or tasks
 - context: Important background info
 
+TOPIC_HISTORY shows previous topics in this session. Use it to:
+- Detect if discussion is RETURNING to an earlier topic (marked with "RETURNING")
+- Understand context from key decisions/conclusions already made
+- Avoid re-extracting ideas that are already captured
+
 RULES:
 - Each item MUST have source_line from new_messages
 - Skip trivial messages (greetings, "ok", "thanks")
 - Check EXISTING_IDEAS - don't duplicate, use related_to for links
+- If returning to a topic, reference related existing ideas
 - Output ONLY the JSON object, no other text"""
 
-    # Build user prompt with related ideas context
+    # Build user prompt with context sections
     user_parts = []
 
+    # Topic history (for detecting returns after tangents)
+    topic_history = prompt.get("topic_history", [])
+    if topic_history:
+        user_parts.append("TOPIC_HISTORY (previous topics in this session):")
+        for t in topic_history:
+            marker = " [RETURNING]" if t.get("note") else ""
+            user_parts.append(f"  - {t.get('name', 'unnamed')} (lines {t.get('lines', '?')}){marker}")
+            if t.get("key_ideas"):
+                for ki in t["key_ideas"]:
+                    user_parts.append(f"      {ki}")
+        user_parts.append("")
+
+    # Related ideas (for deduplication)
     if related_ideas:
         user_parts.append("EXISTING_IDEAS (check for duplicates, link via related_to):")
         for idea in related_ideas:
             user_parts.append(f"  ID {idea['id']} [{idea['type']}]: {idea['content']}")
         user_parts.append("")
 
+    # New messages to analyze
     user_parts.append("NEW_MESSAGES to analyze:")
-    user_parts.append(json.dumps(prompt, indent=2))
+    user_parts.append(json.dumps(prompt.get("new_messages", []), indent=2))
     user_parts.append("")
     user_parts.append("Respond with ONLY a JSON object, no other text:")
     user_parts.append('{"topic_update": {"name": "topic name", "summary": "..."}, "items": [...]}')
@@ -689,8 +709,11 @@ async def _process_transcript_impl(
         # Build context (sync - just dict building)
         context = build_context(session=session, span_id=current_span_id)
 
-        # Format LLM input
-        llm_input = format_llm_input(batch, context, recent_messages)
+        # Get topic history for detecting returns after tangents
+        topic_history = get_session_topic_history(session)
+
+        # Format LLM input with topic history
+        llm_input = format_llm_input(batch, context, recent_messages, topic_history=topic_history)
 
         # Pre-search for related ideas to avoid duplicates
         batch_text = " ".join(m.content for m in messages)

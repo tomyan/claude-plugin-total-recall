@@ -116,6 +116,90 @@ def build_context(session: str, span_id: int | None = None) -> dict[str, Any]:
     return result
 
 
+def get_session_topic_history(session: str) -> list[dict[str, Any]]:
+    """
+    Get the topic/span history for a session, with key ideas and line ranges.
+
+    This helps the LLM detect when returning to a previous topic after a tangent.
+
+    Args:
+        session: The session identifier
+
+    Returns:
+        List of topic transitions in chronological order:
+        - span_id: Span identifier
+        - name: Topic/span name
+        - summary: Topic summary (if available)
+        - start_line: First line of this topic
+        - end_line: Last line (None if still open)
+        - idea_count: Number of ideas extracted from this topic
+        - key_ideas: Up to 3 key ideas (decisions, conclusions) from this topic
+        - is_return: True if this is returning to a previous topic name
+    """
+    db = get_db()
+
+    # Get all spans for this session with their line ranges and idea counts
+    cursor = db.execute("""
+        SELECT s.id, s.name, s.summary, s.start_line, s.end_line,
+               COUNT(i.id) as idea_count
+        FROM spans s
+        LEFT JOIN ideas i ON i.span_id = s.id
+        WHERE s.session = ?
+        GROUP BY s.id
+        ORDER BY s.start_line ASC, s.id ASC
+    """, (session,))
+
+    spans = cursor.fetchall()
+
+    # Track seen topic names to detect returns
+    seen_names = set()
+    history = []
+
+    for row in spans:
+        span_id = row["id"]
+        name = row["name"]
+
+        # Check if this is returning to a previous topic
+        name_key = (name or "").lower().strip()[:30]
+        is_return = name_key in seen_names if name_key else False
+        if name_key:
+            seen_names.add(name_key)
+
+        # Get key ideas (decisions, conclusions) for this span
+        cursor = db.execute("""
+            SELECT content, intent
+            FROM ideas
+            WHERE span_id = ? AND intent IN ('decision', 'conclusion', 'solution')
+            ORDER BY
+                CASE intent
+                    WHEN 'decision' THEN 1
+                    WHEN 'conclusion' THEN 2
+                    ELSE 3
+                END,
+                importance DESC
+            LIMIT 3
+        """, (span_id,))
+
+        key_ideas = [
+            {"content": r["content"][:100], "type": r["intent"]}
+            for r in cursor.fetchall()
+        ]
+
+        history.append({
+            "span_id": span_id,
+            "name": name,
+            "summary": row["summary"],
+            "start_line": row["start_line"],
+            "end_line": row["end_line"],
+            "idea_count": row["idea_count"],
+            "key_ideas": key_ideas,
+            "is_return": is_return,
+        })
+
+    db.close()
+    return history
+
+
 def get_related_topics(topic_id: int | None, limit: int = 3) -> list[dict[str, Any]]:
     """
     Find related topics from other sessions.

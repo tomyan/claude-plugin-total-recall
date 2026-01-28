@@ -33,7 +33,8 @@ def format_llm_input(
     batch: Batch,
     context: dict[str, Any],
     recent_messages: list[dict[str, str]],
-    max_recent: int = 10
+    max_recent: int = 10,
+    topic_history: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """
     Format a batch and context into LLM input structure.
@@ -43,10 +44,12 @@ def format_llm_input(
         context: Hierarchy context from build_context()
         recent_messages: Recent messages for context (will be truncated)
         max_recent: Maximum number of recent messages to include
+        topic_history: Session topic history from get_session_topic_history()
 
     Returns:
         Dict structured for LLM consumption with:
         - hierarchy: project, topic, span info
+        - topic_history: previous topics in this session (for detecting returns)
         - recent_messages: context from earlier in session
         - new_messages: batch messages with line numbers
     """
@@ -71,8 +74,26 @@ def format_llm_input(
             "line": msg.line_num,
         })
 
+    # Format topic history for LLM (compact representation)
+    formatted_history = []
+    if topic_history:
+        for t in topic_history:
+            entry = {
+                "name": t.get("name"),
+                "lines": f"{t.get('start_line', '?')}-{t.get('end_line') or 'ongoing'}",
+            }
+            if t.get("is_return"):
+                entry["note"] = "RETURNING to earlier topic"
+            if t.get("key_ideas"):
+                entry["key_ideas"] = [
+                    f"[{i['type']}] {i['content']}"
+                    for i in t["key_ideas"][:2]  # Limit to 2 to save tokens
+                ]
+            formatted_history.append(entry)
+
     return {
         "hierarchy": hierarchy,
+        "topic_history": formatted_history,
         "recent_messages": truncated_recent,
         "new_messages": new_messages,
     }
