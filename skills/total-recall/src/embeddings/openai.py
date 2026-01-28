@@ -1,14 +1,25 @@
 """Async OpenAI embedding provider for total-recall."""
 
+import asyncio
+import random
 from typing import Optional
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError, APIConnectionError, RateLimitError, APITimeoutError
 
 from config import EMBEDDING_MODEL, EMBEDDING_DIM, logger, get_openai_api_key, OPENAI_KEY_FILE
 from embeddings.cache import (
     cache_embedding, get_cached_embedding, cache_source
 )
 from errors import TotalRecallError
+
+
+def _is_transient_api_error(e: Exception) -> bool:
+    """Check if an OpenAI API error is transient (worth retrying)."""
+    if isinstance(e, (RateLimitError, APITimeoutError, APIConnectionError)):
+        return True
+    if isinstance(e, APIStatusError) and e.status_code >= 500:
+        return True
+    return False
 
 
 class AsyncOpenAIEmbeddings:
@@ -46,7 +57,10 @@ class AsyncOpenAIEmbeddings:
         return self._client
 
     async def get_embedding(self, text: str, use_cache: bool = True) -> list[float]:
-        """Get embedding from OpenAI with async caching.
+        """Get embedding from OpenAI with async caching and retry.
+
+        Retries on transient errors (rate limit, timeout, server errors)
+        with exponential backoff. Permanent errors (auth, bad request) fail fast.
 
         Args:
             text: Text to embed
@@ -56,7 +70,7 @@ class AsyncOpenAIEmbeddings:
             Embedding vector (1536 floats)
 
         Raises:
-            TotalRecallError: If API key is missing or API call fails
+            TotalRecallError: If API key is missing or API call fails permanently
         """
         # Check cache first
         if use_cache:
@@ -64,28 +78,62 @@ class AsyncOpenAIEmbeddings:
             if cached is not None:
                 return cached
 
-        try:
-            client = self._get_client()
-            response = await client.embeddings.create(
-                model=self._model,
-                input=text
-            )
-            embedding = response.data[0].embedding
-        except TotalRecallError:
-            raise
-        except Exception as e:
-            logger.error(f"Async embedding API call failed: {e}")
-            raise TotalRecallError(
-                f"Failed to get embedding from OpenAI: {e}",
-                "embedding_failed",
-                {"model": self._model, "original_error": str(e)}
-            ) from e
+        embedding = await self._call_api_with_retry(text)
 
         # Cache the result
         if use_cache:
             await cache_embedding(text, embedding)
 
         return embedding
+
+    async def _call_api_with_retry(
+        self, text_or_texts, max_retries: int = 5, max_backoff: float = 60.0
+    ):
+        """Call embedding API with retry on transient errors.
+
+        Args:
+            text_or_texts: Single text string or list of texts
+            max_retries: Maximum retry attempts for transient errors
+            max_backoff: Maximum backoff delay in seconds
+
+        Returns:
+            API response
+
+        Raises:
+            TotalRecallError: On permanent errors or after max retries
+        """
+        delay = 1.0
+        for attempt in range(max_retries + 1):
+            try:
+                client = self._get_client()
+                response = await client.embeddings.create(
+                    model=self._model,
+                    input=text_or_texts
+                )
+                if attempt > 0:
+                    logger.info(f"Embedding API succeeded after {attempt + 1} attempts")
+                if isinstance(text_or_texts, str):
+                    return response.data[0].embedding
+                return response
+            except TotalRecallError:
+                raise
+            except Exception as e:
+                if _is_transient_api_error(e) and attempt < max_retries:
+                    jittered = delay * (0.5 + random.random())
+                    logger.warning(
+                        f"Transient embedding error ({type(e).__name__}), "
+                        f"retry {attempt + 1}/{max_retries} in {jittered:.1f}s"
+                    )
+                    await asyncio.sleep(jittered)
+                    delay = min(delay * 2, max_backoff)
+                else:
+                    kind = "transient (exhausted retries)" if _is_transient_api_error(e) else "permanent"
+                    logger.error(f"Embedding API {kind} error: {e}")
+                    raise TotalRecallError(
+                        f"Failed to get embedding from OpenAI: {e}",
+                        "embedding_failed",
+                        {"model": self._model, "original_error": str(e), "attempts": attempt + 1}
+                    ) from e
 
     async def get_embeddings_batch(
         self,
@@ -127,35 +175,20 @@ class AsyncOpenAIEmbeddings:
         if not texts_to_embed:
             return results  # type: ignore
 
-        try:
-            client = self._get_client()
-            # Send all uncached texts in a single request
-            batch_texts = [t for _, t in texts_to_embed]
-            response = await client.embeddings.create(
-                model=self._model,
-                input=batch_texts
-            )
+        # Call API with retry for transient errors
+        batch_texts = [t for _, t in texts_to_embed]
+        response = await self._call_api_with_retry(batch_texts)
 
-            # Map results back to original positions and cache them
-            for batch_idx, (orig_idx, text) in enumerate(texts_to_embed):
-                embedding = response.data[batch_idx].embedding
-                results[orig_idx] = embedding
+        # Map results back to original positions and cache them
+        for batch_idx, (orig_idx, text) in enumerate(texts_to_embed):
+            embedding = response.data[batch_idx].embedding
+            results[orig_idx] = embedding
 
-                # Cache the result
-                if use_cache:
-                    await cache_embedding(text, embedding)
+            # Cache the result
+            if use_cache:
+                await cache_embedding(text, embedding)
 
-            logger.debug(f"Async batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
-
-        except TotalRecallError:
-            raise
-        except Exception as e:
-            logger.error(f"Async batch embedding API call failed: {e}")
-            raise TotalRecallError(
-                f"Failed to get embeddings from OpenAI: {e}",
-                "embedding_failed",
-                {"model": self._model, "batch_size": len(texts_to_embed), "original_error": str(e)}
-            ) from e
+        logger.debug(f"Async batch embedded {len(batch_texts)} texts ({len(texts) - len(batch_texts)} cached)")
 
         return results  # type: ignore
 

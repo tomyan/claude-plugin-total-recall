@@ -213,7 +213,14 @@ async def search_related_ideas(batch_content: str, limit: int = 10) -> list[dict
             finally:
                 await db.close()
 
-        return await retry_with_backoff(do_search)
+        results = await retry_with_backoff(do_search)
+        if results:
+            high_sim = [r for r in results if r["similarity"] > 0.8]
+            logger.debug(
+                f"  Dedup context: {len(results)} related ideas "
+                f"({len(high_sim)} with >80% similarity)"
+            )
+        return results
     except Exception:
         return []
 
@@ -329,6 +336,9 @@ async def execute_ideas(
     async def do_execute():
         db = await get_async_db()
         idea_ids = []
+        inserted = 0
+        updated = 0
+        skipped = 0
         try:
             for item in items:
                 content = item.get("content")
@@ -338,7 +348,15 @@ async def execute_ideas(
                 entities = item.get("entities", [])
 
                 if not content or not source_line:
+                    skipped += 1
                     continue
+
+                # Check if this line already has an idea (for logging)
+                cursor = await db.execute(
+                    "SELECT id FROM ideas WHERE source_file = ? AND source_line = ?",
+                    (source_file, source_line)
+                )
+                existing = await cursor.fetchone()
 
                 cursor = await db.execute("""
                     INSERT INTO ideas (span_id, content, intent, confidence, source_file, source_line)
@@ -355,6 +373,11 @@ async def execute_ideas(
                 """, (source_file, source_line))
                 idea_id = (await cursor.fetchone())["id"]
                 idea_ids.append(idea_id)
+
+                if existing:
+                    updated += 1
+                else:
+                    inserted += 1
 
                 # Store entities
                 for entity_name in entities:
@@ -375,6 +398,11 @@ async def execute_ideas(
                     """, (idea_id, entity_id))
 
             await db.commit()
+
+            if updated > 0 or skipped > 0:
+                logger.info(
+                    f"  Ideas: {inserted} new, {updated} updated (re-indexed), {skipped} skipped"
+                )
             return idea_ids
         finally:
             await db.close()

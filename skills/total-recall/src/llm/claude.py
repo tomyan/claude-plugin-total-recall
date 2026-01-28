@@ -46,10 +46,10 @@ async def claude_complete(
                 logger.info(f"  LLM succeeded after {attempt} attempts")
             return result
         except TotalRecallError as e:
-            if e.code in ("claude_cli_timeout", "claude_cli_error"):
+            if e.error_code in ("claude_cli_timeout", "claude_cli_error"):
                 # Exponential backoff capped at max_backoff
                 wait_time = min(2 ** (attempt - 1), max_backoff)
-                logger.warning(f"  LLM failed (attempt {attempt}): {e.code}, retrying in {wait_time}s...")
+                logger.warning(f"  LLM failed (attempt {attempt}): {e.error_code}, retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
             else:
                 # Non-retryable error (e.g., CLI not found)

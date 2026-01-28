@@ -70,7 +70,8 @@ async def search_ideas(
     intent: Optional[str] = None,
     recency_weight: float = 0.0,
     include_forgotten: bool = False,
-    show_originals: bool = False
+    show_originals: bool = False,
+    boost_active: bool = False
 ) -> list[dict]:
     """Search for similar ideas using vector similarity (async).
 
@@ -82,6 +83,7 @@ async def search_ideas(
         recency_weight: Weight for recency (not currently used)
         include_forgotten: Include forgotten ideas if True
         show_originals: Show consolidated original ideas if True
+        boost_active: If True and session set, boost ideas active in working memory
 
     Returns:
         List of matching idea dicts
@@ -125,6 +127,25 @@ async def search_ideas(
                 results.append(dict(row))
                 if len(results) >= limit:
                     break
+
+            # Boost active ideas in working memory
+            if boost_active and session and results:
+                cursor = await db.execute("""
+                    SELECT idea_id, activation
+                    FROM working_memory
+                    WHERE session = ? AND activation > 0.1
+                """, (session,))
+                active = {row["idea_id"]: row["activation"] async for row in cursor}
+
+                if active:
+                    for r in results:
+                        if r['id'] in active:
+                            # Reduce distance proportional to activation (lower = better)
+                            boost = active[r['id']] * 0.3  # Max 30% boost
+                            r['distance'] = max(0, r['distance'] * (1 - boost))
+                            r['_boosted'] = True
+                    # Re-sort by boosted distance
+                    results.sort(key=lambda r: r['distance'])
 
             # Update access tracking for returned results
             if results:

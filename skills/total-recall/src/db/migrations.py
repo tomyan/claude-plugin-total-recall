@@ -165,6 +165,12 @@ def migrate_schema(db):
         db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_forgotten ON ideas(forgotten)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_session ON ideas(session)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_completed ON ideas(completed)")
+
+        # Composite indexes for common query patterns
+        db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_session_intent ON ideas(session, intent)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_ideas_forgotten_consolidated ON ideas(forgotten, consolidated_into)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_spans_session_topic ON spans(session, topic_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_working_memory_session_activation ON working_memory(session, activation)")
         db.commit()
     except sqlite3.OperationalError:
         pass  # Index already exists

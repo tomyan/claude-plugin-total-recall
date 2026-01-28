@@ -336,6 +336,60 @@ async def clear_embedding_cache():
     await retry_with_backoff(do_clear)
 
 
+async def prune_embedding_cache(
+    max_age_days: int = 30,
+    min_hits: int = 0,
+    dry_run: bool = False
+) -> dict:
+    """Prune old or unused cache entries.
+
+    Args:
+        max_age_days: Remove entries not accessed in this many days
+        min_hits: Only remove entries with fewer than this many hits
+        dry_run: If True, report what would be pruned without deleting
+
+    Returns:
+        Dict with pruning stats
+    """
+    async def do_prune():
+        db = await get_async_db()
+        try:
+            # Count entries that would be pruned
+            cursor = await db.execute("""
+                SELECT COUNT(*) as cnt FROM embedding_cache
+                WHERE julianday('now') - julianday(last_accessed) > ?
+                  AND hit_count <= ?
+            """, (max_age_days, min_hits))
+            row = await cursor.fetchone()
+            prune_count = row['cnt']
+
+            # Get total cache size
+            cursor = await db.execute("SELECT COUNT(*) as cnt FROM embedding_cache")
+            row = await cursor.fetchone()
+            total = row['cnt']
+
+            if not dry_run and prune_count > 0:
+                await db.execute("""
+                    DELETE FROM embedding_cache
+                    WHERE julianday('now') - julianday(last_accessed) > ?
+                      AND hit_count <= ?
+                """, (max_age_days, min_hits))
+                await db.commit()
+                logger.info(f"Pruned {prune_count} cache entries (age > {max_age_days}d, hits <= {min_hits})")
+
+            return {
+                "pruned": prune_count,
+                "remaining": total - prune_count if not dry_run else total,
+                "total_before": total,
+                "dry_run": dry_run,
+                "criteria": {"max_age_days": max_age_days, "min_hits": min_hits}
+            }
+        finally:
+            await db.close()
+
+    return await retry_with_backoff(do_prune)
+
+
 async def flush_write_queue(timeout: float = 30.0) -> bool:
     """Wait for write queue to drain.
 

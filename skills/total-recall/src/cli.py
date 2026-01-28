@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # Ensure we can import our modules
 SKILL_DIR = Path(__file__).parent.parent
@@ -53,7 +53,103 @@ Then retry your search.
     return result
 
 
-def resolve_session(args) -> str | None:
+# =============================================================================
+# Daemon Management Helpers
+# =============================================================================
+
+def _daemon_pidfile() -> Path:
+    """Return path to daemon pidfile."""
+    import config
+    return config.DB_PATH.parent / "daemon.pid"
+
+
+def _daemon_logfile() -> Path:
+    """Return path to daemon log."""
+    import config
+    return config.DB_PATH.parent / "daemon.log"
+
+
+def _daemon_pid() -> Optional[int]:
+    """Return daemon PID if running, else None."""
+    pidfile = _daemon_pidfile()
+    if not pidfile.exists():
+        return None
+    try:
+        pid = int(pidfile.read_text().strip())
+        os.kill(pid, 0)  # Check if alive
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
+        return None
+
+
+def _start_daemon() -> dict:
+    """Start the daemon process. Returns status dict."""
+    pid = _daemon_pid()
+    if pid:
+        return {"started": False, "pid": pid, "message": f"Daemon already running (PID {pid})"}
+
+    runtime_dir = RUNTIME_DIR
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(SRC_DIR)
+
+    log_file = _daemon_logfile()
+    subprocess.Popen(
+        ["uv", "run", "python", "-u", str(SRC_DIR / "daemon.py")],
+        cwd=str(runtime_dir),
+        stdout=open(log_file, "a"),
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True
+    )
+
+    # Wait briefly for PID file to appear
+    import time
+    for _ in range(10):
+        time.sleep(0.2)
+        pid = _daemon_pid()
+        if pid:
+            return {"started": True, "pid": pid, "message": f"Daemon started (PID {pid})"}
+
+    return {"started": True, "pid": None, "message": "Daemon starting (PID not yet available)"}
+
+
+def _stop_daemon() -> dict:
+    """Stop the daemon process. Returns status dict."""
+    import signal as sig
+
+    pid = _daemon_pid()
+    if not pid:
+        # Clean up stale pidfile
+        pidfile = _daemon_pidfile()
+        if pidfile.exists():
+            pidfile.unlink(missing_ok=True)
+        return {"stopped": False, "message": "Daemon is not running"}
+
+    try:
+        os.kill(pid, sig.SIGTERM)
+        # Wait for exit
+        import time
+        for _ in range(30):  # Up to 3 seconds
+            time.sleep(0.1)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return {"stopped": True, "pid": pid, "message": f"Daemon stopped (PID {pid})"}
+        # Force kill if still alive
+        try:
+            os.kill(pid, sig.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return {"stopped": True, "pid": pid, "message": f"Daemon force-killed (PID {pid})"}
+    except ProcessLookupError:
+        return {"stopped": True, "pid": pid, "message": f"Daemon already exited (PID {pid})"}
+    except PermissionError:
+        return {"stopped": False, "pid": pid, "message": f"Permission denied stopping PID {pid}"}
+
+
+def resolve_session(args) -> Optional[str]:
     """Resolve the session to search based on args.
 
     Priority:
@@ -103,7 +199,8 @@ def run_search_command(
     show_originals: bool = False,
     show_decomposition: bool = False,
     verify: bool = False,
-    explain: bool = False
+    explain: bool = False,
+    boost_active: bool = False
 ) -> dict:
     """Run search command with error handling.
 
@@ -122,7 +219,7 @@ def run_search_command(
         # Auto-analyze query for temporal/intent filters if not explicitly provided
         detected = {}
         if auto_analyze:
-            detected = asyncio.run(memory_db.analyze_query(query))
+            detected = memory_db.analyze_query(query)
             # Only use detected filters if not explicitly provided
             if not recent and not since and not until:
                 recent = detected.get("temporal")
@@ -130,7 +227,7 @@ def run_search_command(
                 intent = detected.get("intent_filter")
 
         # Check if query should be decomposed
-        decomp = asyncio.run(memory_db.decompose_query(query))
+        decomp = memory_db.decompose_query(query)
         use_decomposed = decomp["type"] != "simple" or show_decomposition
 
         if since or until or recent:
@@ -156,7 +253,8 @@ def run_search_command(
             results = asyncio.run(memory_db.search_ideas(
                 query, limit=limit, session=session, intent=intent,
                 include_forgotten=include_forgotten,
-                show_originals=show_originals
+                show_originals=show_originals,
+                boost_active=boost_active
             ))
 
         # Apply LLM relevance verification if requested
@@ -247,7 +345,8 @@ def run_command(args):
                 show_originals=getattr(args, 'show_originals', False),
                 show_decomposition=getattr(args, 'decompose', False),
                 verify=getattr(args, 'verify', False),
-                explain=getattr(args, 'explain', False)
+                explain=getattr(args, 'explain', False),
+                boost_active=getattr(args, 'boost_active', False)
             )
             if result["success"]:
                 data = result["data"]
@@ -600,32 +699,55 @@ def run_command(args):
                 print(json.dumps(result), file=sys.stderr)
                 sys.exit(1)
 
-        elif args.command == "daemon-status":
+        elif args.command == "daemon":
+            action = getattr(args, 'action', None)
+            if action == "start":
+                result = _start_daemon()
+                print(json.dumps(result, indent=2))
+            elif action == "stop":
+                result = _stop_daemon()
+                print(json.dumps(result, indent=2))
+            elif action == "restart":
+                stop_result = _stop_daemon()
+                if stop_result.get("stopped") or "not running" in stop_result.get("message", ""):
+                    start_result = _start_daemon()
+                    print(json.dumps({"stop": stop_result, "start": start_result}, indent=2))
+                else:
+                    print(json.dumps({"stop": stop_result, "start": None}, indent=2))
+                    sys.exit(1)
+            elif action == "logs":
+                log_file = _daemon_logfile()
+                if not log_file.exists():
+                    print("No daemon log file found.", file=sys.stderr)
+                    sys.exit(1)
+                tail_lines = getattr(args, 'tail', 50)
+                follow = getattr(args, 'follow', False)
+                if follow:
+                    os.execvp("tail", ["tail", "-f", str(log_file)])
+                else:
+                    lines = log_file.read_text().strip().split('\n')
+                    for line in lines[-tail_lines:]:
+                        print(line)
+            elif action == "status":
+                # Delegate to daemon-status handler
+                pass  # Falls through to daemon-status below
+            else:
+                print("Usage: total-recall daemon {start|stop|restart|logs|status}", file=sys.stderr)
+                sys.exit(1)
+
+        # daemon-status (also handles "daemon status" sub-action)
+        if args.command == "daemon-status" or (args.command == "daemon" and getattr(args, 'action', None) == "status"):
             # Report on daemon state, queue, progress
-            import config
             from datetime import datetime
 
+            pid = _daemon_pid()
             status = {
-                "daemon": {"running": False, "pid": None},
+                "daemon": {"running": pid is not None, "pid": pid},
                 "queue": {"size": 0, "files": []},
                 "progress": {"files_per_minute": 0, "estimated_remaining": None},
                 "recent_errors": [],
                 "last_activity": None
             }
-
-            # Check pidfile
-            pidfile = config.DB_PATH.parent / "daemon.pid"
-            if pidfile.exists():
-                try:
-                    pid = int(pidfile.read_text().strip())
-                    # Check if process is running
-                    import subprocess
-                    result = subprocess.run(["kill", "-0", str(pid)], capture_output=True)
-                    if result.returncode == 0:
-                        status["daemon"]["running"] = True
-                        status["daemon"]["pid"] = pid
-                except (ValueError, OSError):
-                    pass
 
             # Check queue
             async def get_queue_info():
@@ -654,7 +776,7 @@ def run_command(args):
             status["queue"]["files"] = queue_files
 
             # Check log for recent activity and errors
-            log_file = config.DB_PATH.parent / "daemon.log"
+            log_file = _daemon_logfile()
             if log_file.exists():
                 try:
                     lines = log_file.read_text().strip().split('\n')[-100:]
@@ -701,6 +823,15 @@ def run_command(args):
                 stats = asyncio.run(get_embedding_cache_stats())
                 print(json.dumps(stats, indent=2, default=str))
 
+        elif args.command == "cache-prune":
+            from embeddings.cache import prune_embedding_cache
+            result = asyncio.run(prune_embedding_cache(
+                max_age_days=getattr(args, 'max_age_days', 30),
+                min_hits=getattr(args, 'min_hits', 0),
+                dry_run=getattr(args, 'dry_run', False)
+            ))
+            print(json.dumps(result, indent=2))
+
         elif args.command == "backfill":
             # Check for API key FIRST - refuse to backfill without it
             from config import get_openai_api_key
@@ -730,31 +861,9 @@ def run_command(args):
                 sys.exit(1)
 
             # Ensure daemon is running
-            runtime_dir = Path.home() / ".claude-plugin-total-recall"
-            pidfile = runtime_dir / "daemon.pid"
-            daemon_running = False
-
-            if pidfile.exists():
-                try:
-                    pid = int(pidfile.read_text().strip())
-                    os.kill(pid, 0)  # Check if process exists
-                    daemon_running = True
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pidfile.unlink(missing_ok=True)
-
-            if not daemon_running:
-                skill_dir = Path.home() / ".claude" / "skills" / "total-recall"
-                env = os.environ.copy()
-                env["PYTHONPATH"] = str(skill_dir / "src")
-                subprocess.Popen(
-                    ["uv", "run", "python", "-u", str(skill_dir / "src" / "daemon.py")],
-                    cwd=str(runtime_dir),
-                    stdout=open(runtime_dir / "daemon.log", "a"),
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    start_new_session=True
-                )
-                print("Started background daemon")
+            if not _daemon_pid():
+                result = _start_daemon()
+                print(result["message"])
 
             # Show progress
             progress = get_progress()
@@ -1507,6 +1616,8 @@ def main():
                           help="Use LLM to verify and score result relevance")
     search_p.add_argument("--explain", action="store_true",
                           help="Include LLM explanation for relevance scores (implies --verify)")
+    search_p.add_argument("--boost-active", action="store_true",
+                          help="Boost ideas active in working memory (recently accessed)")
 
     # hybrid
     hybrid_p = subparsers.add_parser("hybrid", help="Hybrid vector+keyword search")
@@ -1594,12 +1705,29 @@ def main():
     # stats
     subparsers.add_parser("stats", help="Show database statistics")
 
-    # daemon-status
+    # daemon management
+    daemon_p = subparsers.add_parser("daemon", help="Manage the indexing daemon")
+    daemon_sub = daemon_p.add_subparsers(dest="action")
+    daemon_sub.add_parser("start", help="Start the daemon")
+    daemon_sub.add_parser("stop", help="Stop the daemon")
+    daemon_sub.add_parser("restart", help="Restart the daemon")
+    daemon_sub.add_parser("status", help="Show daemon status")
+    daemon_logs_p = daemon_sub.add_parser("logs", help="Show daemon logs")
+    daemon_logs_p.add_argument("-n", "--tail", type=int, default=50, help="Number of lines to show")
+    daemon_logs_p.add_argument("-f", "--follow", action="store_true", help="Follow log output (like tail -f)")
+
+    # daemon-status (legacy alias)
     subparsers.add_parser("daemon-status", help="Show daemon status, queue size, and progress")
 
     # cache-stats
     cache_stats_p = subparsers.add_parser("cache-stats", help="Show embedding cache statistics")
     cache_stats_p.add_argument("--clear", action="store_true", help="Clear the cache and reset stats")
+
+    # cache-prune
+    cache_prune_p = subparsers.add_parser("cache-prune", help="Prune old/unused embedding cache entries")
+    cache_prune_p.add_argument("--max-age-days", type=int, default=30, help="Remove entries not accessed in N days (default: 30)")
+    cache_prune_p.add_argument("--min-hits", type=int, default=0, help="Only remove entries with <= N hits (default: 0)")
+    cache_prune_p.add_argument("--dry-run", action="store_true", help="Show what would be pruned without deleting")
 
     # backfill (async - enqueues for daemon)
     backfill_p = subparsers.add_parser("backfill", help="Enqueue transcripts for background indexing")

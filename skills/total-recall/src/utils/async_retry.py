@@ -9,6 +9,21 @@ from config import logger
 
 T = TypeVar('T')
 
+# SQLite error messages that indicate transient conditions
+_TRANSIENT_SQLITE_ERRORS = {"locked", "busy", "disk i/o error"}
+
+# Permanent SQLite errors that should not be retried
+_PERMANENT_SQLITE_ERRORS = {"no such table", "no such column", "syntax error"}
+
+
+def _is_transient_sqlite(e: sqlite3.OperationalError) -> bool:
+    """Check if a SQLite error is transient (worth retrying)."""
+    msg = str(e).lower()
+    for pattern in _TRANSIENT_SQLITE_ERRORS:
+        if pattern in msg:
+            return True
+    return False
+
 
 async def retry_with_backoff(
     func: Callable[..., T],
@@ -17,9 +32,11 @@ async def retry_with_backoff(
     initial_delay: float = 0.1,
     **kwargs
 ) -> T:
-    """Execute async function with exponential backoff on database lock.
+    """Execute async function with exponential backoff on transient errors.
 
-    Retries indefinitely until success, with exponential backoff capped at max_delay.
+    Retries indefinitely on transient SQLite errors (locked, busy, disk I/O),
+    with exponential backoff capped at max_delay. Permanent errors (schema,
+    syntax) are raised immediately.
 
     Args:
         func: Async function to execute
@@ -32,20 +49,24 @@ async def retry_with_backoff(
         Result of func
 
     Raises:
-        Any non-lock exceptions from func
+        sqlite3.OperationalError: For permanent SQLite errors
+        Any other exceptions from func
     """
     delay = initial_delay
+    attempt = 0
 
     while True:
         try:
             return await func(*args, **kwargs)
         except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower():
+            attempt += 1
+            if _is_transient_sqlite(e):
                 # Add jitter to prevent thundering herd
                 jittered_delay = delay * (0.5 + random.random())
-                logger.debug(f"Database locked, retrying in {jittered_delay:.2f}s")
+                logger.debug(f"Transient DB error ({e}), retry #{attempt} in {jittered_delay:.2f}s")
                 await asyncio.sleep(jittered_delay)
                 # Exponential backoff with cap
                 delay = min(delay * 2, max_delay)
             else:
+                logger.error(f"Permanent DB error (not retrying): {e}")
                 raise
