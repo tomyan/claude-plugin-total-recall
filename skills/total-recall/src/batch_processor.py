@@ -6,6 +6,7 @@ import os
 from typing import Any, Optional
 
 from batcher import collect_batches, BatcherError
+from config import logger
 from context import build_context
 from db.async_connection import get_async_db
 from embeddings.openai import get_embedding
@@ -264,9 +265,11 @@ RULES:
     user_parts.append('{"topic_update": {"name": "topic name", "summary": "..."}, "items": [...]}')
 
     user_prompt = "\n".join(user_parts)
+    prompt_tokens = len(user_prompt) // 4  # Rough estimate
 
     try:
         # Call async LLM function
+        logger.info(f"  LLM call: ~{prompt_tokens} tokens, {len(prompt)} messages")
         response = await claude_complete(user_prompt, system_prompt)
 
         # Parse JSON from response

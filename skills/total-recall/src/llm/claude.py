@@ -14,27 +14,47 @@ from llm.tools import INDEXING_TOOLS, execute_tool
 async def claude_complete(
     prompt: str,
     system: Optional[str] = None,
-    model: str = "haiku"
+    model: str = "haiku",
+    max_retries: int = 2,
+    timeout: int = 30
 ) -> str:
     """Call Claude CLI non-interactively for LLM tasks (async).
 
     Runs the sync implementation in a thread pool for async compatibility.
+    Includes retry logic with exponential backoff for timeouts.
 
     Args:
         prompt: The user prompt
         system: Optional system prompt
         model: Model to use (default: haiku for speed)
+        max_retries: Number of retries on timeout (default: 2)
+        timeout: Timeout in seconds (default: 30)
 
     Returns:
         The response text
     """
-    return await asyncio.to_thread(_claude_complete_sync, prompt, system, model)
+    prompt_preview = prompt[:80].replace('\n', ' ') + '...' if len(prompt) > 80 else prompt.replace('\n', ' ')
+
+    for attempt in range(max_retries + 1):
+        try:
+            logger.debug(f"LLM call attempt {attempt + 1}/{max_retries + 1}: {prompt_preview}")
+            result = await asyncio.to_thread(_claude_complete_sync, prompt, system, model, timeout)
+            logger.debug(f"LLM call succeeded (attempt {attempt + 1})")
+            return result
+        except TotalRecallError as e:
+            if e.code == "claude_cli_timeout" and attempt < max_retries:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s...
+                logger.warning(f"LLM timeout (attempt {attempt + 1}), retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
 
 
 def _claude_complete_sync(
     prompt: str,
     system: Optional[str] = None,
-    model: str = "haiku"
+    model: str = "haiku",
+    timeout: int = 30
 ) -> str:
     """Call Claude CLI non-interactively for LLM tasks.
 
@@ -45,6 +65,7 @@ def _claude_complete_sync(
         prompt: The user prompt
         system: Optional system prompt
         model: Model to use (default: haiku for speed)
+        timeout: Timeout in seconds (default: 30)
 
     Returns:
         The response text
@@ -65,7 +86,7 @@ def _claude_complete_sync(
             cmd,
             capture_output=True,
             text=True,
-            timeout=60,  # 60 second timeout
+            timeout=timeout,
             env=env
         )
 
@@ -99,7 +120,7 @@ def _claude_complete_sync(
 
     except subprocess.TimeoutExpired:
         raise TotalRecallError(
-            "Claude CLI timed out after 60 seconds",
+            f"Claude CLI timed out after {timeout} seconds",
             "claude_cli_timeout"
         )
     except FileNotFoundError:

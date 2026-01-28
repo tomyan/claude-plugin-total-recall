@@ -63,7 +63,7 @@ except ImportError:
 # Daemon settings
 POLL_INTERVAL = 2  # seconds between queue checks
 IDLE_TIMEOUT = 300  # seconds of idle before exit (0 = never)
-PARALLEL_WORKERS = 8  # number of transcripts to process in parallel
+PARALLEL_WORKERS = 2  # number of transcripts to process in parallel (reduced to avoid overwhelming LLM)
 HEARTBEAT_INTERVAL = 60  # log heartbeat every N seconds
 
 
