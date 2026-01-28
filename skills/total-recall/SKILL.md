@@ -96,7 +96,7 @@ mkdir -p "$HOME/.claude-plugin-total-recall"
 ```bash
 cd "$HOME/.claude-plugin-total-recall"
 uv init --name total-recall --no-readme 2>/dev/null || true
-uv add sqlite-vec openai 2>/dev/null || uv sync
+uv add sqlite-vec openai aiosqlite 2>/dev/null || uv sync
 ```
 
 **3. Initialize database** (creates the memory database with schema):
