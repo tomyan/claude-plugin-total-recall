@@ -266,8 +266,8 @@ RULES:
     user_prompt = "\n".join(user_parts)
 
     try:
-        # Run blocking LLM call in thread pool
-        response = await asyncio.to_thread(claude_complete, user_prompt, system_prompt)
+        # Call async LLM function
+        response = await claude_complete(user_prompt, system_prompt)
 
         # Parse JSON from response
         text = response.strip()
