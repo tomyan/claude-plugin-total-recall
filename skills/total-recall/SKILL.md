@@ -8,16 +8,15 @@ allowed-tools:
   - Grep
   - Bash(~/.claude/skills/total-recall/bin/total-recall :*)
   - Bash(bash ~/.claude/skills/total-recall/hooks/:*)
-# hooks disabled for performance testing
-# hooks:
-#   UserPromptSubmit:
-#     - hooks:
-#         - type: command
-#           command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
-#   Stop:
-#     - hooks:
-#         - type: command
-#           command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
+hooks:
+  UserPromptSubmit:
+    - hooks:
+        - type: command
+          command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
+  Stop:
+    - hooks:
+        - type: command
+          command: bash ~/.claude/skills/total-recall/hooks/index-continuous.sh
 ---
 
 # Memory Retrieval Skill
