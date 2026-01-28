@@ -741,8 +741,26 @@ async def backfill_session(self, file_path: str):
 | 5.2 Format Agent Input | ✅ | e7926a4 |
 | 5.3 System Prompt | ✅ | e7926a4 |
 | 5.4 Run Indexing Agent | ✅ | e7926a4 |
-| 5.5 Continuous Daemon | ⏳ | |
-| 5.6 Backfill Mode | ⏳ | |
-| 6.1 Integration Continuous | ⏳ | |
-| 6.2 Integration Backfill | ⏳ | |
-| 6.3 Performance | ⏳ | |
+| 5.5 Continuous Daemon | ✅ | (current) |
+| 5.6 Backfill Mode | ✅ | (current) |
+| 6.1 Integration Continuous | ✅ | (current) |
+| 6.2 Integration Backfill | ✅ | (current) |
+| 6.3 Performance | ✅ | (current) |
+
+## Summary
+
+All 34 slices complete! The indexing agent implementation includes:
+
+- **Entity MDM**: Mention records, golden entities, fuzzy matching resolution
+- **Agent Tools**: 7 tools for searching and querying existing knowledge
+- **Agent Harness**: Multi-turn conversation loop with tool execution
+- **Output Executor**: Processes agent output to store ideas, relations, topics
+- **Pipeline**: Batch collector, agent input formatter, system prompt
+- **Daemon Integration**: Continuous mode with batch window, backfill mode
+- **Testing**: 170+ new tests including integration and performance baselines
+
+Key improvements over previous approach:
+- Single LLM call per batch (vs per-message batch previously)
+- Tool use enables agent to search existing knowledge before extracting
+- Relations created between ideas automatically
+- Entity resolution with MDM pattern
